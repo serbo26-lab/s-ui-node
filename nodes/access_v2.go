@@ -1,0 +1,344 @@
+package nodes
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"sync"
+	"time"
+
+	"github.com/alireza0/s-ui/database"
+	"github.com/alireza0/s-ui/database/model"
+	"github.com/alireza0/s-ui/nodeagent"
+	"github.com/gofrs/uuid/v5"
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
+)
+
+var accessLocks sync.Map
+
+func effectiveUserName(tx *gorm.DB, node model.Node, client model.Client) string {
+	name := userName(client)
+	if node.AgentProtocol == 2 && (node.AssignmentMode == model.NodeAssignmentWhole || node.AssignmentMode == model.NodeAssignmentActivating) {
+		var grant model.ClientNode
+		if tx.First(&grant, "client_id = ? AND node_id = ? AND active = ?", client.Id, node.Id, true).Error == nil {
+			name += fmt.Sprintf("/n%d", grant.Generation)
+		}
+	}
+	return name
+}
+
+// Does not parse Node.Config, templates, TLS or inbound Options. A broken new
+// structural draft cannot prevent constructing a complete revocation snapshot.
+func compileAccess(tx *gorm.DB, node model.Node, extended, proxies bool) (nodeagent.AccessSnapshot, error) {
+	a := nodeagent.AccessSnapshot{NodeID: uint64(node.Id), Epoch: node.ControlEpoch, Clients: []nodeagent.Grant{}}
+	if !node.Enable {
+		return a, nil
+	}
+	var clients []model.Client
+	tags := map[uint][]string{}
+	query := tx.Model(&model.Client{})
+	if node.AssignmentMode == model.NodeAssignmentWhole || node.AssignmentMode == model.NodeAssignmentActivating {
+		query = query.Joins("JOIN client_nodes AS binding ON binding.client_id = clients.id").Where("binding.node_id = ? AND binding.active = ?", node.Id, true)
+	} else {
+		query = query.Joins("JOIN client_node_inbounds AS binding ON binding.client_id = clients.id").Joins("JOIN node_inbounds AS ni ON ni.id = binding.node_inbound_id").Where("ni.node_id = ?", node.Id).Distinct("clients.*")
+		var bindings []model.ClientNodeInbound
+		if err := tx.Model(&model.ClientNodeInbound{}).Select("client_node_inbounds.*").Joins("JOIN node_inbounds AS ni ON ni.id = client_node_inbounds.node_inbound_id").Where("ni.node_id = ?", node.Id).Order("client_id, node_inbound_id").Find(&bindings).Error; err != nil {
+			return a, err
+		}
+		for _, binding := range bindings {
+			tags[binding.ClientId] = append(tags[binding.ClientId], serverTag(node.Id, binding.NodeInboundId))
+		}
+	}
+	if err := query.Where("clients.enable = ?", true).Order("clients.id").Find(&clients).Error; err != nil {
+		return a, err
+	}
+	for _, client := range clients {
+		if client.Expiry > 0 && client.Expiry <= time.Now().Unix() {
+			continue
+		}
+		var config map[string]json.RawMessage
+		if json.Unmarshal(client.Config, &config) != nil {
+			continue
+		} // corrupt clients fail closed individually
+		g := nodeagent.Grant{Name: effectiveUserName(tx, node, client), Expires: client.Expiry, All: (node.AssignmentMode == model.NodeAssignmentWhole || node.AssignmentMode == model.NodeAssignmentActivating), Tags: tags[client.Id], Credentials: map[string]json.RawMessage{}}
+		changed := false
+		if config == nil {
+			config = map[string]json.RawMessage{}
+		}
+		protocols := nodeagent.InboundTypes(extended)
+		if proxies {
+			protocols = append(protocols, "shadowsocks16")
+		}
+		for _, kind := range protocols {
+			if nodeagent.ProxyInbound(kind) && !proxies {
+				continue
+			}
+			raw := config[kind]
+			if nodeagent.ExtendedInbound(kind) || kind == "shadowsocks16" {
+				if len(raw) == 0 || string(raw) == "null" {
+					var err error
+					raw, err = newNodeCredential(kind, client.Name)
+					if err != nil {
+						return a, err
+					}
+					config[kind], changed = raw, true
+				}
+				if nodeagent.ValidateCredential(kind, raw) != nil {
+					continue
+				}
+			}
+			if len(raw) > 0 {
+				g.Credentials[kind] = raw
+			}
+		}
+		probe := a
+		probe.Revision = 1
+		probe.Clients = []nodeagent.Grant{g}
+		if probe.Validate() != nil {
+			continue
+		}
+		if changed {
+			data, err := json.Marshal(config)
+			if err != nil {
+				return a, err
+			}
+			if err := tx.Model(&client).Update("config", json.RawMessage(data)).Error; err != nil {
+				return a, err
+			}
+		}
+		a.Clients = append(a.Clients, g)
+	}
+	return a, nil
+}
+
+func newNodeCredential(kind, name string) (json.RawMessage, error) {
+	value := map[string]any{"name": name}
+	if nodeagent.UsernameAuth(kind) {
+		value = map[string]any{"username": name}
+	}
+	if nodeagent.NeedsUUID(kind) {
+		id, err := uuid.NewV4()
+		if err != nil {
+			return nil, err
+		}
+		value["uuid"] = id.String()
+	} else {
+		size := 24
+		encoding := base64.RawURLEncoding
+		switch kind {
+		case "shadowsocks":
+			size, encoding = 32, base64.StdEncoding
+		case "shadowsocks16":
+			size, encoding = 16, base64.StdEncoding
+		}
+		secret := make([]byte, size)
+		if _, err := rand.Read(secret); err != nil {
+			return nil, err
+		}
+		value[nodeagent.SecretField(kind)] = encoding.EncodeToString(secret)
+	}
+	return json.Marshal(value)
+}
+
+func prepareAccess(db *gorm.DB, node model.Node, status nodeagent.StatusV2) (nodeagent.AccessSnapshot, error) {
+	var desired nodeagent.AccessSnapshot
+	err := db.Transaction(func(tx *gorm.DB) error {
+		var current model.Node
+		if err := tx.First(&current, node.Id).Error; err != nil {
+			return err
+		}
+		if current.ManagementGeneration != node.ManagementGeneration || current.ControlEpoch != status.Epoch || current.Address != node.Address {
+			return errors.New("access_target_changed")
+		}
+		var state model.NodeAccessState
+		err := tx.First(&state, "node_id = ?", node.Id).Error
+		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+		state.NodeId = node.Id
+		if status.AccessRevision > state.DesiredRevision {
+			return errors.New("access_state_rollback_detected")
+		}
+		if state.DesiredRevision > 0 && status.AccessRevision == state.DesiredRevision {
+			var planned nodeagent.AccessSnapshot
+			if json.Unmarshal(state.DesiredSnapshot, &planned) != nil || planned.Digest() != status.AccessDigest {
+				return errors.New("access_state_rollback_or_conflict_detected")
+			}
+		}
+		fresh, err := compileAccess(tx, current, extendedInboundsAvailable(tx, current, status), proxyInboundsAvailable(tx, current, status))
+		if err != nil {
+			return err
+		}
+		body, _ := json.Marshal(fresh)
+		fingerprint := versionDigest(body)
+		if state.DesiredRevision == 0 || state.DesiredFingerprint != fingerprint {
+			state.DesiredRevision++
+			fresh.Revision = state.DesiredRevision
+			if err := fresh.Validate(); err != nil {
+				return err
+			}
+			state.DesiredFingerprint = fingerprint
+			state.DesiredSnapshot, _ = json.Marshal(fresh)
+			if err := tx.Save(&state).Error; err != nil {
+				return err
+			}
+		}
+		return json.Unmarshal(state.DesiredSnapshot, &desired)
+	})
+	return desired, err
+}
+
+func ReconcileAccess(ctx context.Context, id uint) (failure error) {
+	lock, _ := accessLocks.LoadOrStore(id, &sync.Mutex{})
+	lock.(*sync.Mutex).Lock()
+	defer lock.(*sync.Mutex).Unlock()
+	db := database.GetDB()
+	var node model.Node
+	if err := db.First(&node, id).Error; err != nil {
+		return err
+	}
+	if node.AgentProtocol != 2 {
+		return nil
+	}
+	if err := db.Transaction(func(tx *gorm.DB) error {
+		var current model.Node
+		if err := tx.First(&current, id).Error; err != nil {
+			return err
+		}
+		return tx.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "node_id"}, {Name: "kind"}}, DoNothing: true}).Create(&model.NodeTask{NodeId: id, Kind: "access", Generation: 1, State: "queued"}).Error
+	}); err != nil {
+		return err
+	}
+	var task model.NodeTask
+	if err := db.First(&task, "node_id = ? AND kind = ?", id, "access").Error; err != nil {
+		return err
+	}
+	if task.NextAttempt > time.Now().Unix() {
+		return nil
+	}
+	token, err := uuid.NewV4()
+	if err != nil {
+		return err
+	}
+	lease := token.String()
+	result := db.Model(&model.NodeTask{}).Where("id = ? AND lease_until < ?", task.Id, time.Now().Unix()).Updates(map[string]interface{}{"lease_token": lease, "lease_until": time.Now().Unix() + 90})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return nil
+	}
+	defer func() {
+		_ = db.Transaction(func(tx *gorm.DB) error {
+			var latest model.NodeTask
+			if err := tx.First(&latest, "id = ? AND lease_token = ?", task.Id, lease).Error; err != nil {
+				return err
+			}
+			updates := map[string]interface{}{"lease_token": "", "lease_until": 0}
+			if latest.Generation != task.Generation {
+				updates["state"] = "queued"
+				updates["next_attempt"] = 0
+			} else if failure == nil {
+				updates["state"] = "done"
+				updates["last_error"] = ""
+				updates["attempts"] = 0
+				updates["next_attempt"] = 0
+			} else {
+				delay := int64(1) << min(latest.Attempts, 5)
+				updates["state"] = "queued"
+				updates["last_error"] = "access_delivery_failed"
+				updates["attempts"] = latest.Attempts + 1
+				updates["next_attempt"] = time.Now().Unix() + delay
+			}
+			return tx.Model(&latest).Updates(updates).Error
+		})
+		if failure != nil {
+			code := "access_delivery_failed"
+			switch failure.Error() {
+			case "access_state_rollback_detected", "access_state_rollback_or_conflict_detected", "agent_epoch_changed_recovery_required":
+				code = failure.Error()
+			}
+			_ = db.Transaction(func(tx *gorm.DB) error {
+				var current model.Node
+				if err := tx.First(&current, id).Error; err != nil {
+					return err
+				}
+				if current.ManagementGeneration != node.ManagementGeneration || current.ControlEpoch != node.ControlEpoch {
+					return nil
+				}
+				row := model.NodeAccessState{NodeId: id, LastError: code}
+				return tx.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "node_id"}}, DoUpdates: clause.Assignments(map[string]interface{}{"last_error": code})}).Create(&row).Error
+			})
+		}
+	}()
+	client, closeClient, err := controlClient(ctx, node)
+	if err != nil {
+		return err
+	}
+	defer closeClient()
+	status, err := getStatusV2(ctx, client, node)
+	if err != nil {
+		return err
+	}
+	desired, err := prepareAccess(db, node, status)
+	if err != nil {
+		return err
+	}
+	if status.AppliedAccessRevision != desired.Revision || status.AppliedAccessDigest != desired.Digest() || !status.Running {
+		status, err = putV2(ctx, client, node, "/v2/access", desired)
+		if err != nil {
+			return err
+		}
+	}
+	if status.AppliedAccessRevision != desired.Revision || status.AppliedAccessDigest != desired.Digest() {
+		return errors.New("access_ack_mismatch")
+	}
+	body, _ := json.Marshal(desired)
+	return db.Transaction(func(tx *gorm.DB) error {
+		var target model.Node
+		if err := tx.First(&target, id).Error; err != nil {
+			return err
+		}
+		if target.ManagementGeneration != node.ManagementGeneration || target.ControlEpoch != node.ControlEpoch {
+			return errors.New("management_target_changed")
+		}
+		if err := tx.Model(&model.NodeAccessState{}).Where("node_id = ? AND applied_revision <= ?", id, desired.Revision).Updates(map[string]interface{}{"applied_revision": desired.Revision, "applied_snapshot": json.RawMessage(body), "applied_digest": desired.Digest(), "last_error": ""}).Error; err != nil {
+			return err
+		}
+		var current model.Node
+		if err := tx.First(&current, id).Error; err != nil {
+			return err
+		}
+		return finishMigration(tx, current, status)
+	})
+}
+
+func accessLoop(ctx context.Context) {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		var nodes []model.Node
+		if database.GetDB().Where("agent_protocol = ?", 2).Find(&nodes).Error == nil {
+			limit := make(chan struct{}, 4)
+			var wait sync.WaitGroup
+			for _, node := range nodes {
+				if ctx.Err() != nil {
+					break
+				}
+				limit <- struct{}{}
+				wait.Add(1)
+				go func(id uint) { defer wait.Done(); defer func() { <-limit }(); _ = ReconcileAccess(ctx, id) }(node.Id)
+			}
+			wait.Wait()
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}

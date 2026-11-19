@@ -7,6 +7,7 @@ import (
 
 	"github.com/alireza0/s-ui/database"
 	"github.com/alireza0/s-ui/database/model"
+	"github.com/alireza0/s-ui/nodes"
 	"github.com/alireza0/s-ui/service"
 	"github.com/alireza0/s-ui/util"
 )
@@ -56,10 +57,16 @@ func (j *JsonService) GetJson(subId string, format string) (*string, []string, e
 		return nil, nil, err
 	}
 
-	outbounds, outTags, err := j.getOutbounds(client.Config, inDatas, nodeRemark(&j.SettingService, client))
+	remote, err := nodes.NewNativeSubscription(database.GetDB(), *client)
 	if err != nil {
 		return nil, nil, err
 	}
+	outbounds, outTags, err := j.getOutbounds(client.Config, append(inDatas, remote.Inbounds...), nodeRemark(&j.SettingService, client), remote.Capture)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	remote.AddTransports(outbounds, outTags, uniqueOutboundTag)
 
 	extOutbounds, extTags := j.LinkService.GetExternalOutbounds(&client.Links)
 	*outbounds = append(*outbounds, extOutbounds...)
@@ -139,15 +146,25 @@ func applyDefaultHost(out map[string]interface{}) {
 	}
 }
 
-func (j *JsonService) getOutbounds(clientConfig json.RawMessage, inbounds []*model.Inbound, clientRemark string) (*[]map[string]interface{}, *[]string, error) {
+func (j *JsonService) getOutbounds(clientConfig json.RawMessage, inbounds []*model.Inbound, clientRemark string, selectable func(*model.Inbound, map[string]interface{}, map[string]bool) bool) (*[]map[string]interface{}, *[]string, error) {
 	var outbounds []map[string]interface{}
 	var configs map[string]interface{}
 	var outTags []string
 	takenTags := make(map[string]bool)
-
 	err := json.Unmarshal(clientConfig, &configs)
 	if err != nil {
 		return nil, nil, err
+	}
+	push := func(inbound *model.Inbound, outbound map[string]interface{}, tag string) {
+		if selectable != nil && !selectable(inbound, outbound, takenTags) {
+			return
+		}
+		if inbound.Type == "mixed" {
+			j.pushMixed(&outbounds, &outTags, outbound)
+		} else {
+			outTags = append(outTags, tag)
+			outbounds = append(outbounds, outbound)
+		}
 	}
 	for _, inData := range inbounds {
 		if len(inData.OutJson) < 5 {
@@ -216,13 +233,7 @@ func (j *JsonService) getOutbounds(clientConfig json.RawMessage, inbounds []*mod
 			tag = util.JoinRemark(clientRemark, tag)
 			takenTags[tag] = true
 			outbound["tag"] = tag
-			// For mixed protocol, use separated socks and http
-			if protocol == "mixed" {
-				j.pushMixed(&outbounds, &outTags, outbound)
-			} else {
-				outTags = append(outTags, tag)
-				outbounds = append(outbounds, outbound)
-			}
+			push(inData, outbound, tag)
 		} else {
 			for _, addr := range addrs {
 				// Copy original config
@@ -261,13 +272,7 @@ func (j *JsonService) getOutbounds(clientConfig json.RawMessage, inbounds []*mod
 				newTag := uniqueOutboundTag(util.JoinRemark(clientRemark, tag+remark), takenTags)
 				takenTags[newTag] = true
 				newOut["tag"] = newTag
-				// For mixed protocol, use separated socks and http
-				if protocol == "mixed" {
-					j.pushMixed(&outbounds, &outTags, newOut)
-				} else {
-					outTags = append(outTags, newTag)
-					outbounds = append(outbounds, newOut)
-				}
+				push(inData, newOut, newTag)
 			}
 		}
 	}

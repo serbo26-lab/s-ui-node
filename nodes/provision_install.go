@@ -1,0 +1,176 @@
+package nodes
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"golang.org/x/crypto/ssh"
+)
+
+func agentArtifact(arch string) (string, string, error) {
+	if arch != "amd64" && arch != "arm64" {
+		return "", "", errors.New("unsupported_architecture")
+	}
+	folder, err := agentArtifactsDirectory()
+	if err != nil {
+		return "", "", err
+	}
+	file := filepath.Join(folder, "s-ui-node-linux-"+arch)
+	f, err := os.Open(file)
+	if err != nil {
+		return "", "", err
+	}
+	defer f.Close()
+	stat, err := f.Stat()
+	if err != nil || !stat.Mode().IsRegular() {
+		return "", "", errors.New("invalid agent artifact")
+	}
+	h := sha256.New()
+	if _, err = io.Copy(h, f); err != nil {
+		return "", "", err
+	}
+	digest := hex.EncodeToString(h.Sum(nil))
+	manifest, err := os.ReadFile(file + ".sha256")
+	if err != nil || len(strings.Fields(string(manifest))) == 0 || strings.Fields(string(manifest))[0] != digest {
+		return "", "", errors.New("agent checksum mismatch")
+	}
+	bundle, err := readAgentBundle()
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return "", "", err
+	}
+	if err == nil && bundle.Agents[arch] != digest {
+		return "", "", errors.New("agent bundle checksum mismatch")
+	}
+	return file, digest, nil
+}
+
+func agentArtifactsDirectory() (string, error) {
+	if dir := os.Getenv("SUI_NODE_AGENT_DIR"); dir != "" {
+		return dir, nil
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(filepath.Dir(executable), "agents"), nil
+}
+
+func parseProvisionSSHKey(key string) (string, error) {
+	s, err := ssh.ParsePrivateKey([]byte(key))
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(ssh.MarshalAuthorizedKey(s.PublicKey()))), nil
+}
+
+func uploadAgent(ctx context.Context, client *ssh.Client, user string, id uint, path, digest string) error {
+	file, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	script := fmt.Sprintf(`import hashlib,json,os,sys
+from pathlib import Path
+folder=Path('/opt/s-ui-nodes/%d')
+if folder.is_symlink():raise SystemExit('invalid install directory')
+folder.mkdir(parents=True,exist_ok=True,mode=0o755)
+target=folder/'agent.next'
+fd=os.open(target,os.O_WRONLY|os.O_CREAT|os.O_TRUNC|os.O_NOFOLLOW,0o600)
+h=hashlib.sha256()
+with os.fdopen(fd,'wb') as output:
+ while True:
+  data=sys.stdin.buffer.read(1<<20)
+  if not data:break
+  output.write(data);h.update(data)
+ output.flush();os.fsync(output.fileno())
+if h.hexdigest()!='%s':target.unlink();raise SystemExit('checksum mismatch')
+print(json.dumps({'verified':True}))
+`, id, digest)
+	_, err = remoteStream(ctx, client, user, script, file)
+	return err
+}
+
+const installAgentScript = `import hashlib,json,os,pwd,shutil,subprocess,sys
+from pathlib import Path
+p=json.load(sys.stdin);ident=int(p['id']);name='s-ui-node-'+str(ident)
+assert ident>0 and 1024<=int(p['control_port'])<=65535
+base=Path('/opt/s-ui-nodes')/str(ident);creds=Path('/etc/s-ui-nodes')/str(ident)
+unit=Path('/etc/systemd/system')/(name+'.service');marker='# S-UI managed node '+str(ident)
+if unit.exists() and marker not in unit.read_text():raise SystemExit('service name occupied')
+if creds.is_symlink() or base.is_symlink():raise SystemExit('unsafe path')
+creds.mkdir(parents=True,mode=0o700,exist_ok=True);os.chmod(creds,0o700)
+incoming=base/'agent.next';binary=base/'agent'
+if hashlib.sha256(incoming.read_bytes()).hexdigest()!=p['sha256']:raise SystemExit('checksum mismatch')
+account=pwd.getpwnam(p['ssh_user']);sshdir=Path(account.pw_dir)/'.ssh'
+sshdir.mkdir(mode=0o700,exist_ok=True);authorized=sshdir/'authorized_keys'
+prior=authorized.read_text() if authorized.exists() else ''
+key=p['authorized_key'].strip();keymarker='s-ui-managed-node-'+str(ident)
+lines=[line for line in prior.splitlines() if not line.endswith(' '+keymarker)]
+lines.append('restrict,port-forwarding,permitopen="127.0.0.1:'+str(p['control_port'])+'" '+key+' '+keymarker)
+authorized.write_text('\n'.join(lines)+'\n');os.chmod(authorized,0o600);os.chown(sshdir,account.pw_uid,account.pw_gid);os.chown(authorized,account.pw_uid,account.pw_gid)
+oldunit=unit.read_bytes() if unit.exists() else None
+oldcreds={n:(creds/n).read_bytes() for n in ['ca.pem','cert.pem','key.pem'] if (creds/n).exists()}
+oldbinary=binary.exists()
+if oldbinary:shutil.copy2(binary,base/'agent.previous')
+def write_private(path,body):
+ tmp=path.with_suffix(path.suffix+'.new')
+ fd=os.open(tmp,os.O_WRONLY|os.O_CREAT|os.O_TRUNC|os.O_NOFOLLOW,0o600)
+ with os.fdopen(fd,'wb') as file:file.write(body);file.flush();os.fsync(file.fileno())
+ os.replace(tmp,path);os.chmod(path,0o600)
+try:
+ for n,keyname in [('ca.pem','ca'),('cert.pem','certificate'),('key.pem','key')]:write_private(creds/n,p[keyname].encode())
+ os.chmod(incoming,0o755);os.replace(incoming,binary)
+ text=marker+'''
+[Unit]
+Description=S-UI managed VPN node
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=simple
+DynamicUser=yes
+StateDirectory='''+name+'''
+StateDirectoryMode=0700
+WorkingDirectory=/var/lib/'''+name+'''
+LoadCredential=ca.pem:'''+str(creds/'ca.pem')+'''
+LoadCredential=cert.pem:'''+str(creds/'cert.pem')+'''
+LoadCredential=key.pem:'''+str(creds/'key.pem')+'''
+ExecStart='''+str(binary)+''' --node-id '''+str(ident)+''' --state /var/lib/'''+name+''' --listen 127.0.0.1:'''+str(p['control_port'])+''' --client-ca %d/ca.pem --tls-cert %d/cert.pem --tls-key %d/key.pem
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+UMask=0077
+LimitNOFILE=65536
+[Install]
+WantedBy=multi-user.target
+'''
+ unit.write_text(text);os.chmod(unit,0o644)
+ subprocess.run(['systemctl','daemon-reload'],check=True)
+ subprocess.run(['systemctl','enable',name],check=True,capture_output=True)
+ subprocess.run(['systemctl','restart',name],check=True,capture_output=True)
+ subprocess.run(['systemctl','is-active','--quiet',name],check=True)
+ # Add narrowly scoped rules only when an existing UFW is enabled. Do not
+ # enable/flush a firewall or disturb other software's listeners.
+ ufw=shutil.which('ufw')
+ if ufw and 'Status: active' in subprocess.run([ufw,'status'],capture_output=True,text=True).stdout:
+  for proto,port in p['ports'].items():subprocess.run([ufw,'allow',str(port)+('/udp' if proto in ('tuic','hysteria2') else '/tcp'),'comment',name],check=True,capture_output=True)
+ print(json.dumps({'installed':True,'service':name}))
+except BaseException:
+ if oldbinary:shutil.copy2(base/'agent.previous',binary)
+ for n,body in oldcreds.items():write_private(creds/n,body)
+ if oldunit is not None:
+  unit.write_bytes(oldunit);subprocess.run(['systemctl','daemon-reload']);subprocess.run(['systemctl','restart',name],capture_output=True)
+ raise
+`

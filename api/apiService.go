@@ -292,6 +292,17 @@ func (a *ApiService) Upgrade(c *gin.Context) {
 
 func (a *ApiService) GetDb(c *gin.Context) {
 	exclude := c.Query("exclude")
+	if c.Query("format") == "archive" {
+		body, err := database.GetFullBackup(exclude)
+		if err != nil {
+			jsonMsg(c, "", err)
+			return
+		}
+		c.Header("Content-Type", "application/zip")
+		c.Header("Content-Disposition", "attachment; filename=s-ui_"+time.Now().Format("20060102-150405")+".zip")
+		c.Writer.Write(body)
+		return
+	}
 	db, err := database.GetDb(exclude)
 	if err != nil {
 		jsonMsg(c, "", err)
@@ -358,6 +369,9 @@ func (a *ApiService) Save(c *gin.Context, loginUser string) {
 	act := c.Request.FormValue("action")
 	data := c.Request.FormValue("data")
 	initUsers := c.Request.FormValue("initUsers")
+	if saveNodeObject(c, obj, act, json.RawMessage(data), loginUser) {
+		return
+	}
 	objs, err := a.ConfigService.Save(obj, act, json.RawMessage(data), initUsers, loginUser, hostname)
 	if err != nil {
 		jsonMsg(c, "save", err)
