@@ -5,6 +5,7 @@ import os
 import platform
 import re
 import secrets
+import stat
 import subprocess
 import sys
 import time
@@ -45,6 +46,36 @@ helpers = {"__name__": "_helpers"}
 exec(rollback_code, helpers)
 sync_folder, rollback = helpers["sync_folder"], helpers["rollback"]
 
+
+def require_root_owned(metadata, kind):
+    if metadata.st_uid != 0 or not kind(metadata.st_mode) or metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        raise SystemExit("unsafe upgrade ownership or permissions")
+    return metadata
+
+
+def prepare_candidate(staged, binary, digest):
+    installed = require_root_owned(binary.lstat(), stat.S_ISREG)
+    mode = stat.S_IMODE(installed.st_mode)
+    if not mode & stat.S_IXUSR or mode & (stat.S_ISUID | stat.S_ISGID | stat.S_ISVTX):
+        raise SystemExit("unsafe installed executable mode")
+
+    # Apply the installed binary's access policy to the verified inode. In
+    # particular, a DynamicUser service needs the existing execute permission.
+    with os.fdopen(os.open(staged, os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as candidate:
+        metadata = require_root_owned(os.fstat(candidate.fileno()), stat.S_ISREG)
+        if metadata.st_nlink != 1:
+            raise SystemExit("staged executable is shared")
+        staged_hash = hashlib.sha256()
+        for chunk in iter(lambda: candidate.read(1 << 20), b""):
+            staged_hash.update(chunk)
+        if staged_hash.hexdigest() != digest:
+            raise SystemExit("agent checksum mismatch")
+        if metadata.st_gid != installed.st_gid:
+            os.fchown(candidate.fileno(), installed.st_uid, installed.st_gid)
+        os.fchmod(candidate.fileno(), mode)
+        os.fsync(candidate.fileno())
+
+
 req = json.load(sys.stdin)
 node_id = int(req["id"])
 owner = req["owner"]
@@ -56,8 +87,8 @@ unit = Path("/etc/systemd/system") / service
 folder = Path("/opt/s-ui-nodes") / slot
 if unit.is_symlink() or not unit.is_file() or f"# S-UI managed node {node_id} owner={owner}" not in unit.read_text().splitlines():
     raise SystemExit("foreign service")
-if folder.is_symlink() or not folder.is_dir():
-    raise SystemExit("invalid installation directory")
+require_root_owned(folder.parent.stat(), stat.S_ISDIR)
+require_root_owned(folder.lstat(), stat.S_ISDIR)
 
 marker, backup = folder / "upgrade.pending", folder / "agent.previous"
 binary, staged = folder / "agent", folder / "agent.next"
@@ -81,14 +112,9 @@ with os.fdopen(os.open(folder / "upgrade.lock", os.O_CREAT | os.O_NOFOLLOW | os.
     elif action == "activate":
         if pending or not binary.is_file() or not staged.is_file():
             raise SystemExit("upgrade not ready")
-        staged_hash = hashlib.sha256()
-        with staged.open("rb") as candidate:
-            for chunk in iter(lambda: candidate.read(1 << 20), b""):
-                staged_hash.update(chunk)
-        if staged_hash.hexdigest() != digest:
-            raise SystemExit("agent checksum mismatch")
         if subprocess.run(["systemctl", "is-active", "--quiet", service], timeout=10).returncode:
             raise SystemExit("agent is inactive")
+        prepare_candidate(staged, binary, digest)
         backup.unlink(missing_ok=True)
         os.link(binary, backup)
         trial = secrets.token_hex(16)
@@ -105,7 +131,6 @@ with os.fdopen(os.open(folder / "upgrade.lock", os.O_CREAT | os.O_NOFOLLOW | os.
             os.fsync(state.fileno())
         os.replace(temporary, marker)
         sync_folder(folder)
-        os.chmod(staged, 0o755)
         os.replace(staged, binary)
         sync_folder(folder)
         subprocess.run(["systemctl", "restart", service], check=True, timeout=40)
