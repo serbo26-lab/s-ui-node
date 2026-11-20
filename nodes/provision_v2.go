@@ -1,0 +1,504 @@
+package nodes
+
+import (
+	"bytes"
+	"context"
+	"encoding/base64"
+	"encoding/gob"
+	"encoding/json"
+	"errors"
+	"regexp"
+	"strings"
+	"time"
+
+	"github.com/alireza0/s-ui/database"
+	"github.com/alireza0/s-ui/database/model"
+	"github.com/alireza0/s-ui/nodeagent"
+	"github.com/gofrs/uuid/v5"
+	"gorm.io/gorm"
+)
+
+type ProvisionDomain struct {
+	Mode              string `json:"mode"`
+	ProfileID         uint   `json:"profile_id"`
+	ZoneID            string `json:"zone_id"`
+	Prefix            string `json:"prefix"`
+	AutomaticPrefix   bool   `json:"automatic_prefix"`
+	FQDN              string `json:"fqdn"`
+	CertificateMode   string `json:"certificate_mode"`
+	CertificateMethod string `json:"certificate_method"`
+	Email             string `json:"email"`
+	Certificate       string `json:"certificate"`
+	Key               string `json:"key"`
+	CertificatePath   string `json:"certificate_path"`
+	KeyPath           string `json:"key_path"`
+}
+
+type liveProvisionPlan struct {
+	Version            int
+	Request            ProvisionRequest // Password and uploaded certificate material are cleared.
+	Target             model.NodeInstallation
+	Previous           model.NodeInstallation
+	Control            ControlTLS
+	ExpectedGeneration uint64
+	Fenced             bool
+	Committed          bool
+	Listeners          []provisionListener
+}
+
+func encodeLivePlan(plan liveProvisionPlan) (string, error) {
+	var body bytes.Buffer
+	if err := gob.NewEncoder(&body).Encode(plan); err != nil {
+		return "", err
+	}
+	return sealSecret(base64.RawStdEncoding.EncodeToString(body.Bytes()))
+}
+func saveLivePlan(job *model.NodeJob, plan liveProvisionPlan) error {
+	sealed, err := encodeLivePlan(plan)
+	if err != nil {
+		return err
+	}
+	job.Plan = sealed
+	return database.GetDB().Model(job).Update("plan", sealed).Error
+}
+func loadLivePlan(job model.NodeJob) (liveProvisionPlan, error) {
+	var plan liveProvisionPlan
+	plain, err := openSecret(job.Plan)
+	if err != nil {
+		return plan, errors.New("state_key_unavailable")
+	}
+	body, err := base64.RawStdEncoding.DecodeString(plain)
+	if err != nil {
+		return plan, errors.New("invalid_install_plan")
+	}
+	if err = gob.NewDecoder(bytes.NewReader(body)).Decode(&plan); err != nil || plan.Version != 1 || plan.Target.NodeId != job.NodeId || plan.Request.Password != "" {
+		return plan, errors.New("invalid_install_plan")
+	}
+	return plan, nil
+}
+
+func startLiveProvision(r ProvisionRequest, actor string) (model.NodeJob, error) {
+	job, created, err := createLiveProvision(r, actor)
+	if err != nil || !created {
+		return job, err
+	}
+	provisionJobs.Store(job.NodeId, true)
+	go runLiveProvision(job, r.Password)
+	return job, nil
+}
+
+func createLiveProvision(r ProvisionRequest, actor string) (model.NodeJob, bool, error) {
+	var job model.NodeJob
+	if !regexp.MustCompile(`^[a-zA-Z0-9_-]{16,96}$`).MatchString(r.RequestKey) {
+		return job, false, errors.New("install_request_key_required")
+	}
+	signature := r
+	signature.Password = ""
+	if signature.Domain != nil {
+		copy := *signature.Domain
+		copy.Certificate = ""
+		copy.Key = ""
+		signature.Domain = &copy
+	}
+	body, _ := json.Marshal(signature)
+	digest := versionDigest(body)
+	db := database.GetDB()
+	if err := db.First(&job, "request_key = ?", r.RequestKey).Error; err == nil {
+		if job.RequestDigest != digest {
+			return job, false, errors.New("install_request_conflict")
+		}
+		return job, false, nil
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return job, false, err
+	}
+	if r.NodeId != 0 {
+		if len(r.InboundTemplateIds) > 0 {
+			return job, false, errors.New("installer_cannot_replace_live_template")
+		}
+		var node model.Node
+		if err := db.First(&node, r.NodeId).Error; err != nil {
+			return job, false, err
+		}
+		if node.AssignmentMode != model.NodeAssignmentWhole || node.AgentProtocol != 2 || node.TemplateTargetVersion == 0 {
+			return job, false, errors.New("live_node_required")
+		}
+		if r.ExpectedVersion == nil || *r.ExpectedVersion != node.SettingsVersion {
+			return job, false, errors.New("node_settings_version_conflict")
+		}
+		spec, err := liveVersion(db, node)
+		if err != nil {
+			return job, false, err
+		}
+		r.Protocols = nil
+		for _, e := range spec.Entries {
+			if e.Enable {
+				r.Protocols = append(r.Protocols, e.Protocol)
+			}
+		}
+		// Recovery preserves the bound template. Template replacement has its own CAS API.
+		if r.TemplateId != 0 && r.TemplateId != node.TemplateId {
+			return job, false, errors.New("installer_cannot_replace_live_template")
+		}
+		r.TemplateId = node.TemplateId
+	} else if len(r.InboundTemplateIds) > 0 {
+		if r.TemplateId != 0 {
+			return job, false, errors.New("edit_node_inbound_selection")
+		}
+		entries, err := selectedInboundEntries(db, r.InboundTemplateIds, 0)
+		if err != nil {
+			return job, false, err
+		}
+		r.Protocols = nil
+		for _, entry := range entries {
+			if entry.Enable {
+				r.Protocols = append(r.Protocols, entry.Protocol)
+			}
+		}
+		if len(r.Protocols) == 0 {
+			return job, false, errors.New("choose_node_inbound_templates")
+		}
+	} else if r.TemplateId != 0 {
+		view, err := ReadTemplateVersion(r.TemplateId, 0)
+		if err != nil {
+			return job, false, err
+		}
+		spec, err := NormalizeSpec(view.Spec, nil)
+		if err != nil {
+			return job, false, err
+		}
+		r.Protocols = nil
+		for _, e := range spec.Entries {
+			if e.Enable {
+				r.Protocols = append(r.Protocols, e.Protocol)
+			}
+		}
+	}
+	if r.NodeId == 0 && r.Password == "" {
+		return job, false, errors.New("ssh_password_required")
+	}
+	if err := normalizeProvision(&r); err != nil {
+		return job, false, err
+	}
+	created := false
+	err := db.Transaction(func(tx *gorm.DB) error {
+		// The unique request index also fences concurrent creates.
+		var same model.NodeJob
+		if tx.First(&same, "request_key = ?", r.RequestKey).Error == nil {
+			if same.RequestDigest != digest {
+				return errors.New("install_request_conflict")
+			}
+			job = same
+			return nil
+		}
+		var node model.Node
+		var installation model.NodeInstallation
+		if r.NodeId != 0 {
+			if err := tx.First(&node, r.NodeId).Error; err != nil {
+				return err
+			}
+			if r.ExpectedVersion == nil || node.SettingsVersion != *r.ExpectedVersion {
+				return errors.New("node_settings_version_conflict")
+			}
+			if err := tx.First(&installation, "node_id = ?", node.Id).Error; err != nil {
+				return errors.New("node_not_ssh_managed")
+			}
+			var active int64
+			if err := tx.Model(&model.NodeJob{}).Where("node_id = ? AND state IN ?", node.Id, []string{"queued", "running"}).Count(&active).Error; err != nil {
+				return err
+			}
+			if active > 0 || jobRunning(node.Id) {
+				return errors.New("node_job_running")
+			}
+			if len(installation.PreviousTarget) > 0 {
+				return errors.New("old_server_retirement_pending")
+			}
+		} else {
+			var count int64
+			if err := tx.Model(&model.Node{}).Where("name = ?", r.Name).Count(&count).Error; err != nil {
+				return err
+			}
+			if count > 0 {
+				return errors.New("node_name_exists")
+			}
+			node = model.Node{Name: r.Name, LinkAddress: r.IP, Address: controlAddress(16500), Enable: true, AgentProtocol: 2, AssignmentMode: model.NodeAssignmentWhole, Config: json.RawMessage(`{}`)}
+			if err := tx.Create(&node).Error; err != nil {
+				return err
+			}
+			id, err := uuid.NewV4()
+			if err != nil {
+				return err
+			}
+			installation = model.NodeInstallation{NodeId: node.Id, OwnerID: strings.ReplaceAll(id.String(), "-", ""), IP: r.IP, SSHPort: r.SSHPort, SSHUser: r.SSHUser}
+			if err = tx.Create(&installation).Error; err != nil {
+				return err
+			}
+			template, err := provisionLiveTemplate(tx, node, r)
+			if err != nil {
+				return err
+			}
+			if err = bindLiveTemplate(tx, &node, template, false); err != nil {
+				return err
+			}
+			if err = provisionLiveResources(tx, node, r); err != nil {
+				return err
+			}
+		}
+		if installation.OwnerID == "" {
+			return errors.New("legacy_installation_requires_migration")
+		}
+		id, err := uuid.NewV4()
+		if err != nil {
+			return err
+		}
+		job = model.NodeJob{Id: id.String(), NodeId: node.Id, ModelVersion: 2, RequestKey: r.RequestKey, RequestDigest: digest, Action: r.Action, State: "queued", Stage: "queued", Created: time.Now().Unix(), Updated: time.Now().Unix(), Events: json.RawMessage(`[]`)}
+		if err = tx.Create(&job).Error; err != nil {
+			return err
+		}
+		clean := r
+		clean.NodeId = node.Id
+		clean.Password = ""
+		clean.Domain = nil
+		plan := liveProvisionPlan{Version: 1, Request: clean, Target: installation, Previous: installation, ExpectedGeneration: node.ManagementGeneration, Control: ControlTLS{CA: node.ControlCA, Certificate: node.ControlCertificate, Key: node.ControlKey}}
+		plan.Target.IP, plan.Target.SSHPort, plan.Target.SSHUser = r.IP, r.SSHPort, r.SSHUser
+		if installation.IP != r.IP || installation.SSHPort != r.SSHPort || installation.SSHUser != r.SSHUser {
+			plan.Target.HostKey = ""
+		}
+		plan.Target.BootstrapID = job.Id
+		var encoded bytes.Buffer
+		if err = gob.NewEncoder(&encoded).Encode(plan); err != nil {
+			return err
+		}
+		job.Plan, err = sealSecret(base64.RawStdEncoding.EncodeToString(encoded.Bytes()))
+		if err != nil {
+			return err
+		}
+		if err = tx.Model(&job).Update("plan", job.Plan).Error; err != nil {
+			return err
+		}
+		audit, _ := json.Marshal(map[string]interface{}{"job": job.Id, "node_id": node.Id})
+		if err = tx.Create(&model.Changes{DateTime: time.Now().Unix(), Actor: actor, Key: "node-provision", Action: r.Action, Obj: audit}).Error; err != nil {
+			return err
+		}
+		created = true
+		return nil
+	})
+	if err != nil {
+		var same model.NodeJob
+		if db.First(&same, "request_key = ?", r.RequestKey).Error == nil && same.RequestDigest == digest {
+			return same, false, nil
+		}
+	}
+	return job, created, err
+}
+
+func provisionLiveTemplate(tx *gorm.DB, node model.Node, r ProvisionRequest) (model.NodeTemplate, error) {
+	var template model.NodeTemplate
+	if r.TemplateId != 0 {
+		err := tx.First(&template, r.TemplateId).Error
+		if err != nil {
+			return template, err
+		}
+		if template.SchemaVersion != 1 || template.Kind == inboundTemplate {
+			return template, errors.New("live_template_required")
+		}
+		return template, nil
+	}
+	spec := TemplateSpec{SchemaVersion: 1, Config: json.RawMessage(`{"outbounds":[{"type":"direct","tag":"direct"}],"route":{"final":"direct"}}`)}
+	if len(r.InboundTemplateIds) > 0 {
+		entries, err := selectedInboundEntries(tx, r.InboundTemplateIds, 0)
+		if err != nil {
+			return template, err
+		}
+		spec.Entries = entries
+		template, err = createDeploymentTemplate(tx, node)
+		if err != nil {
+			return template, err
+		}
+		err = writeCatalogSelection(tx, &template, r.InboundTemplateIds, spec)
+		return template, err
+	}
+	for _, kind := range r.Protocols {
+		key, err := uuid.NewV4()
+		if err != nil {
+			return template, err
+		}
+		e := SpecEntry{Key: key.String(), Name: strings.ToUpper(kind), Protocol: kind, Enable: true, Sources: map[string]ValueSource{"/listen_port": {Kind: "node_generated", Purpose: "listen_port"}}}
+		if kind == "vless" {
+			e.Options = json.RawMessage(`{"listen":"::","tls":{"enabled":true,"server_name":"www.cloudflare.com","reality":{"enabled":true,"handshake":{"server":"www.cloudflare.com","server_port":443}}}}`)
+			e.Sources["/tls/reality/private_key"] = ValueSource{Kind: "node_generated", Purpose: "reality_private_key"}
+			e.Sources["/tls/reality/short_id"] = ValueSource{Kind: "node_generated", Purpose: "reality_short_id"}
+		} else if !nodeagent.SupportsTLS(kind) {
+			switch kind {
+			case "shadowsocks":
+				e.Options = json.RawMessage(`{"listen":"::","method":"2022-blake3-aes-128-gcm"}`)
+			case "snell":
+				e.Options = json.RawMessage(`{"listen":"::","version":6}`)
+			case "shadowtls":
+				e.Options = json.RawMessage(`{"listen":"::","version":3,"handshake":{"server":"www.cloudflare.com","server_port":443}}`)
+			default:
+				e.Options = json.RawMessage(`{"listen":"::"}`)
+			}
+		} else {
+			e.Options = json.RawMessage(`{"listen":"::","tls":{"enabled":true}}`)
+			if kind == "tuic" || kind == "hysteria2" {
+				e.Options = json.RawMessage(`{"listen":"::","tls":{"enabled":true,"alpn":["h3"]}}`)
+			}
+			if kind == "hysteria" {
+				e.Options = json.RawMessage(`{"listen":"::","up_mbps":100,"down_mbps":100,"tls":{"enabled":true,"alpn":["h3"]}}`)
+			}
+			e.Sources["/tls/server_name"] = ValueSource{Kind: "node_parameter", Name: "primary_domain"}
+			e.Sources["/tls/certificate_binding"] = ValueSource{Kind: "node_certificate", Name: "primary"}
+		}
+		spec.Entries = append(spec.Entries, e)
+	}
+	body, _ := json.Marshal(spec)
+	normalized, err := NormalizeSpec(body, nil)
+	if err != nil {
+		return template, err
+	}
+	body, _ = json.Marshal(normalized)
+	template = model.NodeTemplate{Name: node.Name, SchemaVersion: 1, Scope: "private", OwnerNodeId: node.Id, Config: normalized.Config, Blueprints: json.RawMessage(`[]`)}
+	if err = tx.Create(&template).Error; err != nil {
+		return template, err
+	}
+	err = appendTemplateVersion(tx, &template, model.NodeTemplate{}, body)
+	if err == nil {
+		err = splitDeploymentTemplate(tx, template)
+		template.Kind = deploymentTemplate
+	}
+	return template, err
+}
+
+func provisionLiveResources(tx *gorm.DB, node model.Node, r ProvisionRequest) error {
+	spec, err := liveVersion(tx, node)
+	if err != nil {
+		return err
+	}
+	needs := r.Domain != nil
+	for _, entry := range spec.Entries {
+		if entry.Enable {
+			if entry.TLSProfileID > 0 {
+				if err := applyTLSProfile(tx, &entry); err != nil {
+					return err
+				}
+			}
+			for _, s := range entry.Sources {
+				if s.Kind == "node_certificate" || s.Kind == "node_parameter" && s.Name == "primary_domain" {
+					needs = true
+				}
+			}
+		}
+	}
+	if !needs {
+		return nil
+	}
+	domain := r.Domain
+	if domain == nil {
+		var profiles []model.NodeDNSProfile
+		if err = tx.Order("id").Find(&profiles).Error; err != nil {
+			return err
+		}
+		if len(profiles) != 1 {
+			return errors.New("dns_profile_required")
+		}
+		var zones []DNSZone
+		if json.Unmarshal(profiles[0].Zones, &zones) != nil || len(zones) != 1 {
+			return errors.New("dns_zone_required")
+		}
+		domain = &ProvisionDomain{Mode: "managed", ProfileID: profiles[0].Id, ZoneID: zones[0].Id, AutomaticPrefix: true}
+	}
+	value := *domain
+	if value.Mode == "" {
+		value.Mode = "managed"
+	}
+	if value.CertificateMode == "" {
+		value.CertificateMode = "auto"
+	}
+	if value.Prefix == "" {
+		value.AutomaticPrefix = true
+	}
+	body, _ := json.Marshal(map[string]interface{}{"node_id": node.Id, "mode": value.Mode, "profile_id": value.ProfileID, "zone_id": value.ZoneID, "prefix": value.Prefix, "automatic_prefix": value.AutomaticPrefix, "fqdn": value.FQDN, "ip": r.IP, "certificate_mode": value.CertificateMode, "expected_version": 0})
+	if _, err = saveDomainBinding(tx, "save", body); err != nil {
+		return err
+	}
+	method := value.CertificateMethod
+	if method == "" {
+		method = value.CertificateMode
+	}
+	body, _ = json.Marshal(map[string]interface{}{"node_id": node.Id, "mode": method, "ca": "letsencrypt", "email": value.Email, "dns_profile_id": value.ProfileID, "zone_id": value.ZoneID, "certificate": value.Certificate, "key": value.Key, "certificate_path": value.CertificatePath, "key_path": value.KeyPath, "expected_version": 0})
+	_, err = saveCertificateBinding(tx, "save", body)
+	return err
+}
+
+func runLiveProvision(job model.NodeJob, password string) {
+	defer provisionJobs.Delete(job.NodeId)
+	operation := provisionOperationLock(job.NodeId)
+	operation.Lock()
+	defer operation.Unlock()
+	provisionLifecycle.RLock()
+	parent := provisionParent
+	provisionLifecycle.RUnlock()
+	ctx, cancel := context.WithTimeout(parent, 30*time.Minute)
+	defer cancel()
+	select {
+	case provisionSlots <- struct{}{}:
+		defer func() { <-provisionSlots }()
+	case <-ctx.Done():
+		jobStage(&job, "queued", "interrupted", "install_timeout")
+		return
+	}
+	plan, err := loadLivePlan(job)
+	if err != nil {
+		jobStage(&job, job.Stage, "failed", "state_key_unavailable")
+		return
+	}
+	if err = executeLiveProvision(ctx, &job, &plan, password); err != nil {
+		code := liveInstallError(err)
+		state := "failed"
+		if ctx.Err() == context.Canceled {
+			state = "interrupted"
+			code = "panel_restarted"
+		} else if ctx.Err() == context.DeadlineExceeded {
+			code = "install_timeout"
+		}
+		jobStage(&job, job.Stage, state, code)
+		return
+	}
+	jobStage(&job, "ready", "succeeded", "")
+}
+
+func liveInstallError(err error) string {
+	known := map[string]bool{"ssh_unreachable": true, "ssh_auth_failed": true, "ssh_host_changed": true, "ssh_password_required": true, "state_key_unavailable": true, "node_listener_port_occupied": true, "node_listener_port_reserved": true, "node_reality_handshake_loop": true, "old_server_retirement_pending": true, "management_target_changed": true, "agent_epoch_changed_recovery_required": true, "install_timeout": true}
+	known["certificate_request_rejected"] = true
+	known["structural_revision_rejected"] = true
+	known["ssh_key_verification_failed"] = true
+	known["installation_database_unavailable"] = true
+	known[errAutoPortsExhausted.Error()] = true
+	known[errPortInspection.Error()] = true
+	if known[err.Error()] {
+		return err.Error()
+	}
+	return "node_install_failed"
+}
+
+func resumeLiveProvisionJobs(ctx context.Context) {
+	var jobs []model.NodeJob
+	if database.GetDB().Where("model_version = 2 AND state = ?", "interrupted").Find(&jobs).Error != nil {
+		return
+	}
+	for _, job := range jobs {
+		plan, err := loadLivePlan(job)
+		if err != nil {
+			continue
+		}
+		// No password is saved. A dedicated key in the sealed plan makes later
+		// stages resumable; an unfinished first SSH login needs explicit re-entry.
+		if plan.Target.PrivateKey == "" {
+			continue
+		}
+		if _, loaded := provisionJobs.LoadOrStore(job.NodeId, true); loaded {
+			continue
+		}
+		go runLiveProvision(job, "")
+	}
+}

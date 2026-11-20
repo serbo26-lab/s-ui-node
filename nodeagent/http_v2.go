@@ -1,0 +1,96 @@
+package nodeagent
+
+import (
+	"encoding/json"
+	"errors"
+	"io"
+	"net/http"
+)
+
+func HandlerV2(manager *ManagerV2) http.Handler {
+	mux := http.NewServeMux()
+	status := func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", 405)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		status := manager.Status()
+		if runtime, ok := manager.runtime.(interface{ Traffic() *TrafficSample }); ok {
+			status.Traffic = runtime.Traffic()
+		}
+		_ = json.NewEncoder(w).Encode(status)
+	}
+	mux.HandleFunc("/v2/status", status)
+	mux.HandleFunc("/v2/certificate", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut {
+			http.Error(w, "method not allowed", 405)
+			return
+		}
+		if manager.resources == nil {
+			http.Error(w, "certificate storage unavailable", 503)
+			return
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, 3<<20)
+		decoder := json.NewDecoder(r.Body)
+		decoder.DisallowUnknownFields()
+		var request CertificateRequest
+		if decoder.Decode(&request) != nil || decoder.Decode(new(any)) != io.EOF {
+			http.Error(w, "invalid certificate body", 400)
+			return
+		}
+		if err := manager.resources.Configure(request); err != nil {
+			code := 422
+			if errors.Is(err, ErrConflict) {
+				code = 409
+			}
+			http.Error(w, "certificate request not accepted", code)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(manager.Status())
+	})
+	// Old controllers see protocol=2 and cannot overwrite the independent ACL.
+	mux.HandleFunc("/v1/status", status)
+	mux.HandleFunc("/v1/deployment", func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "protocol v2 required", http.StatusConflict)
+	})
+	write := func(w http.ResponseWriter, r *http.Request, access bool) {
+		if r.Method != http.MethodPut {
+			http.Error(w, "method not allowed", 405)
+			return
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, 8<<20)
+		d := json.NewDecoder(r.Body)
+		d.DisallowUnknownFields()
+		var err error
+		if access {
+			var value AccessSnapshot
+			if d.Decode(&value) != nil || d.Decode(new(any)) != io.EOF {
+				http.Error(w, "invalid access body", 400)
+				return
+			}
+			err = manager.ApplyAccess(value)
+		} else {
+			var value Structure
+			if d.Decode(&value) != nil || d.Decode(new(any)) != io.EOF {
+				http.Error(w, "invalid spec body", 400)
+				return
+			}
+			err = manager.ApplyStructure(value)
+		}
+		if err != nil {
+			if errors.Is(err, ErrConflict) {
+				http.Error(w, "identity or revision conflict", 409)
+			} else {
+				http.Error(w, "state was not applied", 422)
+			}
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(manager.Status())
+	}
+	mux.HandleFunc("/v2/access", func(w http.ResponseWriter, r *http.Request) { write(w, r, true) })
+	mux.HandleFunc("/v2/spec", func(w http.ResponseWriter, r *http.Request) { write(w, r, false) })
+	return mux
+}
