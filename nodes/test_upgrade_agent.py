@@ -39,9 +39,9 @@ def run_upgrade_fixture():
     unit = f"s-ui-node-{slot}.service"
     unit_path = Path("/etc/systemd/system") / unit
     base = Path("/opt/s-ui-nodes")
-    base.mkdir(exist_ok=True)
+    base.mkdir(mode=0o755, exist_ok=True)
     folder = base / slot
-    folder.mkdir()
+    folder.mkdir(mode=0o755)
     created_unit = False
     try:
         binary = folder / "agent"

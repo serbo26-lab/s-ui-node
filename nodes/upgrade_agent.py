@@ -47,14 +47,14 @@ exec(rollback_code, helpers)
 sync_folder, rollback = helpers["sync_folder"], helpers["rollback"]
 
 
-def require_root_owned(metadata, kind):
+def require_root_owned(metadata, kind, role):
     if metadata.st_uid != 0 or not kind(metadata.st_mode) or metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
-        raise SystemExit("unsafe upgrade ownership or permissions")
+        raise SystemExit(f"unsafe {role} ownership or permissions")
     return metadata
 
 
 def prepare_candidate(staged, binary, digest):
-    installed = require_root_owned(binary.lstat(), stat.S_ISREG)
+    installed = require_root_owned(binary.lstat(), stat.S_ISREG, "installed binary")
     mode = stat.S_IMODE(installed.st_mode)
     if not mode & stat.S_IXUSR or mode & (stat.S_ISUID | stat.S_ISGID | stat.S_ISVTX):
         raise SystemExit("unsafe installed executable mode")
@@ -62,7 +62,7 @@ def prepare_candidate(staged, binary, digest):
     # Apply the installed binary's access policy to the verified inode. In
     # particular, a DynamicUser service needs the existing execute permission.
     with os.fdopen(os.open(staged, os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as candidate:
-        metadata = require_root_owned(os.fstat(candidate.fileno()), stat.S_ISREG)
+        metadata = require_root_owned(os.fstat(candidate.fileno()), stat.S_ISREG, "staged binary")
         if metadata.st_nlink != 1:
             raise SystemExit("staged executable is shared")
         staged_hash = hashlib.sha256()
@@ -87,8 +87,8 @@ unit = Path("/etc/systemd/system") / service
 folder = Path("/opt/s-ui-nodes") / slot
 if unit.is_symlink() or not unit.is_file() or f"# S-UI managed node {node_id} owner={owner}" not in unit.read_text().splitlines():
     raise SystemExit("foreign service")
-require_root_owned(folder.parent.stat(), stat.S_ISDIR)
-require_root_owned(folder.lstat(), stat.S_ISDIR)
+require_root_owned(folder.parent.stat(), stat.S_ISDIR, "agent root directory")
+require_root_owned(folder.lstat(), stat.S_ISDIR, "agent directory")
 
 marker, backup = folder / "upgrade.pending", folder / "agent.previous"
 binary, staged = folder / "agent", folder / "agent.next"

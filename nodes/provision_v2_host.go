@@ -470,7 +470,8 @@ func uploadLiveAgent(ctx context.Context, client *ssh.Client, install model.Node
 from pathlib import Path
 folder=Path('/opt/s-ui-nodes/%s')
 if folder.is_symlink():raise SystemExit('unsafe path')
-folder.mkdir(parents=True,mode=0o755,exist_ok=True)
+folder.parent.mkdir(mode=0o755,exist_ok=True)
+folder.mkdir(mode=0o755,exist_ok=True)
 fd=os.open(folder/'agent.next',os.O_WRONLY|os.O_CREAT|os.O_TRUNC|os.O_NOFOLLOW,0o600);h=hashlib.sha256()
 with os.fdopen(fd,'wb') as f,gzip.GzipFile(fileobj=sys.stdin.buffer,mode='rb') as source:
  while True:

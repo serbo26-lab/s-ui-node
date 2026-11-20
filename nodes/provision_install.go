@@ -80,7 +80,8 @@ func uploadAgent(ctx context.Context, client *ssh.Client, user string, id uint, 
 from pathlib import Path
 folder=Path('/opt/s-ui-nodes/%d')
 if folder.is_symlink():raise SystemExit('invalid install directory')
-folder.mkdir(parents=True,exist_ok=True,mode=0o755)
+folder.parent.mkdir(exist_ok=True,mode=0o755)
+folder.mkdir(exist_ok=True,mode=0o755)
 target=folder/'agent.next'
 fd=os.open(target,os.O_WRONLY|os.O_CREAT|os.O_TRUNC|os.O_NOFOLLOW,0o600)
 h=hashlib.sha256()
