@@ -99,6 +99,13 @@ func GetDb(exclude string) ([]byte, error) {
 func ImportDB(file multipart.File) error {
 	backupImportMu.Lock()
 	defer backupImportMu.Unlock()
+	if err := restoreDB(file); err != nil {
+		return err
+	}
+	return SendSighup()
+}
+
+func restoreDB(file multipart.File) error {
 	var signature [4]byte
 	if _, err := io.ReadFull(file, signature[:]); err != nil {
 		return common.NewError("Invalid db file format")
@@ -121,6 +128,19 @@ func ImportDB(file multipart.File) error {
 }
 
 func importSQLite(file multipart.File, suppliedKey []byte, replaceKey bool) error {
+	files, err := openRestoreFiles(config.GetDBPath())
+	if err != nil {
+		return err
+	}
+	defer files.root.Close()
+	if err := files.stageDatabase(file); err != nil {
+		return err
+	}
+	defer files.root.Remove(files.database + ".temp")
+	return files.installDatabase(suppliedKey, replaceKey)
+}
+
+func (files restoreFiles) stageDatabase(file multipart.File) (err error) {
 	valid, err := IsSQLiteDB(file)
 	if err != nil {
 		return err
@@ -131,18 +151,21 @@ func importSQLite(file multipart.File, suppliedKey []byte, replaceKey bool) erro
 	if _, err = file.Seek(0, 0); err != nil {
 		return err
 	}
-	dbPath := config.GetDBPath()
-	tempPath := dbPath + ".temp"
-	if err = os.Remove(tempPath); err != nil && !os.IsNotExist(err) {
+	tempName := files.database + ".temp"
+	if err = files.root.Remove(tempName); err != nil && !os.IsNotExist(err) {
 		return err
 	}
-	tempFile, err := os.OpenFile(tempPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	tempFile, err := files.root.OpenFile(tempName, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 	if err != nil {
 		return err
 	}
+	defer func() {
+		if err != nil {
+			_ = files.root.Remove(tempName)
+		}
+	}()
 	copied, copyErr := io.Copy(tempFile, io.LimitReader(file, backupLimit+1))
 	closeErr := tempFile.Close()
-	defer os.Remove(tempPath)
 	if copyErr != nil {
 		return copyErr
 	}
@@ -152,11 +175,13 @@ func importSQLite(file multipart.File, suppliedKey []byte, replaceKey bool) erro
 	if copied > backupLimit {
 		return common.NewError("Backup file too large")
 	}
-	if err = validateImport(tempPath); err != nil {
-		return err
-	}
-	keyPath := filepath.Join(filepath.Dir(dbPath), "node-provision.key")
-	oldKey, keyErr := os.ReadFile(keyPath)
+	return validateImport(files.path(tempName))
+}
+
+func (files restoreFiles) installDatabase(suppliedKey []byte, replaceKey bool) error {
+	dbPath := files.path(files.database)
+	tempName := files.database + ".temp"
+	oldKey, keyErr := files.root.ReadFile(backupKeyName)
 	if keyErr != nil && !os.IsNotExist(keyErr) {
 		return keyErr
 	}
@@ -164,18 +189,18 @@ func importSQLite(file multipart.File, suppliedKey []byte, replaceKey bool) erro
 	if replaceKey {
 		selectedKey = suppliedKey
 	}
-	if err = validateNodeBackupKey(tempPath, selectedKey); err != nil {
+	if err := validateNodeBackupKey(files.path(tempName), selectedKey); err != nil {
 		return err
 	}
-	fallbackPath := fmt.Sprintf("%s.backup-%d", dbPath, time.Now().UnixNano())
-	journal := backupPairJournal{Version: 1, Fallback: filepath.Base(fallbackPath), OldKey: keyErr == nil}
+	fallback := fmt.Sprintf("%s.backup-%d", files.database, time.Now().UnixNano())
+	journal := backupPairJournal{Version: 1, Fallback: fallback, OldKey: keyErr == nil}
 	if replaceKey {
 		if journal.OldKey {
-			if err = backupWritePrivate(fallbackPath+".key", oldKey); err != nil {
+			if err := files.writePrivate(fallback+".key", oldKey); err != nil {
 				return err
 			}
 		}
-		if err = writePairJournal(dbPath, journal); err != nil {
+		if err := files.writeJournal(journal); err != nil {
 			return err
 		}
 	}
@@ -183,10 +208,10 @@ func importSQLite(file multipart.File, suppliedKey []byte, replaceKey bool) erro
 		_ = db.Exec("PRAGMA wal_checkpoint(TRUNCATE);").Error
 		_ = sqlDB.Close()
 	}
-	removeSidecars(dbPath)
-	if err = os.Rename(dbPath, fallbackPath); err != nil {
+	files.removeSidecars(files.database)
+	if err := files.root.Rename(files.database, fallback); err != nil {
 		if replaceKey {
-			_ = os.Remove(pairJournalPath(dbPath))
+			_ = files.root.Remove(files.journalName())
 		}
 		reopen(dbPath)
 		return err
@@ -194,46 +219,46 @@ func importSQLite(file multipart.File, suppliedKey []byte, replaceKey bool) erro
 	rollback := func() {
 		if replaceKey {
 			journal.Ready = false
-			if e := writePairJournal(dbPath, journal); e != nil {
+			if e := files.writeJournal(journal); e != nil {
 				logger.Error("restore pair journal failed")
 				return
 			}
-			if e := recoverBackupPair(dbPath); e != nil {
+			if e := files.recoverPair(); e != nil {
 				logger.Error("restore pair rollback failed")
 				return
 			}
 			reopen(dbPath)
 		} else {
-			restoreFallback(dbPath, fallbackPath)
+			files.restoreFallback(fallback)
 		}
 	}
 	if replaceKey {
-		if err = backupWritePrivate(keyPath, suppliedKey); err != nil {
+		if err := files.writePrivate(backupKeyName, suppliedKey); err != nil {
 			rollback()
 			return err
 		}
 	}
-	if err = os.Rename(tempPath, dbPath); err != nil {
+	if err := files.root.Rename(tempName, files.database); err != nil {
 		rollback()
 		return err
 	}
 	if replaceKey {
 		journal.Ready = true
-		if err = writePairJournal(dbPath, journal); err != nil {
+		if err := files.writeJournal(journal); err != nil {
 			rollback()
 			return err
 		}
 	}
-	if err = migration.MigrateDb(); err != nil {
+	if err := migration.MigrateDb(); err != nil {
 		rollback()
 		return common.NewErrorf("Error migrating db: %v", err)
 	}
-	if err = InitDB(dbPath); err != nil {
+	if err := InitDB(dbPath); err != nil {
 		rollback()
 		return common.NewErrorf("Error initialising imported db: %v", err)
 	}
-	logger.Info("database imported; previous database kept at ", fallbackPath)
-	return SendSighup()
+	logger.Info("database imported; previous database kept at ", files.path(fallback))
+	return nil
 }
 
 // validateImport rejects a SQLite file that is not an s-ui database, before it
@@ -259,12 +284,12 @@ func validateImport(path string) error {
 	return nil
 }
 
-// removeSidecars drops the -wal and -shm files belonging to path; they describe
+// removeSidecars drops the -wal and -shm files belonging to name; they describe
 // the database being replaced, not the one taking its place.
-func removeSidecars(path string) {
+func (files restoreFiles) removeSidecars(name string) {
 	for _, suffix := range []string{"-wal", "-shm"} {
-		if err := os.Remove(path + suffix); err != nil && !os.IsNotExist(err) {
-			logger.Warning("unable to remove ", path+suffix, ": ", err)
+		if err := files.root.Remove(name + suffix); err != nil && !os.IsNotExist(err) {
+			logger.Warning("unable to remove ", files.path(name+suffix), ": ", err)
 		}
 	}
 }
@@ -276,13 +301,13 @@ func reopen(path string) {
 	}
 }
 
-func restoreFallback(dbPath, fallbackPath string) {
-	removeSidecars(dbPath)
-	if err := os.Rename(fallbackPath, dbPath); err != nil {
+func (files restoreFiles) restoreFallback(fallback string) {
+	files.removeSidecars(files.database)
+	if err := files.root.Rename(fallback, files.database); err != nil {
 		logger.Error("unable to restore the database after a failed import: ", err)
 		return
 	}
-	reopen(dbPath)
+	reopen(files.path(files.database))
 }
 
 func IsSQLiteDB(file io.Reader) (bool, error) {

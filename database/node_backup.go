@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -25,7 +26,10 @@ import (
 
 var backupImportMu sync.Mutex
 
-const backupLimit = 256 << 20
+const (
+	backupLimit   = 256 << 20
+	backupKeyName = "node-provision.key"
+)
 
 type nodeBackupManifest struct {
 	Version        int    `json:"version"`
@@ -35,8 +39,8 @@ type nodeBackupManifest struct {
 
 func backupHash(body []byte) string { sum := sha256.Sum256(body); return hex.EncodeToString(sum[:]) }
 
-func readOptionalKey(path string) ([]byte, error) {
-	body, err := os.ReadFile(path)
+func readOptionalKey(root *os.Root) ([]byte, error) {
+	body, err := root.ReadFile(backupKeyName)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
@@ -124,13 +128,18 @@ func validateNodeBackupKey(path string, key []byte) error {
 }
 
 func validateBackupBytes(body, key []byte) error {
-	f, err := os.CreateTemp(config.GetDBFolderPath(), ".backup-key-check-*.db")
+	files, err := openRestoreFiles(config.GetDBPath())
 	if err != nil {
 		return err
 	}
-	name := f.Name()
-	defer os.Remove(name)
-	defer removeSidecars(name)
+	defer files.root.Close()
+	name := ".backup-key-check-" + rand.Text() + ".db"
+	f, err := files.root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		return err
+	}
+	defer files.root.Remove(name)
+	defer files.removeSidecars(name)
 	if _, err = f.Write(body); err != nil {
 		f.Close()
 		return err
@@ -138,10 +147,11 @@ func validateBackupBytes(body, key []byte) error {
 	if err = f.Close(); err != nil {
 		return err
 	}
-	if err = validateImport(name); err != nil {
+	fullPath := files.path(name)
+	if err = validateImport(fullPath); err != nil {
 		return err
 	}
-	return validateNodeBackupKey(name, key)
+	return validateNodeBackupKey(fullPath, key)
 }
 
 func GetFullBackup(exclude string) ([]byte, error) {
@@ -153,8 +163,12 @@ func GetFullBackup(exclude string) ([]byte, error) {
 			return nil, errors.New("incomplete_node_backup_exclusions")
 		}
 	}
-	keyPath := filepath.Join(config.GetDBFolderPath(), "node-provision.key")
-	key, err := readOptionalKey(keyPath)
+	root, err := os.OpenRoot(config.GetDBFolderPath())
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
+	key, err := readOptionalKey(root)
 	if err != nil {
 		return nil, err
 	}
@@ -162,7 +176,7 @@ func GetFullBackup(exclude string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	after, err := readOptionalKey(keyPath)
+	after, err := readOptionalKey(root)
 	if err != nil {
 		return nil, err
 	}
@@ -269,21 +283,37 @@ type backupPairJournal struct {
 	Ready    bool   `json:"ready"`
 }
 
-func pairJournalPath(dbPath string) string { return dbPath + ".restore-pair.json" }
-func writePairJournal(dbPath string, j backupPairJournal) error {
-	body, _ := json.Marshal(j)
-	return backupWritePrivate(pairJournalPath(dbPath), body)
+type restoreFiles struct {
+	root     *os.Root
+	database string
 }
-func backupWritePrivate(path string, body []byte) error {
-	f, err := os.CreateTemp(filepath.Dir(path), ".restore-write-*")
+
+func openRestoreFiles(dbPath string) (restoreFiles, error) {
+	root, err := os.OpenRoot(filepath.Dir(dbPath))
+	return restoreFiles{root: root, database: filepath.Base(dbPath)}, err
+}
+
+// SQLite's driver takes a filename. Its callers supply names allocated by the
+// restore code in the configured database directory.
+func (files restoreFiles) path(name string) string {
+	return filepath.Join(files.root.Name(), name)
+}
+
+func (files restoreFiles) journalName() string { return files.database + ".restore-pair.json" }
+
+func (files restoreFiles) writeJournal(j backupPairJournal) error {
+	body, _ := json.Marshal(j)
+	return files.writePrivate(files.journalName(), body)
+}
+
+func (files restoreFiles) writePrivate(name string, body []byte) error {
+	temp := ".restore-write-" + rand.Text()
+	f, err := files.root.OpenFile(temp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return err
 	}
-	name := f.Name()
-	defer os.Remove(name)
-	if err = f.Chmod(0600); err == nil {
-		_, err = f.Write(body)
-	}
+	defer files.root.Remove(temp)
+	_, err = f.Write(body)
 	if err == nil {
 		err = f.Sync()
 	}
@@ -294,10 +324,10 @@ func backupWritePrivate(path string, body []byte) error {
 	if closeErr != nil {
 		return closeErr
 	}
-	if err = os.Rename(name, path); err != nil {
+	if err = files.root.Rename(temp, name); err != nil {
 		return err
 	}
-	folder, err := os.Open(filepath.Dir(path))
+	folder, err := files.root.Open(".")
 	if err != nil {
 		return err
 	}
@@ -306,7 +336,17 @@ func backupWritePrivate(path string, body []byte) error {
 }
 
 func recoverBackupPair(dbPath string) error {
-	body, err := os.ReadFile(pairJournalPath(dbPath))
+	files, err := openRestoreFiles(dbPath)
+	if err != nil {
+		return err
+	}
+	defer files.root.Close()
+	return files.recoverPair()
+}
+
+func (files restoreFiles) recoverPair() error {
+	journalName := files.journalName()
+	body, err := files.root.ReadFile(journalName)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
@@ -314,40 +354,46 @@ func recoverBackupPair(dbPath string) error {
 		return err
 	}
 	var journal backupPairJournal
-	if json.Unmarshal(body, &journal) != nil || journal.Version != 1 || filepath.Base(journal.Fallback) != journal.Fallback || !strings.HasPrefix(journal.Fallback, filepath.Base(dbPath)+".backup-") {
+	if json.Unmarshal(body, &journal) != nil || journal.Version != 1 || !filepath.IsLocal(journal.Fallback) || filepath.Base(journal.Fallback) != journal.Fallback || !strings.HasPrefix(journal.Fallback, files.database+".backup-") {
 		return errors.New("invalid_restore_pair_journal")
 	}
-	folder := filepath.Dir(dbPath)
-	fallback := filepath.Join(folder, journal.Fallback)
-	keyPath := filepath.Join(folder, "node-provision.key")
 	if journal.Ready {
-		key, err := readOptionalKey(keyPath)
+		key, err := readOptionalKey(files.root)
 		if err != nil {
 			return err
 		}
-		if err = validateNodeBackupKey(dbPath, key); err != nil {
+		if err = validateNodeBackupKey(files.path(files.database), key); err != nil {
 			return err
 		}
-	} else if _, err = os.Stat(fallback); err == nil {
-		removeSidecars(dbPath)
-		if err = os.Rename(fallback, dbPath); err != nil {
-			return err
-		}
-		if journal.OldKey {
-			key, err := os.ReadFile(fallback + ".key")
-			if err != nil {
-				return err
-			}
-			if err = backupWritePrivate(keyPath, key); err != nil {
-				return err
-			}
-		} else if err = os.Remove(keyPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return err
-		}
-	} else if !errors.Is(err, os.ErrNotExist) {
+	} else if err := files.restorePair(journal); err != nil {
 		return err
 	}
-	return os.Remove(pairJournalPath(dbPath))
+	return files.root.Remove(journalName)
+}
+
+func (files restoreFiles) restorePair(journal backupPairJournal) error {
+	_, err := files.root.Lstat(journal.Fallback)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	// Restore the key first, leaving the previous DB available until both
+	// files can be restored. A failed key read or write remains retryable.
+	if journal.OldKey {
+		key, err := files.root.ReadFile(journal.Fallback + ".key")
+		if err != nil {
+			return err
+		}
+		if err = files.writePrivate(backupKeyName, key); err != nil {
+			return err
+		}
+	} else if err = files.root.Remove(backupKeyName); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	files.removeSidecars(files.database)
+	return files.root.Rename(journal.Fallback, files.database)
 }
 
 type backupMemoryFile struct{ *bytes.Reader }

@@ -12,7 +12,10 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/alireza0/s-ui/config"
 	"github.com/alireza0/s-ui/database/model"
+	"github.com/alireza0/s-ui/logger"
+	"github.com/op/go-logging"
 )
 
 func backupFixtureSeal(t *testing.T, key []byte) string {
@@ -140,20 +143,31 @@ func TestInterruptedDBKeyPairRestoresOldPairBeforeOpen(t *testing.T) {
 	path, key := nodeBackupFixture(t)
 	pool, _ := db.DB()
 	pool.Close()
-	fallback := path + ".backup-fixture"
-	if err := os.Rename(path, fallback); err != nil {
+	files, err := openRestoreFiles(path)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := backupWritePrivate(fallback+".key", key); err != nil {
+	defer files.root.Close()
+	fallback := files.database + ".backup-fixture"
+	if err := files.root.Rename(files.database, fallback); err != nil {
 		t.Fatal(err)
 	}
-	if err := backupWritePrivate(filepath.Join(filepath.Dir(path), "node-provision.key"), bytes.Repeat([]byte{0x32}, 32)); err != nil {
+	if err := files.writePrivate(backupKeyName, bytes.Repeat([]byte{0x32}, 32)); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(path, []byte("interrupted replacement"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := writePairJournal(path, backupPairJournal{Version: 1, Fallback: filepath.Base(fallback), OldKey: true}); err != nil {
+	if err := files.writeJournal(backupPairJournal{Version: 1, Fallback: fallback, OldKey: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := OpenDB(path); !os.IsNotExist(err) {
+		t.Fatalf("want recovery to stop on missing saved key, got %v", err)
+	}
+	if _, err := files.root.Stat(fallback); err != nil {
+		t.Fatal("failed recovery consumed the saved database", err)
+	}
+	if err := files.writePrivate(fallback+".key", key); err != nil {
 		t.Fatal(err)
 	}
 	if err := InitDB(path); err != nil {
@@ -166,7 +180,7 @@ func TestInterruptedDBKeyPairRestoresOldPairBeforeOpen(t *testing.T) {
 	if err = validateNodeBackupKey(path, key); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = os.Stat(pairJournalPath(path)); !os.IsNotExist(err) {
+	if _, err = files.root.Stat(files.journalName()); !os.IsNotExist(err) {
 		t.Fatal("rollback journal not completed")
 	}
 }
@@ -175,20 +189,80 @@ func TestReadyPairWithWrongKeyFailsClosed(t *testing.T) {
 	path, key := nodeBackupFixture(t)
 	pool, _ := db.DB()
 	pool.Close()
-	if err := writePairJournal(path, backupPairJournal{Version: 1, Fallback: filepath.Base(path) + ".backup-fixture", OldKey: true, Ready: true}); err != nil {
+	files, err := openRestoreFiles(path)
+	if err != nil {
 		t.Fatal(err)
 	}
-	keyPath := filepath.Join(filepath.Dir(path), "node-provision.key")
-	if err := backupWritePrivate(keyPath, bytes.Repeat([]byte{0x32}, 32)); err != nil {
+	defer files.root.Close()
+	if err := files.writeJournal(backupPairJournal{Version: 1, Fallback: files.database + ".backup-fixture", OldKey: true, Ready: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := files.writePrivate(backupKeyName, bytes.Repeat([]byte{0x32}, 32)); err != nil {
 		t.Fatal(err)
 	}
 	if err := OpenDB(path); err == nil {
 		t.Fatal("opened mismatched ready pair")
 	}
-	if err := backupWritePrivate(keyPath, key); err != nil {
+	if err := files.writePrivate(backupKeyName, key); err != nil {
 		t.Fatal(err)
 	}
 	if err := InitDB(path); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestRestoreLegacySQLiteAndFullArchive(t *testing.T) {
+	logger.InitLogger(logging.ERROR)
+	for _, format := range []string{"sqlite", "zip"} {
+		t.Run(format, func(t *testing.T) {
+			path, key := nodeBackupFixture(t)
+			keyPath := filepath.Join(filepath.Dir(path), backupKeyName)
+			version := config.GetVersion()
+			if format == "sqlite" {
+				version = "1.6.7"
+				if err := db.Delete(&model.NodeDNSProfile{}, "name = ?", "Fixture").Error; err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Remove(keyPath); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := db.Create(&model.Setting{Key: "version", Value: version}).Error; err != nil {
+				t.Fatal(err)
+			}
+			item := model.Client{Name: "backup-fixture", Config: json.RawMessage(`{}`)}
+			if err := db.Create(&item).Error; err != nil {
+				t.Fatal(err)
+			}
+			getBackup := GetDb
+			if format == "zip" {
+				getBackup = GetFullBackup
+			}
+			body, err := getBackup("")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := db.Delete(&item).Error; err != nil {
+				t.Fatal(err)
+			}
+			if format == "zip" {
+				if err := os.WriteFile(keyPath, bytes.Repeat([]byte{0x32}, 32), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := restoreDB(backupMemoryFile{bytes.NewReader(body)}); err != nil {
+				t.Fatal(err)
+			}
+			var restored model.Client
+			if err := db.First(&restored, item.Id).Error; err != nil || restored.Name != item.Name {
+				t.Fatalf("restored client: %v", err)
+			}
+			if format == "zip" {
+				actual, err := os.ReadFile(keyPath)
+				if err != nil || !bytes.Equal(actual, key) {
+					t.Fatal("restored key does not match the backup", err)
+				}
+			}
+		})
 	}
 }
