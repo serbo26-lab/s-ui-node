@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"path/filepath"
 	"sync"
 
@@ -14,6 +15,8 @@ import (
 	"github.com/gofrs/uuid/v5"
 	"github.com/sagernet/sing-box/option"
 )
+
+var errHotUsersUnsupported = errors.New("inbound_user_update_unsupported")
 
 // CoreRuntime reuses S-UI's core, never the panel's global ConfigService/corePtr.
 type CoreRuntime struct {
@@ -128,7 +131,7 @@ func (r *CoreRuntime) apply(config []byte, rollback bool) error {
 		if err := r.updateUsers(config); err == nil {
 			r.config = append([]byte(nil), config...)
 			return nil
-		} else {
+		} else if !errors.Is(err, errHotUsersUnsupported) {
 			// A multi-inbound update can fail after one success; rebuild the
 			// previous full config rather than leaving a partially applied ACL.
 			_ = r.stopCore()
@@ -178,12 +181,15 @@ func (r *CoreRuntime) updateUsers(config []byte) error {
 		if err := json.Unmarshal(inbound, &meta); err != nil {
 			return err
 		}
+		if maps.Equal(previous[meta.Tag], current[meta.Tag]) {
+			continue
+		}
 		updated, err := r.core.UpdateInboundUsers(inbound)
 		if err != nil {
 			return err
 		}
 		if !updated {
-			return fmt.Errorf("inbound %q does not support user updates", meta.Tag)
+			return fmt.Errorf("%w: inbound %q", errHotUsersUnsupported, meta.Tag)
 		}
 		keep := make(map[string]struct{}, len(meta.Users))
 		for _, user := range meta.Users {
@@ -216,6 +222,9 @@ func userFingerprints(config []byte) (map[string]map[string]string, error) {
 		result[inbound.Tag] = map[string]string{}
 		for _, user := range inbound.Users {
 			name, _ := user["name"].(string)
+			if name == "" {
+				name, _ = user["username"].(string)
+			}
 			b, err := json.Marshal(user)
 			if err != nil {
 				return nil, err

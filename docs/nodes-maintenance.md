@@ -40,3 +40,12 @@ While that bootstrap is pending, structural delivery waits and retries instead
 of permanently rejecting the configuration. An expired worker lease can delay
 this retry; the installer continues verification without recreating clients or
 their credentials.
+
+## Runtime updates
+
+Unchanged user lists do not invoke the protocol's hot-update interface. When an
+inbound cannot update users in place, the agent rebuilds the runtime with the
+current access list. Supported inbounds continue to use in-place updates.
+
+A rejected certificate activation retains the active certificate. A successful
+retry clears that activation error without hiding a newer resource error.

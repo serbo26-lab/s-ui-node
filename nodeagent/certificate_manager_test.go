@@ -289,6 +289,50 @@ func TestResourceRejectedActivationKeepsDurableActiveCertificate(t *testing.T) {
 	if err != nil || active.Digest != first.Digest || restored.BeginTrial() {
 		t.Fatal("restart lost last active certificate/backoff", err)
 	}
+	restored.mu.Lock()
+	restored.state.RetryAt = 0
+	restored.mu.Unlock()
+	if !restored.BeginTrial() {
+		t.Fatal("replacement did not retry after backoff")
+	}
+	if err := restored.FinishTrial(true); err != nil {
+		t.Fatal(err)
+	}
+	active, err = restored.Resolve("vpn.example")
+	if err != nil || active.Digest != candidate.Digest || restored.Status().LastError != "" {
+		t.Fatal("successful retry retained the activation error or old certificate", err)
+	}
+	restored.Close()
+	confirmed, err := NewCertificateManager(7, "fixture-epoch", directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer confirmed.Close()
+	active, err = confirmed.Resolve("vpn.example")
+	if err != nil || active.Digest != candidate.Digest || confirmed.Status().LastError != "" {
+		t.Fatal("successful retry was not durable", err)
+	}
+}
+
+func TestSuccessfulOldCertificateTrialKeepsNewResourceError(t *testing.T) {
+	for _, code := range []string{"certificate_activation_failed", "certificate_issue_failed"} {
+		t.Run(code, func(t *testing.T) {
+			resource, err := NewCertificateManager(7, "fixture-epoch", t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resource.Close()
+			resource.state.Metadata = nodecert.Metadata{Domain: "vpn.example", Digest: "new-candidate"}
+			resource.state.LastError = code
+			resource.trial = &nodecert.Metadata{Domain: "vpn.example", Digest: "old-candidate"}
+			if err := resource.FinishTrial(true); err != nil {
+				t.Fatal(err)
+			}
+			if resource.Status().LastError != code {
+				t.Fatal("old activation hid the newer resource error")
+			}
+		})
+	}
 }
 
 func TestResourceIssuerTimeoutIsVisibleAndKeepsActiveMaterial(t *testing.T) {

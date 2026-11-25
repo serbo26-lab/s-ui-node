@@ -283,6 +283,9 @@ func (r *CertificateManager) FinishTrial(success bool) error {
 		next.Active = active
 		next.FailedDigest = ""
 		next.RetryAt = 0
+		if next.LastError == "certificate_activation_failed" && next.Metadata.Digest == meta.Digest {
+			next.LastError = ""
+		}
 	} else {
 		next.FailedDigest = meta.Digest
 		next.RetryAt = time.Now().Unix() + 60
