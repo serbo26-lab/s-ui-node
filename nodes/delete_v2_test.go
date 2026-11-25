@@ -85,6 +85,46 @@ func TestV2NodeDeletionWaitsForOldHostAndProvisioning(t *testing.T) {
 	}
 }
 
+func TestV2NodeRecreatedAtSameAddressStartsWithFreshSSHIdentity(t *testing.T) {
+	db, node, _ := fixture(t)
+	t.Setenv("SUI_DB_FOLDER", t.TempDir())
+	previous := model.NodeInstallation{
+		NodeId: node.Id, IP: "192.0.2.30", SSHPort: 22, SSHUser: "root",
+		OwnerID: "old-owner-fixture", HostKey: "old-host-fixture", PrivateKey: "old-ssh-fixture",
+	}
+	if err := db.Create(&previous).Error; err != nil {
+		t.Fatal(err)
+	}
+	request := json.RawMessage(`1`)
+	if err := DeleteNode(t.Context(), request, "test"); err == nil || err.Error() != "node_disable_pending_delete" {
+		t.Fatalf("unconfirmed revocation allowed deletion: %v", err)
+	}
+	node.Enable = false
+	node.AppliedRevision, node.DesiredRevision = 3, 3
+	node.AppliedSnapshot, _ = json.Marshal(Snapshot{Node: Publication{Enable: false}})
+	if err := db.Save(&node).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := DeleteNode(t.Context(), request, "test"); err != nil {
+		t.Fatal(err)
+	}
+	job, created, err := createLiveProvision(ProvisionRequest{
+		ModelVersion: 2, RequestKey: "fresh-install-fixture", Name: node.Name,
+		IP: previous.IP, SSHPort: previous.SSHPort, SSHUser: previous.SSHUser, Password: "fixture",
+	}, "test")
+	if err != nil || !created {
+		t.Fatalf("fresh installation at the same address was blocked: %v", err)
+	}
+	plan, err := loadLivePlan(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Target.OwnerID == "" || plan.Target.OwnerID == previous.OwnerID ||
+		plan.Target.HostKey != "" || plan.Target.PrivateKey != "" {
+		t.Fatal("fresh installation reused old SSH identity")
+	}
+}
+
 func TestNodeDeletionWithStaleDNS(t *testing.T) {
 	for _, rejected := range []bool{false, true} {
 		name := "provider reports record missing"

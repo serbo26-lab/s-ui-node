@@ -106,6 +106,79 @@ func TestNodeSelectionAddsOneInboundWithoutChangingOtherNode(t *testing.T) {
 	}
 }
 
+func TestNodeSelectionCanClearAllInbounds(t *testing.T) {
+	f := liveSetup(t, 2)
+	if err := UpgradeInboundCatalog(f.db); err != nil {
+		t.Fatal(err)
+	}
+	f.run(t, 0)
+	f.run(t, 1)
+	selectInbounds := func(ids []uint) error {
+		body, err := json.Marshal(map[string]interface{}{
+			"id": f.nodes[0].Id, "expected_version": f.nodes[0].SettingsVersion, "inbound_template_ids": ids,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return Save("nodes", "selectinbounds", body, "test")
+	}
+	if err := selectInbounds(nil); err == nil {
+		t.Fatal("accepted a missing selection")
+	}
+	if err := selectInbounds([]uint{}); err != nil {
+		t.Fatal(err)
+	}
+	if f.links(t) != 2 {
+		t.Fatal("withdrew a connection before the agent confirmed the change")
+	}
+	f.run(t, 0)
+	if !f.nodes[0].Enable || f.links(t) != 1 {
+		t.Fatal("empty selection did not withdraw only the selected node's connections")
+	}
+	var reservations int64
+	if err := f.db.Model(&model.NodePortReservation{}).Where("node_id = ?", f.nodes[0].Id).Count(&reservations).Error; err != nil || reservations != 0 {
+		t.Fatalf("node listener reservations remained after confirmation: %v (%d)", err, reservations)
+	}
+	if err := selectInbounds([]uint{}); err != nil {
+		t.Fatal(err)
+	}
+	var node model.Node
+	if err := f.db.First(&node, f.nodes[0].Id).Error; err != nil || node.SettingsVersion != f.nodes[0].SettingsVersion {
+		t.Fatalf("applying the same empty selection changed node settings: %v", err)
+	}
+}
+
+func TestAccessFailureDoesNotReportStructuralFailure(t *testing.T) {
+	f := liveSetup(t, 1)
+	f.run(t, 0)
+	node := f.nodes[0]
+	controlKey := node.ControlKey
+	if err := f.db.Model(&node).Update("control_key", "").Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := Reconcile(t.Context(), node.Id); err == nil {
+		t.Fatal("invalid control credentials were accepted")
+	}
+	var access model.NodeAccessState
+	if err := f.db.First(&access, "node_id = ?", node.Id).Error; err != nil || access.LastError == "" {
+		t.Fatalf("access failure was not recorded: %v", err)
+	}
+	var saved model.Node
+	if err := f.db.First(&saved, node.Id).Error; err != nil || saved.LastError != "" {
+		t.Fatalf("access failure was reported as structural failure: %v, %q", err, saved.LastError)
+	}
+	if err := f.db.Model(&node).Update("control_key", controlKey).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := Save("nodes", "retry", json.RawMessage(`{"id":1}`), "test"); err != nil {
+		t.Fatal(err)
+	}
+	f.run(t, 0)
+	if err := f.db.First(&access, "node_id = ?", node.Id).Error; err != nil || access.LastError != "" {
+		t.Fatalf("confirmed access retained an old error: %v, %q", err, access.LastError)
+	}
+}
+
 func TestPrivateInboundDeletionAfterNodeRemoval(t *testing.T) {
 	for _, name := range []string{"delete node", "upgrade old database"} {
 		t.Run(name, func(t *testing.T) {

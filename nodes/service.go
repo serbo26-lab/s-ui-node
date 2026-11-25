@@ -371,6 +371,11 @@ func Save(object, action string, data json.RawMessage, actor string) error {
 						return err
 					}
 				}
+				if value.AgentProtocol == 2 {
+					if err := database.QueueNodeTasks(tx, []uint{id}, "access"); err != nil {
+						return err
+					}
+				}
 			} else if action == "selectinbounds" {
 				var request struct {
 					Ids      []uint  `json:"inbound_template_ids"`

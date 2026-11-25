@@ -99,8 +99,8 @@ func catalogMembers(tx *gorm.DB, templateID uint) ([]uint, error) {
 }
 
 func selectedInboundEntries(tx *gorm.DB, ids []uint, owner uint) ([]SpecEntry, error) {
-	if len(ids) == 0 || len(ids) > 32 {
-		return nil, errors.New("choose_node_inbound_templates")
+	if len(ids) > 32 {
+		return nil, errors.New("node_inbound_selection_limit")
 	}
 	entries := make([]SpecEntry, 0, len(ids))
 	seen := make(map[string]bool, len(ids))
@@ -173,6 +173,9 @@ func selectNodeInbounds(tx *gorm.DB, node *model.Node, ids []uint, expected *uin
 	if expected == nil || node.SettingsVersion != *expected {
 		return errors.New("node_settings_version_conflict")
 	}
+	if ids == nil {
+		return errors.New("invalid_node_inbound_selection")
+	}
 	var template model.NodeTemplate
 	if err := tx.First(&template, node.TemplateId).Error; err != nil {
 		return err
@@ -181,7 +184,7 @@ func selectNodeInbounds(tx *gorm.DB, node *model.Node, ids []uint, expected *uin
 	if err != nil {
 		return err
 	}
-	if slices.Equal(old, ids) && len(ids) > 0 {
+	if slices.Equal(old, ids) && template.Kind == deploymentTemplate {
 		return nil
 	}
 	entries, err := selectedInboundEntries(tx, ids, node.Id)

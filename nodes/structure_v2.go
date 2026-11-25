@@ -80,6 +80,16 @@ func prepareStructure(db *gorm.DB, node model.Node, status nodeagent.StatusV2, o
 
 func reconcileStructureV2(ctx context.Context, node model.Node) (failure error) {
 	db := database.GetDB()
+	// Access has its own delivery and error state. Reconcile it first so
+	// revocations can still apply when a structural draft cannot compile.
+	if err := ReconcileAccess(ctx, node.Id); err != nil {
+		return err
+	}
+	finish, run, err := leaseStructure(node)
+	if err != nil || !run {
+		return err
+	}
+	defer func() { finish(failure) }()
 	defer func() {
 		if failure != nil && !errors.Is(failure, errListenerDraftChanged) && ctx.Err() == nil {
 			target := db.Model(&model.Node{}).Where("id = ? AND management_generation = ? AND control_epoch = ?", node.Id, node.ManagementGeneration, node.ControlEpoch)
@@ -90,18 +100,6 @@ func reconcileStructureV2(ctx context.Context, node model.Node) (failure error) 
 			target.Update("last_error", listenerFailureCode(failure))
 		}
 	}()
-	// Always reconcile permissions before compiling the possibly invalid draft.
-	if err := ReconcileAccess(ctx, node.Id); err != nil {
-		return err
-	}
-	finish, run, err := leaseStructure(node)
-	if err != nil {
-		return err
-	}
-	if !run {
-		return nil
-	}
-	defer func() { finish(failure) }()
 	client, closeClient, err := controlClient(ctx, node)
 	if err != nil {
 		return err
