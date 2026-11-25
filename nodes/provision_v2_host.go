@@ -532,7 +532,6 @@ func liveInstallScript() string {
 	script = strings.Replace(script, "prior=authorized.read_text() if authorized.exists() else ''", "import fcntl\nkeylock=os.open(sshdir/'.s-ui-node-key.lock',os.O_RDWR|os.O_CREAT|os.O_NOFOLLOW,0o600);fcntl.flock(keylock,fcntl.LOCK_EX)\nprior=authorized.read_text() if authorized.exists() else ''", 1)
 	script = strings.Replace(script, " --client-ca %d/ca.pem", " --bootstrap-id '''+p['bootstrap_id']+''' --client-ca %d/ca.pem", 1)
 	script = strings.Replace(script, "assert ident>0", "assert __import__('re').fullmatch('[a-zA-Z0-9_-]{16,96}',p['bootstrap_id'])\nassert ident>0", 1)
-	script = strings.Replace(script, "for proto,port in p['ports'].items():subprocess.run([ufw,'allow',str(port)+('/udp' if proto in ('tuic','hysteria2') else '/tcp')", "for listener in p['listeners']:subprocess.run([ufw,'allow',str(listener['port'])+'/'+listener['network']", 1)
 	// A failed new installation stays fenced; never restart an old cached ACL.
 	script = strings.Replace(script, "systemctl('restart',name,wait=90,check=False)", "systemctl('stop',name,wait=90,check=False)", 1)
 	return script

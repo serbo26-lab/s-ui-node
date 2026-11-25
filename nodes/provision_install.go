@@ -116,6 +116,7 @@ func installRemoteAgent(parent context.Context, client *ssh.Client, user, script
 
 const installAgentScript = `import hashlib,json,os,pwd,shutil,subprocess,sys
 from pathlib import Path
+` + provisionFirewallPython + `
 p=json.load(sys.stdin);ident=int(p['id']);name='s-ui-node-'+str(ident)
 assert ident>0 and 1024<=int(p['control_port'])<=65535
 base=Path('/opt/s-ui-nodes')/str(ident);creds=Path('/etc/s-ui-nodes')/str(ident)
@@ -182,11 +183,9 @@ WantedBy=multi-user.target
  systemctl('enable',name)
  systemctl('restart',name,wait=90)
  systemctl('is-active','--quiet',name)
- # Add narrowly scoped rules only when an existing UFW is enabled. Do not
- # enable/flush a firewall or disturb other software's listeners.
- ufw=shutil.which('ufw')
- if ufw and 'Status: active' in subprocess.run([ufw,'status'],capture_output=True,text=True,timeout=15,env=dict(os.environ,LC_ALL='C')).stdout:
-  for proto,port in p['ports'].items():subprocess.run([ufw,'allow',str(port)+('/udp' if proto in ('tuic','hysteria2') else '/tcp'),'comment',name],check=True,capture_output=True,timeout=15)
+ listeners=p.get('listeners')
+ if listeners is None:listeners=[{'port':port,'network':'udp' if proto in ('tuic','hysteria2','hysteria') else 'tcp'} for proto,port in p['ports'].items()]
+ configure_node_firewall(listeners,name)
  print(json.dumps({'installed':True,'service':name}))
 except BaseException:
  if oldbinary:shutil.copy2(base/'agent.previous',binary)
