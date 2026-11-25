@@ -100,4 +100,29 @@ func TestListenerInspectionDetectsRealSocketsPerNetwork(t *testing.T) {
 	if inspection.ControlPort == 0 || inspection.ControlPort == 16500 {
 		t.Fatalf("control listener conflicts with an explicitly requested TCP port: %d", inspection.ControlPort)
 	}
+	// An actively closed TCP connection leaves TIME_WAIT after the listener
+	// stops. It must not prevent restoring an inbound on the same port.
+	connection, err := net.Dial("tcp4", tcp.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	accepted, err := tcp.Accept()
+	if err != nil {
+		connection.Close()
+		t.Fatal(err)
+	}
+	accepted.Close()
+	buffer := make([]byte, 1)
+	connection.Read(buffer)
+	connection.Close()
+	tcp.Close()
+	cmd = exec.Command(python, "-c", prefix+liveInspectionScript[len(liveHostHeader):])
+	cmd.Stdin = bytes.NewReader(body)
+	out, err = cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("closed listener inspection failed: %s %v", out, err)
+	}
+	if err = json.Unmarshal(out, &inspection); err != nil || len(inspection.Occupied) != 0 {
+		t.Fatalf("TIME_WAIT was reported as an active listener: %s %v", out, err)
+	}
 }

@@ -619,11 +619,12 @@ for network in ('tcp','udp'):
     flows.setdefault((network,port),set()).add(row[9])
 def free(port,network,control=False):
  inodes=flows.get((network,port),set())
- if inodes and inodes.issubset(owned):return True
+ if inodes:return inodes.issubset(owned)
  kind=socket.SOCK_DGRAM if network=='udp' else socket.SOCK_STREAM
  for family,address in [(socket.AF_INET,'127.0.0.1' if control else '0.0.0.0'),(socket.AF_INET6,'::1' if control else '::')]:
   try:
    with socket.socket(family,kind) as sock:
+    if network=='tcp':sock.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
     if family==socket.AF_INET6:sock.setsockopt(socket.IPPROTO_IPV6,socket.IPV6_V6ONLY,1)
     sock.bind((address,port))
   except OSError as e:
