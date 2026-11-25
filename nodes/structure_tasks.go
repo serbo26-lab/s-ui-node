@@ -57,9 +57,9 @@ func leaseStructure(node model.Node) (func(error), bool, error) {
 				updates["state"], updates["attempts"], updates["last_error"] = "done", 0, ""
 			} else if errors.Is(failure, errListenerDraftChanged) {
 				return tx.Model(&current).Updates(updates).Error
-			} else if errors.Is(failure, errNodeDomainPending) || errors.Is(failure, errNodeCertificatePending) || errors.Is(failure, errAgentProtocolsPending) {
+			} else if errors.Is(failure, errNodeDomainPending) || errors.Is(failure, errNodeCertificatePending) || errors.Is(failure, errAgentProtocolsPending) || errors.Is(failure, errAgentBootstrapPending) {
 				updates["state"], updates["attempts"] = "waiting", 0
-				for _, reason := range []error{errNodeDomainPending, errNodeCertificatePending, errAgentProtocolsPending} {
+				for _, reason := range []error{errNodeDomainPending, errNodeCertificatePending, errAgentProtocolsPending, errAgentBootstrapPending} {
 					if errors.Is(failure, reason) {
 						updates["last_error"] = reason.Error()
 						break

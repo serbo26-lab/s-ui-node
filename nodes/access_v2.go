@@ -288,7 +288,7 @@ func ReconcileAccess(ctx context.Context, id uint) (failure error) {
 	if err != nil {
 		return err
 	}
-	if status.AppliedAccessRevision != desired.Revision || status.AppliedAccessDigest != desired.Digest() || !status.Running {
+	if status.BootstrapPending || status.AppliedAccessRevision != desired.Revision || status.AppliedAccessDigest != desired.Digest() || !status.Running {
 		status, err = putV2(ctx, client, node, "/v2/access", desired)
 		if err != nil {
 			return err

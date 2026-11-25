@@ -58,6 +58,9 @@ Assign a converted node using the client's independent `nodes` array.
 and a read-only projection for whole-node clients. Read `clients?id=<ID>`
 before editing: the unfiltered list omits protocol configuration.
 
+For control-certificate renewal, HTTP-01 firewall permissions and interrupted
+installation recovery, see [node maintenance](nodes-maintenance.md).
+
 ## Backup
 
 `GET .../getdb?format=archive` returns `panel.db`, optional

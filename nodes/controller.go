@@ -39,6 +39,7 @@ func Start(parent context.Context, traffic TrafficConfig) context.CancelFunc {
 	go accessLoop(ctx)
 	go resourceLoop(ctx)
 	go upgradeAgentsLoop(ctx)
+	go controlRenewalLoop(ctx)
 	go func() {
 		ticker := time.NewTicker(2 * time.Second)
 		defer ticker.Stop()

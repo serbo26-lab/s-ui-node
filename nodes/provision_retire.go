@@ -79,7 +79,7 @@ unit=Path('/etc/systemd/system')/(name+'.service')
 if unit.exists():
  if '# S-UI managed node %d' not in unit.read_text():raise SystemExit('not our service')
  subprocess.run(['systemctl','disable','--now',name],check=True,capture_output=True)
-configure_node_firewall([],name,release=True)
+release_node_firewall(name)
 print(json.dumps({'retired':True}))
 `, current.NodeId, current.NodeId)
 	_, err = remotePython(short, client, previous.SSHUser, script, nil)

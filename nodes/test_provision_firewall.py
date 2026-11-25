@@ -84,7 +84,7 @@ class OwnershipChecks(unittest.TestCase):
 
     def apply(self, ports, owner='s-ui-node-10', confirmed=True, revision=1, **options):
         listeners = [{'port': port, 'network': network} for port, network in ports]
-        version = {'revision': revision, 'generation': options.pop('generation', 0), 'operation': options.pop('operation', '')}
+        version = {'revision': revision, 'policy': options.pop('policy', 0), 'generation': options.pop('generation', 0), 'operation': options.pop('operation', '')}
         firewall.configure_node_firewall(listeners, owner, confirmed, version=version, **options)
 
     def state(self):
@@ -190,6 +190,60 @@ class OwnershipChecks(unittest.TestCase):
     def test_ownership_file_is_private(self):
         self.apply([(443, 'tcp')])
         self.assertEqual(stat.S_IMODE((self.directory / 'firewall-state.json').stat().st_mode), 0o600)
+
+    def test_http01_survives_protocol_apply_and_has_independent_revision(self):
+        self.apply([(443, 'tcp')], revision=10)
+        self.apply([(80, 'tcp')], owner='s-ui-node-10-http01', revision=1)
+        self.apply([(8443, 'tcp')], revision=11)
+        self.assertEqual({port for _, _, port in self.backend.ports}, {'80/tcp', '8443/tcp'})
+        self.apply([], revision=12)
+        self.assertEqual({port for _, _, port in self.backend.ports}, {'80/tcp'})
+        self.apply([], owner='s-ui-node-10-http01', revision=2)
+        self.apply([(80, 'tcp')], owner='s-ui-node-10-http01', revision=1)
+        self.assertEqual(self.backend.ports, set())
+
+    def test_http01_shares_port_with_a_proxy_and_preserves_external_rules(self):
+        self.apply([(80, 'tcp')])
+        self.apply([(80, 'tcp')], owner='s-ui-node-10-http01')
+        self.apply([], owner='s-ui-node-10-http01', revision=2)
+        self.assertEqual({port for _, _, port in self.backend.ports}, {'80/tcp'})
+        self.apply([], revision=2)
+        for permanent in (False, True):
+            for zone in self.backend.zones:
+                self.backend.ports.add((permanent, zone, '80/tcp'))
+        self.apply([(80, 'tcp')], owner='s-ui-node-10-http01', revision=3)
+        self.apply([], owner='s-ui-node-10-http01', revision=4)
+        self.assertEqual(len(self.backend.ports), 4)
+
+    def test_http01_reenable_fences_late_disable_with_same_certificate(self):
+        owner = 's-ui-node-10-http01'
+        self.apply([(80, 'tcp')], owner=owner, policy=1)
+        self.apply([], owner=owner, policy=2)
+        self.apply([(80, 'tcp')], owner=owner, policy=3)
+        self.apply([], owner=owner, policy=2)
+        self.assertEqual({port for _, _, port in self.backend.ports}, {'80/tcp'})
+        self.apply([], owner=owner, policy=4)
+        self.apply([(80, 'tcp')], owner=owner, policy=3)
+        self.assertEqual(self.backend.ports, set())
+
+    def test_fencing_releases_http01_and_proxy_owners(self):
+        self.apply([(443, 'tcp')])
+        self.apply([(80, 'tcp')], owner='s-ui-node-10-http01')
+        self.apply([(80, 'tcp')], owner='s-ui-node-20-http01')
+        firewall.release_node_firewall('s-ui-node-10')
+        self.assertEqual({port for _, _, port in self.backend.ports}, {'80/tcp'})
+        firewall.release_node_firewall('s-ui-node-20')
+        self.assertEqual(self.backend.ports, set())
+
+    def test_http01_reinstallation_fences_old_bootstrap(self):
+        owner = 's-ui-node-10-0123456789ab-http01'
+        self.apply([(80, 'tcp')], owner=owner, generation=1, operation='old', revision=5)
+        self.apply([], owner=owner, initialize=True, generation=2, operation='new', revision=0)
+        with self.assertRaises(ValueError):
+            self.apply([(80, 'tcp')], owner=owner, generation=1, operation='old', revision=6)
+        self.assertEqual(self.backend.ports, set())
+        self.apply([(80, 'tcp')], owner=owner, generation=2, operation='new', revision=5)
+        self.assertEqual({port for _, _, port in self.backend.ports}, {'80/tcp'})
 
 
 if __name__ == '__main__':

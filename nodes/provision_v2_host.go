@@ -6,7 +6,6 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
-	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -56,23 +55,7 @@ func stageLiveJob(job *model.NodeJob, plan liveProvisionPlan, stage string) erro
 }
 
 func liveControlValid(node model.Node, installation model.NodeInstallation) bool {
-	if installation.ServerCertificate == "" || installation.ServerKey == "" {
-		return false
-	}
-	if _, err := tls.X509KeyPair([]byte(node.ControlCertificate), []byte(node.ControlKey)); err != nil {
-		return false
-	}
-	for _, body := range []string{node.ControlCA, node.ControlCertificate} {
-		block, _ := pem.Decode([]byte(body))
-		if block == nil {
-			return false
-		}
-		cert, err := x509.ParseCertificate(block.Bytes)
-		if err != nil || cert.NotAfter.Before(time.Now().Add(24*time.Hour)) {
-			return false
-		}
-	}
-	return true
+	return controlIdentityValid(node, installation, time.Now())
 }
 
 func executeLiveProvision(ctx context.Context, job *model.NodeJob, plan *liveProvisionPlan, password string) error {
@@ -446,6 +429,9 @@ func liveProvisionReady(id uint) bool {
 			return false
 		}
 	}
+	if !n.Enable {
+		return true
+	}
 	var domain model.NodeDomainBinding
 	if db.First(&domain, "node_id = ?", id).Error == nil {
 		if domain.State != "ready" {
@@ -593,7 +579,7 @@ for proc in Path('/proc').glob('[0-9]*/cmdline'):
  try:parts=proc.read_bytes().split(b'\0')
  except (OSError,PermissionError):continue
  if binary.encode() in parts:raise SystemExit('owned process still active')
-configure_node_firewall([],name,release=True)
+release_node_firewall(name)
 print(json.dumps({'fenced':True}))
 `
 

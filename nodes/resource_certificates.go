@@ -245,6 +245,11 @@ func reconcileCertificate(ctx context.Context, node model.Node, domain model.Nod
 	} else if err != nil {
 		return err
 	}
+	if binding.Mode == "http01" {
+		if err := ensureCertificateFirewall(ctx, db, node, binding, true); err != nil {
+			return err
+		}
+	}
 	if binding.Mode == "dns01" {
 		var version model.NodeCertificateVersion
 		var meta nodecert.Metadata
@@ -359,7 +364,13 @@ func reconcileCertificate(ctx context.Context, node model.Node, domain model.Nod
 	if request.Method == "install" && meta.Digest != nodecert.Digest(request.Bundle) {
 		return errors.New("certificate_artifact_digest_mismatch")
 	}
-	return acknowledgeCertificate(node, binding, request, meta, observed.LastError)
+	if err := acknowledgeCertificate(node, binding, request, meta, observed.LastError); err != nil {
+		return err
+	}
+	if binding.Mode != "http01" {
+		return ensureCertificateFirewall(ctx, db, node, binding, false)
+	}
+	return nil
 }
 
 func acknowledgeCertificate(node model.Node, binding model.NodeCertificateBinding, request nodeagent.CertificateRequest, meta nodecert.Metadata, lastError string) error {

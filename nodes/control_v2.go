@@ -21,6 +21,7 @@ import (
 var errAgentV1 = errors.New("agent_v1")
 var errV2Rejected = errors.New("v2_state_rejected")
 var errAgentProtocolsPending = errors.New("node_agent_protocols_pending")
+var errAgentBootstrapPending = errors.New("node_agent_bootstrap_pending")
 
 // A managed trial binary cannot introduce ACL fields its rollback binary would
 // reject. Its capabilities are committed only after the remote trial succeeds.

@@ -184,6 +184,7 @@ WantedBy=multi-user.target
  systemctl('restart',name,wait=90)
  systemctl('is-active','--quiet',name)
  configure_node_firewall(p['listeners'],name,version={'generation':p.get('generation',0),'operation':p.get('bootstrap_id','')},initialize=True)
+ configure_node_firewall([],name+'-http01',confirmed=True,version={'generation':p.get('generation',0),'operation':p.get('bootstrap_id','')},initialize=True)
  print(json.dumps({'installed':True,'service':name}))
 except BaseException:
  if oldbinary:shutil.copy2(base/'agent.previous',binary)

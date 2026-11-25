@@ -93,7 +93,7 @@ func reconcileStructureV2(ctx context.Context, node model.Node) (failure error) 
 	defer func() {
 		if failure != nil && !errors.Is(failure, errListenerDraftChanged) && ctx.Err() == nil {
 			target := db.Model(&model.Node{}).Where("id = ? AND management_generation = ? AND control_epoch = ?", node.Id, node.ManagementGeneration, node.ControlEpoch)
-			if errors.Is(failure, errNodeDomainPending) || errors.Is(failure, errNodeCertificatePending) || errors.Is(failure, errAgentProtocolsPending) {
+			if errors.Is(failure, errNodeDomainPending) || errors.Is(failure, errNodeCertificatePending) || errors.Is(failure, errAgentProtocolsPending) || errors.Is(failure, errAgentBootstrapPending) {
 				target.Where("last_error = ?", "structural_update_failed").Update("last_error", "")
 				return
 			}
@@ -108,6 +108,9 @@ func reconcileStructureV2(ctx context.Context, node model.Node) (failure error) 
 	status, err := getStatusV2(ctx, client, node)
 	if err != nil {
 		return err
+	}
+	if status.BootstrapPending {
+		return errAgentBootstrapPending
 	}
 	if err := confirmNodeFirewall(ctx, db, node, status); err != nil {
 		return err
@@ -135,11 +138,14 @@ func reconcileStructureV2(ctx context.Context, node model.Node) (failure error) 
 		status, err = putV2(ctx, client, node, "/v2/spec", spec)
 		if err != nil {
 			if errors.Is(err, errV2Rejected) {
-				db.Model(&model.Node{}).Where("id = ? AND desired_revision = ? AND management_generation = ?", node.Id, spec.Revision, node.ManagementGeneration).Update("rejected_revision", spec.Revision)
 				observed, readErr := getStatusV2(ctx, client, node)
 				if readErr != nil {
 					return readErr
 				}
+				if observed.BootstrapPending {
+					return errAgentBootstrapPending
+				}
+				db.Model(&model.Node{}).Where("id = ? AND desired_revision = ? AND management_generation = ?", node.Id, spec.Revision, node.ManagementGeneration).Update("rejected_revision", spec.Revision)
 				if cleanupErr := confirmNodeFirewall(ctx, db, node, observed); cleanupErr != nil {
 					return cleanupErr
 				}

@@ -166,7 +166,7 @@ def _firewall_collect(state, backends):
 
 
 def configure_node_firewall(listeners, name, confirmed=False, version=None, release=False, initialize=False):
-    if not re.fullmatch(r's-ui-node-[1-9][0-9]*(?:-[a-f0-9]{12})?', name):
+    if not re.fullmatch(r's-ui-node-[1-9][0-9]*(?:-[a-f0-9]{12})?(?:-http01)?', name):
         raise ValueError('invalid firewall owner')
     endpoints = {(int(row['port']), row['network']) for row in listeners}
     if any(not 1 <= port <= 65535 or network not in ('tcp', 'udp') for port, network in endpoints):
@@ -180,21 +180,28 @@ def configure_node_firewall(listeners, name, confirmed=False, version=None, rele
         _configure_firewall_locked(endpoints, name, confirmed, version or {}, release, initialize)
 
 
+def release_node_firewall(name):
+    configure_node_firewall([], name + '-http01', release=True)
+    configure_node_firewall([], name, release=True)
+
+
 def _firewall_owner(state, name, version, release, initialize):
     generation = version.get('generation', 0)
     revision = version.get('revision', 0)
+    policy = version.get('policy', 0)
     operation = version.get('operation', '')
     owner = state['owners'].get(name, {'generation': generation, 'revision': 0,
                                      'operation': operation, 'rules': [], 'pending': []})
     if initialize:
-        owner.update(generation=generation, revision=0, operation=operation, released=False)
+        owner.update(generation=generation, revision=0, policy=0, operation=operation, released=False)
     if not release and (owner.get('released') or owner['operation'] != operation):
         raise ValueError('stale firewall installation')
     if not release and generation < owner['generation']:
         raise ValueError('stale firewall generation')
     if generation > owner['generation']:
         owner['revision'] = 0
-    if not release and revision < owner['revision']:
+        owner['policy'] = 0
+    if not release and (revision < owner['revision'] or policy < owner.get('policy', 0)):
         return None
     owner['generation'] = generation
     return owner
@@ -226,6 +233,7 @@ def _configure_firewall_locked(endpoints, name, confirmed, version, release, ini
         owner['rules'] = sorted(candidates)
         owner['pending'] = []
         owner['revision'] = version.get('revision', 0)
+        owner['policy'] = version.get('policy', 0)
     if release:
         owner['released'] = True
     _firewall_save(state)

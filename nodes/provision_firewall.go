@@ -16,6 +16,7 @@ import (
 
 var errNodeFirewall = errors.New("node_firewall_failed")
 var firewallReceipts sync.Map
+var certificateFirewallReceipts sync.Map
 
 //go:embed provision_firewall.py
 var provisionFirewallPython string
@@ -33,12 +34,14 @@ func ensureNodeFirewall(ctx context.Context, db *gorm.DB, node model.Node, snaps
 	if install.PrivateKey == "" {
 		return nil
 	}
-	name := fmt.Sprintf("s-ui-node-%d", node.Id)
-	if install.OwnerID != "" {
-		if len(install.OwnerID) != 32 {
-			return errNodeFirewall
+	if !node.Enable {
+		if err := ensureCertificateFirewall(ctx, db, node, model.NodeCertificateBinding{}, false); err != nil {
+			return err
 		}
-		name += "-" + install.OwnerID[:12]
+	}
+	name, err := firewallOwnerName(node.Id, install.OwnerID)
+	if err != nil {
+		return err
 	}
 	fingerprint, err := snapshotFingerprint(snapshot)
 	if err != nil {
@@ -62,6 +65,30 @@ func ensureNodeFirewall(ctx context.Context, db *gorm.DB, node model.Node, snaps
 			listeners = append(listeners, expandSocket(listenerSocket{Network: listenerNetwork(inbound.Type, options.Transport, options.Network), Port: options.Port})...)
 		}
 	}
+	if !confirmed {
+		firewallReceipts.Delete(node.Id)
+	}
+	if err := configureManagedFirewall(ctx, node, install, name, listeners, snapshot.Deployment.Revision, 0, confirmed); err != nil {
+		return err
+	}
+	if confirmed {
+		firewallReceipts.Store(node.Id, receipt)
+	}
+	return nil
+}
+
+func firewallOwnerName(id uint, owner string) (string, error) {
+	name := fmt.Sprintf("s-ui-node-%d", id)
+	if owner != "" {
+		if len(owner) != 32 {
+			return "", errNodeFirewall
+		}
+		name += "-" + owner[:12]
+	}
+	return name, nil
+}
+
+func configureManagedFirewall(ctx context.Context, node model.Node, install model.NodeInstallation, name string, listeners []listenerSocket, revision, policy uint64, confirmed bool) error {
 	ctx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
 	client, err := connectSSH(ctx, &install, "", false)
@@ -69,9 +96,6 @@ func ensureNodeFirewall(ctx context.Context, db *gorm.DB, node model.Node, snaps
 		return errNodeFirewall
 	}
 	defer client.Close()
-	if !confirmed {
-		firewallReceipts.Delete(node.Id)
-	}
 	script := provisionFirewallPython + `
 import json,sys
 p=json.load(sys.stdin)
@@ -80,14 +104,49 @@ print(json.dumps({'configured':True}))
 `
 	_, err = remotePython(ctx, client, install.SSHUser, script, map[string]interface{}{
 		"listeners": listeners, "name": name, "confirmed": confirmed,
-		"version": map[string]interface{}{"operation": install.BootstrapID, "generation": node.ManagementGeneration, "revision": snapshot.Deployment.Revision},
+		"version": map[string]interface{}{"operation": install.BootstrapID, "generation": node.ManagementGeneration, "revision": revision, "policy": policy},
 	})
 	if err != nil {
 		return errNodeFirewall
 	}
-	if confirmed {
-		firewallReceipts.Store(node.Id, receipt)
+	return nil
+}
+
+func ensureCertificateFirewall(ctx context.Context, db *gorm.DB, node model.Node, binding model.NodeCertificateBinding, enabled bool) error {
+	var install model.NodeInstallation
+	if err := db.First(&install, "node_id = ?", node.Id).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil
+		}
+		return err
 	}
+	if install.PrivateKey == "" {
+		return nil
+	}
+	name, err := firewallOwnerName(node.Id, install.OwnerID)
+	if err != nil {
+		return err
+	}
+	if !node.Enable {
+		// A stopped node must close the latest resource generation as well.
+		if err := db.Where("node_id = ?", node.Id).Take(&binding).Error; err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+		enabled = false
+	}
+	name += "-http01"
+	receipt := fmt.Sprintf("%s/%s/%d/%d/%d/%t", name, install.BootstrapID, node.ManagementGeneration, binding.Generation, node.SettingsVersion, enabled)
+	if previous, ok := certificateFirewallReceipts.Load(node.Id); ok && previous == receipt {
+		return nil
+	}
+	listeners := []listenerSocket{}
+	if enabled {
+		listeners = append(listeners, listenerSocket{Port: 80, Network: "tcp"})
+	}
+	if err := configureManagedFirewall(ctx, node, install, name, listeners, binding.Generation, node.SettingsVersion, true); err != nil {
+		return err
+	}
+	certificateFirewallReceipts.Store(node.Id, receipt)
 	return nil
 }
 
