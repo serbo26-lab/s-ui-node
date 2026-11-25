@@ -2,19 +2,27 @@ package nodes
 
 import (
 	"context"
+	_ "embed"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"sync"
 	"time"
 
 	"github.com/alireza0/s-ui/database/model"
+	"github.com/alireza0/s-ui/nodeagent"
 	"gorm.io/gorm"
 )
 
 var errNodeFirewall = errors.New("node_firewall_failed")
+var firewallReceipts sync.Map
+
+//go:embed provision_firewall.py
+var provisionFirewallPython string
 
 // The panel uses its existing privileged SSH access. The agent keeps only
 // CAP_NET_BIND_SERVICE and never receives firewall administration privileges.
-func ensureNodeFirewall(ctx context.Context, db *gorm.DB, node model.Node, snapshot Snapshot) error {
+func ensureNodeFirewall(ctx context.Context, db *gorm.DB, node model.Node, snapshot Snapshot, confirmed bool) error {
 	var install model.NodeInstallation
 	if err := db.First(&install, "node_id = ?", node.Id).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -22,7 +30,22 @@ func ensureNodeFirewall(ctx context.Context, db *gorm.DB, node model.Node, snaps
 		}
 		return err
 	}
-	if !install.Ready || install.OwnerID == "" || install.PrivateKey == "" {
+	if install.PrivateKey == "" {
+		return nil
+	}
+	name := fmt.Sprintf("s-ui-node-%d", node.Id)
+	if install.OwnerID != "" {
+		if len(install.OwnerID) != 32 {
+			return errNodeFirewall
+		}
+		name += "-" + install.OwnerID[:12]
+	}
+	fingerprint, err := snapshotFingerprint(snapshot)
+	if err != nil {
+		return err
+	}
+	receipt := fmt.Sprintf("%s/%s/%d/%s/%s", name, install.BootstrapID, node.ManagementGeneration, node.ControlEpoch, fingerprint)
+	if previous, exists := firewallReceipts.Load(node.Id); confirmed && exists && previous == receipt {
 		return nil
 	}
 	listeners := []listenerSocket{}
@@ -39,9 +62,6 @@ func ensureNodeFirewall(ctx context.Context, db *gorm.DB, node model.Node, snaps
 			listeners = append(listeners, expandSocket(listenerSocket{Network: listenerNetwork(inbound.Type, options.Transport, options.Network), Port: options.Port})...)
 		}
 	}
-	if len(listeners) == 0 {
-		return nil
-	}
 	ctx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
 	client, err := connectSSH(ctx, &install, "", false)
@@ -49,40 +69,63 @@ func ensureNodeFirewall(ctx context.Context, db *gorm.DB, node model.Node, snaps
 		return errNodeFirewall
 	}
 	defer client.Close()
+	if !confirmed {
+		firewallReceipts.Delete(node.Id)
+	}
 	script := provisionFirewallPython + `
 import json,sys
 p=json.load(sys.stdin)
-configure_node_firewall(p['listeners'], 's-ui-node')
+configure_node_firewall(p['listeners'], p['name'], p['confirmed'], version=p['version'])
 print(json.dumps({'configured':True}))
 `
-	_, err = remotePython(ctx, client, install.SSHUser, script, map[string]interface{}{"listeners": listeners})
+	_, err = remotePython(ctx, client, install.SSHUser, script, map[string]interface{}{
+		"listeners": listeners, "name": name, "confirmed": confirmed,
+		"version": map[string]interface{}{"operation": install.BootstrapID, "generation": node.ManagementGeneration, "revision": snapshot.Deployment.Revision},
+	})
 	if err != nil {
 		return errNodeFirewall
+	}
+	if confirmed {
+		firewallReceipts.Store(node.Id, receipt)
 	}
 	return nil
 }
 
-const provisionFirewallPython = `
-def configure_node_firewall(listeners, name):
- import os,shutil,subprocess
- endpoints=sorted({(int(row['port']),row['network']) for row in listeners})
- if any(not 1<=port<=65535 or network not in ('tcp','udp') for port,network in endpoints):
-  raise ValueError('invalid firewall listener')
- def run(args,check=True):
-  return subprocess.run(args,check=check,capture_output=True,text=True,timeout=15,env=dict(os.environ,LC_ALL='C'))
- ufw=shutil.which('ufw')
- if ufw and 'Status: active' in run([ufw,'status']).stdout:
-  for port,network in endpoints:run([ufw,'allow',str(port)+'/'+network,'comment',name])
- firewall=shutil.which('firewall-cmd')
- if not firewall or run([firewall,'--state'],check=False).returncode!=0:return
- zones=[line.split()[0] for line in run([firewall,'--get-active-zones']).stdout.splitlines() if line and not line[0].isspace()]
- if not zones:zones=[run([firewall,'--get-default-zone']).stdout.strip()]
- for zone in zones:
-  for permanent in ([],['--permanent']):
-   for port,network in endpoints:
-    prefix=[firewall,*permanent,'--zone='+zone]
-    endpoint=str(port)+'/'+network
-    query=run([*prefix,'--query-port='+endpoint],check=False)
-    if query.returncode==1:run([*prefix,'--add-port='+endpoint])
-    elif query.returncode!=0:raise RuntimeError('firewall port query failed')
-`
+func confirmNodeFirewall(ctx context.Context, db *gorm.DB, node model.Node, status nodeagent.StatusV2) error {
+	if !status.Running {
+		return ensureNodeFirewall(ctx, db, node, Snapshot{Deployment: nodeagent.Deployment{Revision: status.SpecRevision}}, true)
+	}
+	if status.SpecRevision == 0 {
+		return nil
+	}
+	var deployment model.NodeDeployment
+	if err := db.First(&deployment, "node_id = ? AND revision = ?", node.Id, status.SpecRevision).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil
+		}
+		return err
+	}
+	var snapshot Snapshot
+	if err := json.Unmarshal(deployment.Snapshot, &snapshot); err != nil {
+		return err
+	}
+	spec := nodeagent.Structure{NodeID: uint64(node.Id), Epoch: node.ControlEpoch, Revision: status.SpecRevision, Config: snapshot.Deployment.Config}
+	if spec.Digest() != status.SpecDigest {
+		return errors.New("structural_observation_digest_mismatch")
+	}
+	return ensureNodeFirewall(ctx, db, node, snapshot, true)
+}
+
+func confirmLegacyNodeFirewall(ctx context.Context, db *gorm.DB, node model.Node, status nodeagent.Status) error {
+	if status.NodeID != uint64(node.Id) || status.Protocol != nodeagent.ProtocolVersion {
+		return nil
+	}
+	if !status.Running {
+		return ensureNodeFirewall(ctx, db, node, Snapshot{Deployment: nodeagent.Deployment{Revision: status.Revision}}, true)
+	}
+	var applied Snapshot
+	if json.Unmarshal(node.AppliedSnapshot, &applied) != nil || status.Revision != applied.Deployment.Revision || status.Digest != applied.Deployment.Digest() {
+		return nil
+	}
+	return ensureNodeFirewall(ctx, db, node, applied, true)
+}

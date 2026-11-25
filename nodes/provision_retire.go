@@ -65,20 +65,21 @@ func retirePreviousHost(ctx context.Context, current *model.NodeInstallation) er
 func retireOneHost(ctx context.Context, current model.NodeInstallation, target retireTarget) error {
 	previous := current
 	previous.IP, previous.SSHPort, previous.SSHUser, previous.HostKey = target.IP, target.Port, target.User, target.HostKey
-	short, cancel := context.WithTimeout(ctx, 6*time.Second)
+	short, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
 	client, err := connectSSH(short, &previous, "", false)
 	if err != nil {
 		return err
 	}
 	defer client.Close()
-	script := fmt.Sprintf(`import json,subprocess
+	script := provisionFirewallPython + fmt.Sprintf(`import json,subprocess
 from pathlib import Path
 name='s-ui-node-%d'
 unit=Path('/etc/systemd/system')/(name+'.service')
 if unit.exists():
  if '# S-UI managed node %d' not in unit.read_text():raise SystemExit('not our service')
  subprocess.run(['systemctl','disable','--now',name],check=True,capture_output=True)
+configure_node_firewall([],name,release=True)
 print(json.dumps({'retired':True}))
 `, current.NodeId, current.NodeId)
 	_, err = remotePython(short, client, previous.SSHUser, script, nil)

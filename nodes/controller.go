@@ -149,6 +149,10 @@ func Reconcile(ctx context.Context, id uint) (failure error) {
 		return err
 	}
 	stage = "compile_failed"
+	if err := confirmLegacyNodeFirewall(ctx, db, node, status); err != nil {
+		stage = errNodeFirewall.Error()
+		return err
+	}
 	desired, err = prepareDesired(db, node, status)
 	if err != nil {
 		return err
@@ -159,6 +163,10 @@ func Reconcile(ctx context.Context, id uint) (failure error) {
 		if node.RejectedRevision == desired.Deployment.Revision && status.Running {
 			stage = "deployment_rejected"
 			return errors.New("this revision was rejected; change settings or explicitly retry")
+		}
+		stage = errNodeFirewall.Error()
+		if err := ensureNodeFirewall(ctx, db, node, desired, false); err != nil {
+			return err
 		}
 		body, _ := json.Marshal(desired.Deployment)
 		put, err := http.NewRequestWithContext(ctx, http.MethodPut, node.Address+"/v1/deployment", bytes.NewReader(body))
@@ -179,6 +187,10 @@ func Reconcile(ctx context.Context, id uint) (failure error) {
 				if saveErr := db.Model(&model.Node{}).Where("id = ? AND desired_revision = ?", id, desired.Deployment.Revision).Update("rejected_revision", desired.Deployment.Revision).Error; saveErr != nil {
 					return saveErr
 				}
+				if cleanupErr := confirmLegacyNodeFirewall(ctx, db, node, status); cleanupErr != nil {
+					stage = errNodeFirewall.Error()
+					return cleanupErr
+				}
 			}
 			return fmt.Errorf("node rejected deployment: HTTP %d", response.StatusCode)
 		}
@@ -189,6 +201,10 @@ func Reconcile(ctx context.Context, id uint) (failure error) {
 		if status.NodeID != uint64(node.Id) || status.Protocol != nodeagent.ProtocolVersion {
 			return errors.New("node acknowledgement identity does not match")
 		}
+	}
+	stage = errNodeFirewall.Error()
+	if err := ensureNodeFirewall(ctx, db, node, desired, true); err != nil {
+		return err
 	}
 	stage = "ack_save_failed"
 	body, _ := json.Marshal(desired)

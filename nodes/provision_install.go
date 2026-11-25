@@ -114,7 +114,7 @@ func installRemoteAgent(parent context.Context, client *ssh.Client, user, script
 	return nil
 }
 
-const installAgentScript = `import hashlib,json,os,pwd,shutil,subprocess,sys
+var installAgentScript = `import hashlib,json,os,pwd,shutil,subprocess,sys
 from pathlib import Path
 ` + provisionFirewallPython + `
 p=json.load(sys.stdin);ident=int(p['id']);name='s-ui-node-'+str(ident)
@@ -183,7 +183,7 @@ WantedBy=multi-user.target
  systemctl('enable',name)
  systemctl('restart',name,wait=90)
  systemctl('is-active','--quiet',name)
- configure_node_firewall(p['listeners'],name)
+ configure_node_firewall(p['listeners'],name,version={'generation':p.get('generation',0),'operation':p.get('bootstrap_id','')},initialize=True)
  print(json.dumps({'installed':True,'service':name}))
 except BaseException:
  if oldbinary:shutil.copy2(base/'agent.previous',binary)

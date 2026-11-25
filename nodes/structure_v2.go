@@ -109,6 +109,9 @@ func reconcileStructureV2(ctx context.Context, node model.Node) (failure error) 
 	if err != nil {
 		return err
 	}
+	if err := confirmNodeFirewall(ctx, db, node, status); err != nil {
+		return err
+	}
 	if err := observeStructure(db, node, status); err != nil {
 		return err
 	}
@@ -126,19 +129,29 @@ func reconcileStructureV2(ctx context.Context, node model.Node) (failure error) 
 		if current.RejectedRevision == spec.Revision && status.Running {
 			return errors.New("structural_revision_rejected")
 		}
-		if err := ensureNodeFirewall(ctx, db, node, snapshot); err != nil {
+		if err := ensureNodeFirewall(ctx, db, node, snapshot, false); err != nil {
 			return err
 		}
 		status, err = putV2(ctx, client, node, "/v2/spec", spec)
 		if err != nil {
 			if errors.Is(err, errV2Rejected) {
 				db.Model(&model.Node{}).Where("id = ? AND desired_revision = ? AND management_generation = ?", node.Id, spec.Revision, node.ManagementGeneration).Update("rejected_revision", spec.Revision)
+				observed, readErr := getStatusV2(ctx, client, node)
+				if readErr != nil {
+					return readErr
+				}
+				if cleanupErr := confirmNodeFirewall(ctx, db, node, observed); cleanupErr != nil {
+					return cleanupErr
+				}
 			}
 			return err
 		}
 	}
 	if status.SpecRevision != spec.Revision || status.SpecDigest != spec.Digest() || !status.Running {
 		return errors.New("structural_ack_mismatch")
+	}
+	if err := confirmNodeFirewall(ctx, db, node, status); err != nil {
+		return err
 	}
 	return observeStructure(db, node, status)
 }

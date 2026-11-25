@@ -240,7 +240,7 @@ func executeLiveProvision(ctx context.Context, job *model.NodeJob, plan *livePro
 	if err != nil {
 		return err
 	}
-	input := map[string]interface{}{"id": job.NodeId, "owner": plan.Target.OwnerID, "bootstrap_id": plan.Target.BootstrapID, "ssh_user": plan.Target.SSHUser, "control_port": plan.Target.ControlPort, "sha256": digest, "ca": plan.Control.CA, "certificate": cert, "key": serverKey, "authorized_key": authorized, "listeners": plan.Listeners}
+	input := map[string]interface{}{"id": job.NodeId, "owner": plan.Target.OwnerID, "bootstrap_id": plan.Target.BootstrapID, "ssh_user": plan.Target.SSHUser, "control_port": plan.Target.ControlPort, "sha256": digest, "ca": plan.Control.CA, "certificate": cert, "key": serverKey, "authorized_key": authorized, "listeners": plan.Listeners, "generation": plan.ExpectedGeneration + 1}
 	if err = installRemoteAgent(ctx, client, plan.Target.SSHUser, liveInstallScript(), input); err != nil {
 		return err
 	}
@@ -584,7 +584,7 @@ if cached:
 print(json.dumps({'cached':cached}))
 `
 
-var liveFenceScript = liveHostHeader + `
+var liveFenceScript = provisionFirewallPython + liveHostHeader + `
 if unit.exists():
  subprocess.run(['systemctl','disable','--now',name],check=True,capture_output=True)
  if subprocess.run(['systemctl','is-active','--quiet',name]).returncode==0:raise SystemExit('unit still active')
@@ -593,6 +593,7 @@ for proc in Path('/proc').glob('[0-9]*/cmdline'):
  try:parts=proc.read_bytes().split(b'\0')
  except (OSError,PermissionError):continue
  if binary.encode() in parts:raise SystemExit('owned process still active')
+configure_node_firewall([],name,release=True)
 print(json.dumps({'fenced':True}))
 `
 
