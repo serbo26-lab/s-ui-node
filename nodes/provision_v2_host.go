@@ -110,7 +110,21 @@ func executeLiveProvision(ctx context.Context, job *model.NodeJob, plan *livePro
 		// could momentarily start a cached ACL after an acknowledged revoke.
 		return verifyLiveProvision(ctx, job, plan)
 	}
-	if err = ensureRemotePython(ctx, client, plan.Target.SSHUser); err != nil {
+	if err = stageLiveJob(job, *plan, "preflight"); err != nil {
+		return err
+	}
+	host, err := inspectProvisionHost(ctx, client, plan.Target.SSHUser)
+	if err != nil {
+		return err
+	}
+	artifact, digest, err := agentArtifact(host.architecture)
+	if err != nil {
+		return errors.New("agent_build_unavailable")
+	}
+	if err = stageLiveJob(job, *plan, "dependencies"); err != nil {
+		return err
+	}
+	if err = ensureRemotePython(ctx, client, plan.Target.SSHUser, host); err != nil {
 		return err
 	}
 	if err = stageLiveJob(job, *plan, "inspect"); err != nil {
@@ -123,6 +137,9 @@ func executeLiveProvision(ctx context.Context, job *model.NodeJob, plan *livePro
 	inspection, occupied, err := inspectListenerSockets(ctx, client, plan.Target, requests)
 	if err != nil {
 		return err
+	}
+	if inspection.Arch != host.architecture {
+		return errors.New("unsupported_architecture")
 	}
 	err = db.Transaction(func(tx *gorm.DB) error {
 		var current model.Node
@@ -140,11 +157,7 @@ func executeLiveProvision(ctx context.Context, job *model.NodeJob, plan *livePro
 		return err
 	}
 	plan.Target.ControlPort = inspection.ControlPort
-	plan.Target.Architecture = inspection.Arch
-	artifact, digest, err := agentArtifact(inspection.Arch)
-	if err != nil {
-		return err
-	}
+	plan.Target.Architecture = host.architecture
 	if plan.Target.PrivateKey == "" {
 		private, _, err := newSSHKey()
 		if err != nil {
@@ -228,7 +241,7 @@ func executeLiveProvision(ctx context.Context, job *model.NodeJob, plan *livePro
 		return err
 	}
 	input := map[string]interface{}{"id": job.NodeId, "owner": plan.Target.OwnerID, "bootstrap_id": plan.Target.BootstrapID, "ssh_user": plan.Target.SSHUser, "control_port": plan.Target.ControlPort, "sha256": digest, "ca": plan.Control.CA, "certificate": cert, "key": serverKey, "authorized_key": authorized, "listeners": plan.Listeners}
-	if _, err = remotePython(ctx, client, plan.Target.SSHUser, liveInstallScript(), input); err != nil {
+	if err = installRemoteAgent(ctx, client, plan.Target.SSHUser, liveInstallScript(), input); err != nil {
 		return err
 	}
 	if err = stageLiveJob(job, *plan, "register"); err != nil {
@@ -237,6 +250,9 @@ func executeLiveProvision(ctx context.Context, job *model.NodeJob, plan *livePro
 	status, err := readInstalledIdentity(ctx, client, *plan)
 	if err != nil {
 		return err
+	}
+	if status.SingBoxVersion != nodeagent.SingBoxVersion() || status.AgentDigest != digest {
+		return errors.New("agent_build_mismatch")
 	}
 	if !plan.Committed {
 		if err = commitLiveTarget(job, plan, status); err != nil {
@@ -338,7 +354,7 @@ func readInstalledIdentity(ctx context.Context, client *ssh.Client, plan livePro
 		case <-time.After(time.Second):
 		}
 	}
-	return status, errors.New("control_unreachable")
+	return status, errors.New("agent_startup_unreachable")
 }
 
 func commitLiveTarget(job *model.NodeJob, plan *liveProvisionPlan, status nodeagent.StatusV2) error {
@@ -518,7 +534,7 @@ func liveInstallScript() string {
 	script = strings.Replace(script, "assert ident>0", "assert __import__('re').fullmatch('[a-zA-Z0-9_-]{16,96}',p['bootstrap_id'])\nassert ident>0", 1)
 	script = strings.Replace(script, "for proto,port in p['ports'].items():subprocess.run([ufw,'allow',str(port)+('/udp' if proto in ('tuic','hysteria2') else '/tcp')", "for listener in p['listeners']:subprocess.run([ufw,'allow',str(listener['port'])+'/'+listener['network']", 1)
 	// A failed new installation stays fenced; never restart an old cached ACL.
-	script = strings.Replace(script, "unit.write_bytes(oldunit);subprocess.run(['systemctl','daemon-reload']);subprocess.run(['systemctl','restart',name],capture_output=True)", "unit.write_bytes(oldunit);subprocess.run(['systemctl','daemon-reload']);subprocess.run(['systemctl','stop',name],capture_output=True)", 1)
+	script = strings.Replace(script, "systemctl('restart',name,wait=90,check=False)", "systemctl('stop',name,wait=90,check=False)", 1)
 	return script
 }
 

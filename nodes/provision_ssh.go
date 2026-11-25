@@ -192,27 +192,3 @@ func managedTransport(ctx context.Context, nodeID uint) (*ssh.Client, *model.Nod
 }
 
 func controlAddress(port int) string { return fmt.Sprintf("https://127.0.0.1:%d", port) }
-
-func ensureRemotePython(ctx context.Context, client *ssh.Client, user string) error {
-	session, err := client.NewSession()
-	if err != nil {
-		return err
-	}
-	defer session.Close()
-	bootstrap := `export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l; command -v apt-get >/dev/null || exit 1; umask 077; mkdir -p /var/log/s-ui-node-bootstrap; apt-get update > /var/log/s-ui-node-bootstrap/python.log 2>&1 && apt-get install -y --no-install-recommends python3 >> /var/log/s-ui-node-bootstrap/python.log 2>&1`
-	prefix := ""
-	if user != "root" {
-		prefix = "sudo -n "
-	}
-	command := "command -v python3 >/dev/null 2>&1 || " + prefix + "sh -c '" + bootstrap + "'"
-	session.Stdout = io.Discard
-	session.Stderr = io.Discard
-	done := make(chan error, 1)
-	go func() { done <- session.Run(command) }()
-	select {
-	case err = <-done:
-		return err
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-}

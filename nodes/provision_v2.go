@@ -468,15 +468,21 @@ func runLiveProvision(job model.NodeJob, password string) {
 }
 
 func liveInstallError(err error) string {
-	known := map[string]bool{"ssh_unreachable": true, "ssh_auth_failed": true, "ssh_host_changed": true, "ssh_password_required": true, "state_key_unavailable": true, "node_listener_port_occupied": true, "node_listener_port_reserved": true, "node_reality_handshake_loop": true, "old_server_retirement_pending": true, "management_target_changed": true, "agent_epoch_changed_recovery_required": true, "install_timeout": true}
-	known["certificate_request_rejected"] = true
-	known["structural_revision_rejected"] = true
-	known["ssh_key_verification_failed"] = true
-	known["installation_database_unavailable"] = true
-	known[errAutoPortsExhausted.Error()] = true
-	known[errPortInspection.Error()] = true
-	if known[err.Error()] {
-		return err.Error()
+	code := err.Error()
+	switch code {
+	case "ssh_unreachable", "ssh_auth_failed", "ssh_host_changed", "ssh_password_required",
+		"state_key_unavailable", "node_listener_port_occupied", "node_listener_port_reserved",
+		"node_reality_handshake_loop", "old_server_retirement_pending", "management_target_changed",
+		"agent_epoch_changed_recovery_required", "install_timeout", "certificate_request_rejected",
+		"structural_revision_rejected", "ssh_key_verification_failed", "installation_database_unavailable",
+		errAutoPortsExhausted.Error(), errPortInspection.Error(),
+		"node_preflight_failed", "node_preflight_timeout", "node_sudo_required",
+		"node_linux_required", "unsupported_architecture", "node_systemd_unavailable", "node_systemd_too_old",
+		"node_dependencies_failed", "node_dependencies_timeout", "node_python_bootstrap_unavailable",
+		"node_python_version_unsupported", "node_service_install_failed", "node_service_install_timeout",
+		"agent_build_unavailable", "agent_build_mismatch", "agent_bootstrap_identity_mismatch",
+		"agent_startup_unreachable":
+		return code
 	}
 	return "node_install_failed"
 }

@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 )
@@ -98,6 +99,21 @@ print(json.dumps({'verified':True}))
 	return err
 }
 
+func installRemoteAgent(parent context.Context, client *ssh.Client, user, script string, input interface{}) error {
+	ctx, cancel := context.WithTimeout(parent, 4*time.Minute)
+	defer cancel()
+	stop := context.AfterFunc(ctx, func() { _ = client.Close() })
+	defer stop()
+	_, err := remotePython(ctx, client, user, script, input)
+	if ctx.Err() == context.DeadlineExceeded {
+		return errors.New("node_service_install_timeout")
+	}
+	if err != nil {
+		return errors.New("node_service_install_failed")
+	}
+	return nil
+}
+
 const installAgentScript = `import hashlib,json,os,pwd,shutil,subprocess,sys
 from pathlib import Path
 p=json.load(sys.stdin);ident=int(p['id']);name='s-ui-node-'+str(ident)
@@ -125,6 +141,8 @@ def write_private(path,body):
  fd=os.open(tmp,os.O_WRONLY|os.O_CREAT|os.O_TRUNC|os.O_NOFOLLOW,0o600)
  with os.fdopen(fd,'wb') as file:file.write(body);file.flush();os.fsync(file.fileno())
  os.replace(tmp,path);os.chmod(path,0o600)
+def systemctl(*args,wait=30,check=True):
+ return subprocess.run(['systemctl',*args],check=check,capture_output=True,timeout=wait)
 try:
  for n,keyname in [('ca.pem','ca'),('cert.pem','certificate'),('key.pem','key')]:write_private(creds/n,p[keyname].encode())
  os.chmod(incoming,0o755);os.replace(incoming,binary)
@@ -145,6 +163,8 @@ LoadCredential=key.pem:'''+str(creds/'key.pem')+'''
 ExecStart='''+str(binary)+''' --node-id '''+str(ident)+''' --state /var/lib/'''+name+''' --listen 127.0.0.1:'''+str(p['control_port'])+''' --client-ca %d/ca.pem --tls-cert %d/cert.pem --tls-key %d/key.pem
 Restart=on-failure
 RestartSec=3
+TimeoutStartSec=60
+TimeoutStopSec=60
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
@@ -158,20 +178,20 @@ LimitNOFILE=65536
 WantedBy=multi-user.target
 '''
  unit.write_text(text);os.chmod(unit,0o644)
- subprocess.run(['systemctl','daemon-reload'],check=True)
- subprocess.run(['systemctl','enable',name],check=True,capture_output=True)
- subprocess.run(['systemctl','restart',name],check=True,capture_output=True)
- subprocess.run(['systemctl','is-active','--quiet',name],check=True)
+ systemctl('daemon-reload')
+ systemctl('enable',name)
+ systemctl('restart',name,wait=90)
+ systemctl('is-active','--quiet',name)
  # Add narrowly scoped rules only when an existing UFW is enabled. Do not
  # enable/flush a firewall or disturb other software's listeners.
  ufw=shutil.which('ufw')
- if ufw and 'Status: active' in subprocess.run([ufw,'status'],capture_output=True,text=True).stdout:
-  for proto,port in p['ports'].items():subprocess.run([ufw,'allow',str(port)+('/udp' if proto in ('tuic','hysteria2') else '/tcp'),'comment',name],check=True,capture_output=True)
+ if ufw and 'Status: active' in subprocess.run([ufw,'status'],capture_output=True,text=True,timeout=15,env=dict(os.environ,LC_ALL='C')).stdout:
+  for proto,port in p['ports'].items():subprocess.run([ufw,'allow',str(port)+('/udp' if proto in ('tuic','hysteria2') else '/tcp'),'comment',name],check=True,capture_output=True,timeout=15)
  print(json.dumps({'installed':True,'service':name}))
 except BaseException:
  if oldbinary:shutil.copy2(base/'agent.previous',binary)
  for n,body in oldcreds.items():write_private(creds/n,body)
  if oldunit is not None:
-  unit.write_bytes(oldunit);subprocess.run(['systemctl','daemon-reload']);subprocess.run(['systemctl','restart',name],capture_output=True)
+  unit.write_bytes(oldunit);systemctl('daemon-reload',check=False);systemctl('restart',name,wait=90,check=False)
  raise
 `

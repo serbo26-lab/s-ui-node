@@ -294,11 +294,23 @@ func runProvision(job model.NodeJob, r ProvisionRequest, install model.NodeInsta
 		jobStage(&job, "ready", "succeeded", "")
 		return
 	}
-	jobStage(&job, "inspect", "running", "")
-	if err = ensureRemotePython(ctx, client, r.SSHUser); err != nil {
-		fail("server_inspection_failed")
+	jobStage(&job, "preflight", "running", "")
+	host, err := inspectProvisionHost(ctx, client, r.SSHUser)
+	if err != nil {
+		fail(liveInstallError(err))
 		return
 	}
+	artifact, hash, err := agentArtifact(host.architecture)
+	if err != nil {
+		fail("agent_build_unavailable")
+		return
+	}
+	jobStage(&job, "dependencies", "running", "")
+	if err = ensureRemotePython(ctx, client, r.SSHUser, host); err != nil {
+		fail(liveInstallError(err))
+		return
+	}
+	jobStage(&job, "inspect", "running", "")
 	ports := map[string]int{}
 	if r.NodeId != 0 {
 		var inbounds []model.NodeInbound
@@ -326,9 +338,8 @@ func runProvision(job model.NodeJob, r ProvisionRequest, install model.NodeInsta
 		fail("server_inspection_failed")
 		return
 	}
-	artifact, hash, err := agentArtifact(server.Arch)
-	if err != nil {
-		fail("agent_build_unavailable")
+	if server.Arch != host.architecture {
+		fail("unsupported_architecture")
 		return
 	}
 	if install.PrivateKey == "" {
@@ -411,8 +422,8 @@ func runProvision(job model.NodeJob, r ProvisionRequest, install model.NodeInsta
 		return
 	}
 	input := map[string]interface{}{"id": job.NodeId, "ssh_user": r.SSHUser, "control_port": install.ControlPort, "sha256": hash, "ca": node.ControlCA, "certificate": cert, "key": serverKey, "authorized_key": signer, "ports": server.Ports}
-	if _, err = remotePython(ctx, client, r.SSHUser, installAgentScript, input); err != nil {
-		fail("agent_install_failed")
+	if err = installRemoteAgent(ctx, client, r.SSHUser, installAgentScript, input); err != nil {
+		fail(liveInstallError(err))
 		return
 	}
 	jobStage(&job, "configure", "running", "")
