@@ -421,7 +421,11 @@ func runProvision(job model.NodeJob, r ProvisionRequest, install model.NodeInsta
 		fail("install_state_failed")
 		return
 	}
-	input := map[string]interface{}{"id": job.NodeId, "ssh_user": r.SSHUser, "control_port": install.ControlPort, "sha256": hash, "ca": node.ControlCA, "certificate": cert, "key": serverKey, "authorized_key": signer, "ports": server.Ports}
+	listeners := []listenerSocket{}
+	for protocol, port := range server.Ports {
+		listeners = append(listeners, expandSocket(listenerSocket{Network: listenerNetwork(protocol, listenerTransport{}), Port: port})...)
+	}
+	input := map[string]interface{}{"id": job.NodeId, "ssh_user": r.SSHUser, "control_port": install.ControlPort, "sha256": hash, "ca": node.ControlCA, "certificate": cert, "key": serverKey, "authorized_key": signer, "listeners": listeners}
 	if err = installRemoteAgent(ctx, client, r.SSHUser, installAgentScript, input); err != nil {
 		fail(liveInstallError(err))
 		return

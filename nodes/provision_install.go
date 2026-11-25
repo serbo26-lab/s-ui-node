@@ -183,9 +183,7 @@ WantedBy=multi-user.target
  systemctl('enable',name)
  systemctl('restart',name,wait=90)
  systemctl('is-active','--quiet',name)
- listeners=p.get('listeners')
- if listeners is None:listeners=[{'port':port,'network':'udp' if proto in ('tuic','hysteria2','hysteria') else 'tcp'} for proto,port in p['ports'].items()]
- configure_node_firewall(listeners,name)
+ configure_node_firewall(p['listeners'],name)
  print(json.dumps({'installed':True,'service':name}))
 except BaseException:
  if oldbinary:shutil.copy2(base/'agent.previous',binary)
