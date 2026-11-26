@@ -160,24 +160,7 @@ func ReconcileAccess(ctx context.Context, id uint) (failure error) {
 	if status.AppliedAccessRevision != desired.Revision || status.AppliedAccessDigest != desired.Digest() {
 		return errors.New("access_ack_mismatch")
 	}
-	body, _ := json.Marshal(desired)
-	return db.Transaction(func(tx *gorm.DB) error {
-		var target model.Node
-		if err := tx.First(&target, id).Error; err != nil {
-			return err
-		}
-		if target.ManagementGeneration != node.ManagementGeneration || target.ControlEpoch != node.ControlEpoch {
-			return errors.New("management_target_changed")
-		}
-		if err := tx.Model(&model.NodeAccessState{}).Where("node_id = ? AND applied_revision <= ?", id, desired.Revision).Updates(map[string]interface{}{"applied_revision": desired.Revision, "applied_snapshot": json.RawMessage(body), "applied_digest": desired.Digest(), "last_error": ""}).Error; err != nil {
-			return err
-		}
-		var current model.Node
-		if err := tx.First(&current, id).Error; err != nil {
-			return err
-		}
-		return finishMigration(tx, current, status)
-	})
+	return acknowledgeAccess(db, node, desired, status)
 }
 
 func accessLoop(ctx context.Context) {
@@ -385,5 +368,26 @@ func ensureAccessTask(db *gorm.DB, id uint) error {
 			return err
 		}
 		return tx.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "node_id"}, {Name: "kind"}}, DoNothing: true}).Create(&model.NodeTask{NodeId: id, Kind: "access", Generation: 1, State: "queued"}).Error
+	})
+}
+
+func acknowledgeAccess(db *gorm.DB, node model.Node, desired nodeagent.AccessSnapshot, status nodeagent.StatusV2) error {
+	body, _ := json.Marshal(desired)
+	return db.Transaction(func(tx *gorm.DB) error {
+		var target model.Node
+		if err := tx.First(&target, node.Id).Error; err != nil {
+			return err
+		}
+		if target.ManagementGeneration != node.ManagementGeneration || target.ControlEpoch != node.ControlEpoch {
+			return errors.New("management_target_changed")
+		}
+		if err := tx.Model(&model.NodeAccessState{}).Where("node_id = ? AND applied_revision <= ?", node.Id, desired.Revision).Updates(map[string]interface{}{"applied_revision": desired.Revision, "applied_snapshot": json.RawMessage(body), "applied_digest": desired.Digest(), "last_error": ""}).Error; err != nil {
+			return err
+		}
+		var current model.Node
+		if err := tx.First(&current, node.Id).Error; err != nil {
+			return err
+		}
+		return finishMigration(tx, current, status)
 	})
 }

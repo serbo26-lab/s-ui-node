@@ -124,29 +124,8 @@ func Reconcile(ctx context.Context, id uint) (failure error) {
 	}
 	defer transport.CloseIdleConnections()
 	client := &http.Client{Transport: transport, Timeout: 6 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	get, err := http.NewRequestWithContext(ctx, http.MethodGet, node.Address+"/v1/status", nil)
+	status, err := readLegacyNodeStatus(ctx, client, db, node, &stage)
 	if err != nil {
-		return err
-	}
-	stage = "control_unreachable"
-	response, err := client.Do(get)
-	if err != nil {
-		return err
-	}
-	stage = "status_invalid"
-	var status nodeagent.Status
-	err = json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&status)
-	response.Body.Close()
-	if err != nil || response.StatusCode != 200 {
-		return errors.New("cannot read node status")
-	}
-	if status.NodeID != uint64(node.Id) || status.Protocol != nodeagent.ProtocolVersion {
-		return errors.New("node identity or protocol does not match registration")
-	}
-	if err := db.Model(&model.Node{}).Where("id = ? AND address = ?", id, node.Address).Update("tls_status", certificateReport(status)).Error; err != nil {
-		return err
-	}
-	if err := db.Model(&model.Node{}).Where("id = ? AND address = ?", id, node.Address).Update("last_seen", time.Now().Unix()).Error; err != nil {
 		return err
 	}
 	stage = "compile_failed"
@@ -268,6 +247,35 @@ func sendLegacyDeployment(ctx context.Context, db *gorm.DB, node model.Node, des
 	}
 	if status.NodeID != uint64(node.Id) || status.Protocol != nodeagent.ProtocolVersion {
 		return status, errors.New("node acknowledgement identity does not match")
+	}
+	return status, nil
+}
+
+func readLegacyNodeStatus(ctx context.Context, client *http.Client, db *gorm.DB, node model.Node, stage *string) (nodeagent.Status, error) {
+	var status nodeagent.Status
+	get, err := http.NewRequestWithContext(ctx, http.MethodGet, node.Address+"/v1/status", nil)
+	if err != nil {
+		return status, err
+	}
+	*stage = "control_unreachable"
+	response, err := client.Do(get)
+	if err != nil {
+		return status, err
+	}
+	*stage = "status_invalid"
+	err = json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&status)
+	response.Body.Close()
+	if err != nil || response.StatusCode != 200 {
+		return status, errors.New("cannot read node status")
+	}
+	if status.NodeID != uint64(node.Id) || status.Protocol != nodeagent.ProtocolVersion {
+		return status, errors.New("node identity or protocol does not match registration")
+	}
+	if err := db.Model(&model.Node{}).Where("id = ? AND address = ?", node.Id, node.Address).Update("tls_status", certificateReport(status)).Error; err != nil {
+		return status, err
+	}
+	if err := db.Model(&model.Node{}).Where("id = ? AND address = ?", node.Id, node.Address).Update("last_seen", time.Now().Unix()).Error; err != nil {
+		return status, err
 	}
 	return status, nil
 }

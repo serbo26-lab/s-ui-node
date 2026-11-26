@@ -170,27 +170,8 @@ func executeLiveProvision(ctx context.Context, job *model.NodeJob, plan *livePro
 	if err = uploadLiveAgent(ctx, client, plan.Target, artifact, digest); err != nil {
 		return err
 	}
-	if !plan.Fenced {
-		if err = stageLiveJob(job, *plan, "retire"); err != nil {
-			return err
-		}
-		if plan.Previous.IP != "" && (plan.Previous.IP != plan.Target.IP || plan.Previous.SSHPort != plan.Target.SSHPort || plan.Previous.SSHUser != plan.Target.SSHUser) {
-			old := plan.Previous
-			oldClient, e := connectSSH(ctx, &old, "", false)
-			if e != nil {
-				return errors.New("old_server_retirement_pending")
-			}
-			_, e = remotePython(ctx, oldClient, old.SSHUser, liveFenceScript, map[string]interface{}{"id": job.NodeId, "owner": old.OwnerID})
-			oldClient.Close()
-			if e != nil {
-				return errors.New("old_server_retirement_pending")
-			}
-		}
-		// A previous failed attempt may already have a unit on this candidate.
-		if _, err = remotePython(ctx, client, plan.Target.SSHUser, liveFenceScript, map[string]interface{}{"id": job.NodeId, "owner": plan.Target.OwnerID}); err != nil {
-			return err
-		}
-		plan.Fenced = true
+	if err := fenceLiveInstallation(ctx, client, job, plan); err != nil {
+		return err
 	}
 	if err = stageLiveJob(job, *plan, "install"); err != nil {
 		return err
@@ -653,4 +634,30 @@ func liveProvisionCertificatesReady(raw json.RawMessage) bool {
 		}
 	}
 	return true
+}
+
+func fenceLiveInstallation(ctx context.Context, client *ssh.Client, job *model.NodeJob, plan *liveProvisionPlan) error {
+	if !plan.Fenced {
+		if err := stageLiveJob(job, *plan, "retire"); err != nil {
+			return err
+		}
+		if plan.Previous.IP != "" && (plan.Previous.IP != plan.Target.IP || plan.Previous.SSHPort != plan.Target.SSHPort || plan.Previous.SSHUser != plan.Target.SSHUser) {
+			old := plan.Previous
+			oldClient, e := connectSSH(ctx, &old, "", false)
+			if e != nil {
+				return errors.New("old_server_retirement_pending")
+			}
+			_, e = remotePython(ctx, oldClient, old.SSHUser, liveFenceScript, map[string]interface{}{"id": job.NodeId, "owner": old.OwnerID})
+			oldClient.Close()
+			if e != nil {
+				return errors.New("old_server_retirement_pending")
+			}
+		}
+		// A previous failed attempt may already have a unit on this candidate.
+		if _, err := remotePython(ctx, client, plan.Target.SSHUser, liveFenceScript, map[string]interface{}{"id": job.NodeId, "owner": plan.Target.OwnerID}); err != nil {
+			return err
+		}
+		plan.Fenced = true
+	}
+	return nil
 }

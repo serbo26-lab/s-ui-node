@@ -15,6 +15,7 @@ import (
 	"github.com/alireza0/s-ui/database"
 	"github.com/alireza0/s-ui/database/model"
 	"github.com/alireza0/s-ui/nodeagent"
+	"gorm.io/gorm"
 )
 
 //go:embed upgrade_agent.py
@@ -114,12 +115,7 @@ func upgradeManagedAgent(parent context.Context, id uint, bundle agentBundle) {
 	ctx, cancel := context.WithTimeout(parent, 3*time.Minute)
 	defer cancel()
 	record := func(state string, retry time.Duration) {
-		var at int64
-		if retry > 0 {
-			at = time.Now().Add(retry).Unix()
-		}
-		db.Model(&model.Node{}).Where("id = ? AND management_generation = ? AND control_epoch = ?", id, node.ManagementGeneration, node.ControlEpoch).
-			Updates(map[string]interface{}{"agent_upgrade_state": state, "agent_upgrade_retry_at": at})
+		recordAgentUpgrade(db, node, state, retry)
 	}
 	ssh, install, err := managedTransport(ctx, id)
 	if err != nil {
@@ -140,24 +136,10 @@ func upgradeManagedAgent(parent context.Context, id uint, bundle agentBundle) {
 	call := func(ctx context.Context, action, digest string) ([]byte, error) {
 		return remotePython(ctx, ssh, install.SSHUser, upgradeAgentScript, params(action, digest))
 	}
-	body, err := call(ctx, "inspect", "")
-	var result struct {
-		Architecture string `json:"arch"`
-		Pending      bool   `json:"pending"`
-	}
-	if err != nil || json.Unmarshal(body, &result) != nil || result.Pending {
-		record("waiting", time.Minute)
+	path, digest, err := prepareAgentUpgradeArtifact(ctx, db, install, bundle, call)
+	if err != nil {
+		recordAgentUpgradePreparationError(db, node, err)
 		return
-	}
-	path, digest, err := agentArtifact(result.Architecture)
-	if err != nil || digest != bundle.Agents[result.Architecture] {
-		record("failed", 10*time.Minute)
-		return
-	}
-	if install.Architecture != result.Architecture {
-		if db.Model(install).Where("owner_id = ?", install.OwnerID).Update("architecture", result.Architecture).Error != nil {
-			return
-		}
 	}
 	control, closeControl, err := controlClient(ctx, node)
 	if err != nil {
@@ -222,4 +204,48 @@ func activateAgentUpgrade(ctx context.Context, control *http.Client, node model.
 		}
 	}
 	return nodeagent.StatusV2{}, false
+}
+
+func recordAgentUpgrade(db *gorm.DB, node model.Node, state string, retry time.Duration) {
+	var at int64
+	if retry > 0 {
+		at = time.Now().Add(retry).Unix()
+	}
+	db.Model(&model.Node{}).Where("id = ? AND management_generation = ? AND control_epoch = ?", node.Id, node.ManagementGeneration, node.ControlEpoch).
+		Updates(map[string]interface{}{"agent_upgrade_state": state, "agent_upgrade_retry_at": at})
+}
+
+var (
+	errAgentUpgradeWaiting = errors.New("agent_upgrade_waiting")
+	errAgentUpgradeBundle  = errors.New("agent_upgrade_bundle_unavailable")
+)
+
+func prepareAgentUpgradeArtifact(ctx context.Context, db *gorm.DB, install *model.NodeInstallation, bundle agentBundle, call func(context.Context, string, string) ([]byte, error)) (string, string, error) {
+	body, err := call(ctx, "inspect", "")
+	var result struct {
+		Architecture string `json:"arch"`
+		Pending      bool   `json:"pending"`
+	}
+	if err != nil || json.Unmarshal(body, &result) != nil || result.Pending {
+		return "", "", errAgentUpgradeWaiting
+	}
+	path, digest, err := agentArtifact(result.Architecture)
+	if err != nil || digest != bundle.Agents[result.Architecture] {
+		return "", "", errAgentUpgradeBundle
+	}
+	if install.Architecture != result.Architecture {
+		if err := db.Model(install).Where("owner_id = ?", install.OwnerID).Update("architecture", result.Architecture).Error; err != nil {
+			return "", "", err
+		}
+	}
+	return path, digest, nil
+}
+
+func recordAgentUpgradePreparationError(db *gorm.DB, node model.Node, err error) {
+	switch {
+	case errors.Is(err, errAgentUpgradeWaiting):
+		recordAgentUpgrade(db, node, "waiting", time.Minute)
+	case errors.Is(err, errAgentUpgradeBundle):
+		recordAgentUpgrade(db, node, "failed", 10*time.Minute)
+	}
 }

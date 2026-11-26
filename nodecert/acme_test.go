@@ -178,8 +178,8 @@ func (f *pinnedACMEFixture) handle(t *testing.T, w http.ResponseWriter, r *http.
 	}
 	switch r.URL.Path {
 	case "/directory":
-		json.NewEncoder(w).Encode(map[string]string{"newNonce": f.server.URL + "/f.nonce", "newAccount": f.server.URL + "/account", "newOrder": f.server.URL + "/new-order"})
-	case "/f.nonce":
+		json.NewEncoder(w).Encode(map[string]string{"newNonce": f.server.URL + "/nonce", "newAccount": f.server.URL + "/account", "newOrder": f.server.URL + "/new-order"})
+	case "/nonce":
 		w.WriteHeader(204)
 	case "/account":
 		w.Header().Set("Location", f.server.URL+"/account/1")
@@ -211,7 +211,7 @@ func (f *pinnedACMEFixture) handle(t *testing.T, w http.ResponseWriter, r *http.
 		}
 		json.NewEncoder(w).Encode(order())
 	case "/cert":
-		w.Header().Set("Content-Type", "application/pem-certificate-f.chain")
+		w.Header().Set("Content-Type", "application/pem-certificate-chain")
 		io.WriteString(w, f.chain)
 	default:
 		t.Error("unexpected ACME endpoint", r.URL.Path)

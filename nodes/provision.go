@@ -254,45 +254,10 @@ func runProvision(job model.NodeJob, r ProvisionRequest, install model.NodeInsta
 		fail("unsupported_architecture")
 		return
 	}
-	if install.PrivateKey == "" {
-		private, _, e := newSSHKey()
-		if e != nil {
-			fail("identity_failed")
-			return
-		}
-		install.PrivateKey, e = sealSecret(private)
-		if e != nil {
-			fail("state_key_unavailable")
-			return
-		}
-	}
-	install.NodeId, install.ControlPort = job.NodeId, server.ControlPort
-	install.Protocols, _ = json.Marshal(r.Protocols)
-	var node model.Node
-	if database.GetDB().First(&node, job.NodeId).Error != nil {
-		fail("node_missing")
+	node, err := prepareLegacyInstallIdentity(ctx, &job, r, &install, server.ControlPort)
+	if err != nil {
+		fail(err.Error())
 		return
-	}
-	// Generate control trust only once. Recovery reinstalls the same identity,
-	// preserving node/inbound IDs and all customer keys and subscriptions.
-	if install.ServerCertificate == "" {
-		if err = newControlIdentity(&node, &install); err != nil {
-			fail("identity_failed")
-			return
-		}
-	}
-	if install.Domain == "" {
-		settings, _ := loadAutomation()
-		if settings.DomainSuffix != "" {
-			install.Domain = automaticDomain(job.NodeId, settings.DomainSuffix)
-		}
-	}
-	jobStage(&job, "dns", "running", "")
-	if install.Domain != "" {
-		if err = ensureNodeDNS(ctx, &install); err != nil {
-			fail(err.Error())
-			return
-		}
 	}
 	jobStage(&job, "install", "running", "")
 	if err = uploadAgent(ctx, client, r.SSHUser, job.NodeId, artifact, hash); err != nil {
@@ -526,4 +491,43 @@ func prepareLegacyTemplateSelection(r *ProvisionRequest) error {
 		_ = json.Unmarshal(t.Protocols, &r.Protocols)
 	}
 	return nil
+}
+
+func prepareLegacyInstallIdentity(ctx context.Context, job *model.NodeJob, r ProvisionRequest, install *model.NodeInstallation, controlPort int) (model.Node, error) {
+	var node model.Node
+	if install.PrivateKey == "" {
+		private, _, e := newSSHKey()
+		if e != nil {
+			return node, errors.New("identity_failed")
+		}
+		install.PrivateKey, e = sealSecret(private)
+		if e != nil {
+			return node, errors.New("state_key_unavailable")
+		}
+	}
+	install.NodeId, install.ControlPort = job.NodeId, controlPort
+	install.Protocols, _ = json.Marshal(r.Protocols)
+	if database.GetDB().First(&node, job.NodeId).Error != nil {
+		return node, errors.New("node_missing")
+	}
+	// Generate control trust only once. Recovery reinstalls the same identity,
+	// preserving node/inbound IDs and all customer keys and subscriptions.
+	if install.ServerCertificate == "" {
+		if err := newControlIdentity(&node, install); err != nil {
+			return node, errors.New("identity_failed")
+		}
+	}
+	if install.Domain == "" {
+		settings, _ := loadAutomation()
+		if settings.DomainSuffix != "" {
+			install.Domain = automaticDomain(job.NodeId, settings.DomainSuffix)
+		}
+	}
+	jobStage(job, "dns", "running", "")
+	if install.Domain != "" {
+		if err := ensureNodeDNS(ctx, install); err != nil {
+			return node, err
+		}
+	}
+	return node, nil
 }
