@@ -32,49 +32,12 @@ func queueNodeStructure(tx *gorm.DB, node *model.Node) error {
 	return database.QueueNodeTasks(tx, []uint{node.Id}, "structure")
 }
 
-func templateRoot(tx *gorm.DB, id uint) (uint, error) {
-	seen := map[uint]bool{}
-	for len(seen) < 128 {
-		if seen[id] {
-			return 0, errors.New("invalid_template_lineage")
-		}
-		seen[id] = true
-		var template model.NodeTemplate
-		if err := tx.First(&template, id).Error; err != nil {
-			return 0, err
-		}
-		if template.ParentTemplateId == 0 {
-			return id, nil
-		}
-		id = template.ParentTemplateId
-	}
-	return 0, errors.New("invalid_template_lineage")
-}
-
-func bindLiveTemplate(tx *gorm.DB, node *model.Node, template model.NodeTemplate, replace bool) error {
+func bindLiveTemplate(tx *gorm.DB, node *model.Node, template model.NodeTemplate) error {
 	if node.AgentProtocol != 2 || node.AssignmentMode != model.NodeAssignmentWhole {
 		return errors.New("unsupported_node_model")
 	}
 	if template.Scope == "private" && template.OwnerNodeId != node.Id {
 		return errors.New("private_template_belongs_to_another_node")
-	}
-	if node.TemplateId != template.Id || node.TemplateTargetVersion == 0 {
-		var count int64
-		if err := tx.Model(&model.NodeInbound{}).Where(whereNodeID, node.Id).Count(&count).Error; err != nil {
-			return err
-		}
-		if count > 0 && !replace {
-			return errors.New("template_replacement_confirmation_required")
-		}
-		if count > 0 && node.TemplateTargetVersion > 0 && node.TemplateId != template.Id {
-			var previous model.NodeTemplate
-			if err := tx.First(&previous, node.TemplateId).Error; err != nil {
-				return err
-			}
-			if err := validateLiveTemplateLineage(tx, node, previous, template); err != nil {
-				return err
-			}
-		}
 	}
 	node.TemplateId, node.TemplateTargetVersion = template.Id, template.Version
 	if err := tx.Save(node).Error; err != nil {
@@ -125,37 +88,6 @@ func saveLiveAction(tx *gorm.DB, object, action string, data json.RawMessage, ac
 	return tx.Create(&model.Changes{DateTime: time.Now().Unix(), Actor: actor, Key: object, Action: action, Obj: obj}).Error
 }
 
-func validateLiveTemplateLineage(tx *gorm.DB, node *model.Node, previous, template model.NodeTemplate) error {
-	previousRoot, err := templateRoot(tx, previous.Id)
-	if err != nil {
-		return err
-	}
-	nextRoot, err := templateRoot(tx, template.Id)
-	if err != nil {
-		return err
-	}
-	if previousRoot != nextRoot {
-		var version model.NodeTemplateVersion
-		if err := tx.First(&version, whereTemplateVersion, template.Id, template.Version).Error; err != nil {
-			return err
-		}
-		var target TemplateSpec
-		if json.Unmarshal(version.Payload, &target) != nil {
-			return errors.New("invalid_live_template_version")
-		}
-		for _, entry := range target.Entries {
-			var same int64
-			if err := tx.Model(&model.NodeInbound{}).Where("node_id = ? AND connection_key = ?", node.Id, entry.Key).Count(&same).Error; err != nil {
-				return err
-			}
-			if same > 0 {
-				return errors.New("unrelated_template_connection_mapping_required")
-			}
-		}
-	}
-	return nil
-}
-
 func restoreLiveTemplateVersion(tx *gorm.DB, request liveActionRequest) error {
 	var template model.NodeTemplate
 	var version model.NodeTemplateVersion
@@ -172,10 +104,7 @@ func restoreLiveTemplateVersion(tx *gorm.DB, request liveActionRequest) error {
 		return errors.New("unsupported_template_version")
 	}
 	body, _ := json.Marshal(map[string]interface{}{"spec": version.Payload, "expected_version": request.ExpectedVersion})
-	if _, err := saveVersionedTemplate(tx, &template, template, body); err != nil {
-		return err
-	}
-	return nil
+	return saveVersionedTemplate(tx, &template, template, body)
 }
 
 func saveLiveNodeAction(tx *gorm.DB, request liveActionRequest) error {

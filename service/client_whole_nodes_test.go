@@ -102,6 +102,23 @@ func TestWholeNodesInvalidAndLegacyInputsAreAtomic(t *testing.T) {
 	if count != 0 {
 		t.Fatal("invalid input committed client")
 	}
+	requireNodeTestSuccess(t, db.Model(&model.Node{}).Where("id = 1").Updates(map[string]any{
+		"applied_revision": 1, "applied_snapshot": json.RawMessage(`{"inbounds":[{"id":21}]}`),
+	}).Error)
+	requireNodeTestSuccess(t, saveWholeClient(t, db, "new", map[string]any{
+		"name": "separate-ids", "enable": true, "config": map[string]any{}, "inbounds": []uint{21}, "nodes": []uint{1}, "links": []any{},
+	}))
+	clients, err := (&ClientService{}).Get("1")
+	requireNodeTestSuccess(t, err)
+	client := (*clients)[0]
+	if string(client.Inbounds) != "[21]" || string(client.NodeInbounds) != "[21]" || string(client.Nodes) != "[1]" {
+		t.Fatal("local and remote ID namespaces changed")
+	}
+	requireNodeTestSuccess(t, saveWholeClient(t, db, "edit", client))
+	client.NodeInbounds = json.RawMessage(`[]`)
+	if err := saveWholeClient(t, db, "edit", client); err == nil || !strings.Contains(err.Error(), "read_only") {
+		t.Fatal("edited read-only node inbound projection was accepted", err)
+	}
 
 }
 

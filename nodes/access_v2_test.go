@@ -57,6 +57,7 @@ func TestV2PanelRevokesWithInvalidDraftAndProvisionJob(t *testing.T) {
 	}
 	provisionJobs.Store(node.Id, true)
 	defer provisionJobs.Delete(node.Id)
+	requireNodeTestSuccess(t, database.QueueNodeTasks(db, []uint{node.Id}, "structure"))
 	if err := ReconcileAccess(context.Background(), node.Id); err != nil {
 		t.Fatal("provision job blocked access", err)
 	}

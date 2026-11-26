@@ -31,7 +31,6 @@ func TestLiveAgentProcessesSurvivePanelReopenAndAgentCrash(t *testing.T) {
 	db, node, client := fixture(t)
 	t.Setenv("SUI_DB_FOLDER", t.TempDir())
 	requireNodeTestSuccess(t, db.Where("node_id = ?", node.Id).Delete(&model.NodeInbound{}).Error)
-	requireNodeTestSuccess(t, db.Where("client_id = ?", client.Id).Delete(&model.ClientNode{}).Error)
 	f := liveFixture{db: db, client: client}
 	restarts := []func(){}
 	for i := 0; i < 2; i++ {
@@ -41,7 +40,7 @@ func TestLiveAgentProcessesSurvivePanelReopenAndAgentCrash(t *testing.T) {
 	}
 	f.save(t, liveSpec())
 	for i := range f.nodes {
-		f.bind(t, i, f.template.Id, false)
+		f.bind(t, i, f.template.Id)
 	}
 	ReconcileAll(context.Background())
 	if f.links(t) != 2 {

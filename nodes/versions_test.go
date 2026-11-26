@@ -49,6 +49,13 @@ func TestTemplateVersionsAreAppendOnlyAndCompareExpectedVersion(t *testing.T) {
 	if strings.Contains(string(public), "options") || strings.Contains(string(public), "payload") {
 		t.Fatal("history metadata leaked legacy/private payload")
 	}
+	restore, _ := json.Marshal(map[string]any{"id": template.Id, "version": 1, "expected_version": 2})
+	requireNodeTestSuccess(t, Save("nodetemplates", "restoreversion", restore, "test"))
+	view, err := ReadTemplateVersion(template.Id, 0)
+	requireNodeTestSuccess(t, err)
+	if view.Version != 3 || string(view.Spec) != original {
+		t.Fatal("restore did not append the selected version")
+	}
 	if err := Save("nodetemplates", "edit", json.RawMessage(`{"id":1,"name":"old editor","config":{},"blueprints":[]}`), "test"); err == nil {
 		t.Fatal("legacy editor overwrote versioned template")
 	}

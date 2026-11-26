@@ -407,7 +407,7 @@ func newLiveProvisionTarget(tx *gorm.DB, r ProvisionRequest) (model.Node, model.
 	if err != nil {
 		return node, installation, err
 	}
-	if err = bindLiveTemplate(tx, &node, template, false); err != nil {
+	if err = bindLiveTemplate(tx, &node, template); err != nil {
 		return node, installation, err
 	}
 	if err = provisionLiveResources(tx, node, r); err != nil {

@@ -46,7 +46,6 @@ func liveSetup(t *testing.T, count int, realCore ...bool) liveFixture {
 	db, node, client := fixture(t)
 	t.Setenv("SUI_DB_FOLDER", t.TempDir())
 	requireNodeTestSuccess(t, db.Where("node_id = ?", node.Id).Delete(&model.NodeInbound{}).Error)
-	requireNodeTestSuccess(t, db.Where("client_id = ?", client.Id).Delete(&model.ClientNode{}).Error)
 	f := liveFixture{db: db, client: client}
 	for index := 0; index < count; index++ {
 		n := model.Node{Id: uint(index + 1), Name: []string{"First", "Second"}[index], Enable: true, LinkAddress: []string{"first.example", "second.example"}[index], AgentProtocol: 2, AssignmentMode: model.NodeAssignmentWhole}
@@ -69,7 +68,7 @@ func liveSetup(t *testing.T, count int, realCore ...bool) liveFixture {
 	}
 	f.save(t, liveSpec())
 	for index := range f.nodes {
-		f.bind(t, index, f.template.Id, false)
+		f.bind(t, index, f.template.Id)
 	}
 	return f
 }
@@ -91,12 +90,12 @@ func (f *liveFixture) save(t *testing.T, spec TemplateSpec) {
 	requireNodeTestSuccess(t, saveVersionedTemplate(f.db, &f.template, f.template, body))
 }
 
-func (f *liveFixture) bind(t *testing.T, index int, templateID uint, replace bool) {
+func (f *liveFixture) bind(t *testing.T, index int, templateID uint) {
 	t.Helper()
 	var template model.NodeTemplate
 	requireNodeTestSuccess(t, f.db.First(&template, templateID).Error)
 	requireNodeTestSuccess(t, f.db.First(&f.nodes[index], f.nodes[index].Id).Error)
-	requireNodeTestSuccess(t, bindLiveTemplate(f.db, &f.nodes[index], template, replace))
+	requireNodeTestSuccess(t, bindLiveTemplate(f.db, &f.nodes[index], template))
 }
 
 func (f *liveFixture) run(t *testing.T, index int) {
@@ -184,8 +183,7 @@ func TestLiveRetireArchivesOverridesAndRestoreKeepsIdentity(t *testing.T) {
 	if !override.Archived {
 		t.Fatal("removed entry override remained live")
 	}
-	body, _ := json.Marshal(map[string]interface{}{"id": f.template.Id, "version": 1, "expected_version": 2})
-	requireNodeTestSuccess(t, Save("nodetemplates", "restoreversion", body, "test"))
+	f.save(t, liveSpec())
 	f.run(t, 0)
 	f.db.First(&retired, old.Id)
 	if retired.Retired || !retired.Enable || retired.Id != old.Id || f.links(t) != 1 {
@@ -315,7 +313,7 @@ func TestLiveLeaseExpiryAndNewNodeUsesLatestTemplate(t *testing.T) {
 	spec := liveSpec()
 	spec.Entries[0].Name = "New"
 	f.save(t, spec)
-	f.bind(t, 1, f.template.Id, false)
+	f.bind(t, 1, f.template.Id)
 	if f.nodes[1].TemplateTargetVersion != 2 {
 		t.Fatal("attachment missed current template version")
 	}

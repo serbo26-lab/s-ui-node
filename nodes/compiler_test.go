@@ -44,7 +44,7 @@ func fixture(t *testing.T) (*gorm.DB, model.Node, model.Client) {
 		t.Fatal(err)
 	}
 	options, _ := json.Marshal(map[string]interface{}{"listen": "::", "listen_port": 14443, "tls": map[string]interface{}{"enabled": true, "server_name": "www.example.com", "reality": map[string]interface{}{"enabled": true, "private_key": base64.RawURLEncoding.EncodeToString(private.Bytes()), "short_id": []string{"01234567"}, "handshake": map[string]interface{}{"server": "www.example.com", "server_port": 443}}}})
-	for _, value := range []interface{}{&node, &client, &model.Inbound{Id: 1, Tag: "same", Type: "vless", Enable: true, Options: json.RawMessage(`{}`)}, &model.NodeInbound{Id: 1, NodeId: 1, Tag: "same", Type: "vless", Enable: true, Options: options, ConnectionKey: "fixture"}, &model.ClientNode{ClientId: 1, NodeId: 1, Active: true, Generation: 1}} {
+	for _, value := range []interface{}{&node, &client, &model.Inbound{Id: 1, Tag: "same", Type: "vless", Enable: true, Options: json.RawMessage(`{}`)}, &model.NodeInbound{Id: 1, NodeId: 1, Tag: "same", Type: "vless", Enable: true, Options: options, ConnectionKey: "fixture"}} {
 		if err := db.Create(value).Error; err != nil {
 			t.Fatal(err)
 		}
@@ -55,6 +55,7 @@ func fixture(t *testing.T) (*gorm.DB, model.Node, model.Client) {
 func confirm(t *testing.T, db *gorm.DB, node model.Node) Snapshot {
 	t.Helper()
 	node.ControlEpoch, node.TemplateTargetVersion = "test-epoch", 1
+	addFixtureAssignment(t, db, node.Id)
 	s, err := Compile(db, node)
 	if err != nil {
 		t.Fatal(err)
@@ -237,11 +238,17 @@ func controlHandlerServer(t *testing.T, handler http.Handler) (*httptest.Server,
 	return server, ControlTLS{CA: string(caPEM), Certificate: string(certPEM), Key: string(keyPEM)}
 }
 
+func addFixtureAssignment(t *testing.T, db *gorm.DB, id uint) {
+	t.Helper()
+	requireNodeTestSuccess(t, db.Create(&model.ClientNode{ClientId: 1, NodeId: id, Active: true, Generation: 1}).Error)
+}
+
 func attachFixtureAgent(t *testing.T, db *gorm.DB, node *model.Node, manager *nodeagent.ManagerV2) {
 	t.Helper()
 	server, identity := controlHandlerServer(t, nodeagent.HandlerV2(manager))
 	node.Address, node.ControlCA, node.ControlCertificate, node.ControlKey = server.URL, identity.CA, identity.Certificate, identity.Key
 	node.ControlEpoch = manager.Status().Epoch
+	addFixtureAssignment(t, db, node.Id)
 	var inbound model.NodeInbound
 	requireNodeTestSuccess(t, db.First(&inbound, whereNodeID, node.Id).Error)
 	template := model.NodeTemplate{Name: "fixture", Kind: deploymentTemplate, SchemaVersion: 1, Scope: "private", OwnerNodeId: node.Id}
@@ -249,5 +256,5 @@ func attachFixtureAgent(t *testing.T, db *gorm.DB, node *model.Node, manager *no
 	spec.Entries[0] = SpecEntry{Key: inbound.ConnectionKey, Name: inbound.Tag, Protocol: inbound.Type, Enable: true, Options: json.RawMessage(`{"listen":"127.0.0.1","listen_port":14443,"tls":{"enabled":false}}`)}
 	requireNodeTestSuccess(t, db.Create(&template).Error)
 	requireNodeTestSuccess(t, appendDeploymentSpec(db, &template, spec))
-	requireNodeTestSuccess(t, bindLiveTemplate(db, node, template, true))
+	requireNodeTestSuccess(t, bindLiveTemplate(db, node, template))
 }

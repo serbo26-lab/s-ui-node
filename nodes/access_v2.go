@@ -145,7 +145,7 @@ func ReconcileAccess(ctx context.Context, id uint) (failure error) {
 	if status.AppliedAccessRevision != desired.Revision || status.AppliedAccessDigest != desired.Digest() {
 		return errors.New("access_ack_mismatch")
 	}
-	return acknowledgeAccess(db, node, desired, status)
+	return acknowledgeAccess(db, node, desired)
 }
 
 func accessLoop(ctx context.Context) {
@@ -355,7 +355,7 @@ func ensureAccessTask(db *gorm.DB, id uint) error {
 	})
 }
 
-func acknowledgeAccess(db *gorm.DB, node model.Node, desired nodeagent.AccessSnapshot, status nodeagent.StatusV2) error {
+func acknowledgeAccess(db *gorm.DB, node model.Node, desired nodeagent.AccessSnapshot) error {
 	body, _ := json.Marshal(desired)
 	return db.Transaction(func(tx *gorm.DB) error {
 		var target model.Node
@@ -365,13 +365,6 @@ func acknowledgeAccess(db *gorm.DB, node model.Node, desired nodeagent.AccessSna
 		if target.ManagementGeneration != node.ManagementGeneration || target.ControlEpoch != node.ControlEpoch {
 			return errors.New("management_target_changed")
 		}
-		if err := tx.Model(&model.NodeAccessState{}).Where("node_id = ? AND applied_revision <= ?", node.Id, desired.Revision).Updates(map[string]interface{}{"applied_revision": desired.Revision, "applied_snapshot": json.RawMessage(body), "applied_digest": desired.Digest(), "last_error": ""}).Error; err != nil {
-			return err
-		}
-		var current model.Node
-		if err := tx.First(&current, node.Id).Error; err != nil {
-			return err
-		}
-		return finishMigration(tx, current, status)
+		return tx.Model(&model.NodeAccessState{}).Where("node_id = ? AND applied_revision <= ?", node.Id, desired.Revision).Updates(map[string]interface{}{"applied_revision": desired.Revision, "applied_snapshot": json.RawMessage(body), "applied_digest": desired.Digest(), "last_error": ""}).Error
 	})
 }

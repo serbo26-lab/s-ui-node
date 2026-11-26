@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -269,4 +271,15 @@ func vlessState(epoch string, port int) (Structure, AccessSnapshot) {
 	s := Structure{NodeID: 7, Epoch: epoch, Revision: 1, Config: json.RawMessage(fmt.Sprintf(`{"inbounds":[{"type":"vless","tag":"vpn","listen":"127.0.0.1","listen_port":%d}],"outbounds":[{"type":"direct","tag":"direct"}]}`, port))}
 	a := AccessSnapshot{NodeID: 7, Epoch: epoch, Revision: 1, Clients: []Grant{{Name: "client/1", All: true, Credentials: map[string]json.RawMessage{"vless": json.RawMessage(`{"uuid":"11111111-1111-4111-8111-111111111111"}`)}}}}
 	return s, a
+}
+
+func TestCorruptSavedStateDoesNotStartAgent(t *testing.T) {
+	m, _, store, _, _ := v2Fixture(t)
+	requireNodeTestSuccess(t, m.Close())
+	requireNodeTestSuccess(t, os.WriteFile(filepath.Join(store.Directory, "state-v2.json"), []byte("corrupt"), 0o600))
+	runtime := &safeFake{}
+	restored := NewManagerV2(7, store, runtime)
+	if err := restored.Restore(); err == nil || runtime.Running() {
+		t.Fatal("agent accepted corrupt persisted state")
+	}
 }

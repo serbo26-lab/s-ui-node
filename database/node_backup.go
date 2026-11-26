@@ -57,9 +57,9 @@ func readOptionalKey(root *os.Root) ([]byte, error) {
 
 // The list is private cipher state, not arbitrary fields supplied by an archive.
 var nodeCipherColumns = map[string][]string{
-	"node_installations": {"private_key", "server_certificate", "server_key"},
-	"node_automations":   {"dns_token"}, "node_generated_materials": {"encrypted_value"},
-	"node_dns_profiles": {"secret"}, "node_certificate_bindings": {"material", "account_key", "desired_request"},
+	"node_installations":       {"private_key", "server_certificate", "server_key"},
+	"node_generated_materials": {"encrypted_value"},
+	"node_dns_profiles":        {"secret"}, "node_certificate_bindings": {"material", "account_key", "desired_request"},
 	"node_certificate_versions": {"bundle"}, "node_jobs": {"plan"},
 }
 
