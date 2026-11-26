@@ -16,6 +16,7 @@ func nodeBackupStateFixture(t *testing.T) (model.Node, []byte) {
 	t.Helper()
 	_, key := nodeBackupFixture(t)
 	node := model.Node{Id: 1, Name: "Fixture node", AgentProtocol: 2, ControlEpoch: "fixture-epoch", ControlCA: "fixture-ca", ControlCertificate: "fixture-controller", SettingsVersion: 1}
+	requireNodeTestSuccess(t, db.Create(&model.Setting{Key: "version", Value: config.GetVersion()}).Error)
 	requireNodeTestSuccess(t, db.Create(&node).Error)
 	requireNodeTestSuccess(t, db.Create(&model.NodeAccessState{NodeId: node.Id, DesiredRevision: 2, AppliedRevision: 2, DesiredSnapshot: json.RawMessage(`{"revision":2,"clients":[]}`)}).Error)
 	requireNodeTestSuccess(t, db.Create(&model.NodeCertificateBinding{NodeId: node.Id, DesiredRevision: 1, AppliedRevision: 1, DesiredFingerprint: "fixture-request"}).Error)
@@ -48,6 +49,9 @@ func TestSuccessiveBackupsIncludeLatestPendingNodeChanges(t *testing.T) {
 		t.Fatal("changing live state modified an earlier backup")
 	}
 	checkLatestNodeBackup(t, openNodeArchive(t, latest), node.Id)
+	plain, err := GetDb("stats,changes")
+	requireNodeTestSuccess(t, err)
+	checkLatestNodeBackup(t, openBackup(t, plain), node.Id)
 }
 
 func checkLatestNodeBackup(t *testing.T, candidate *gorm.DB, nodeID uint) {
@@ -58,12 +62,17 @@ func checkLatestNodeBackup(t *testing.T, candidate *gorm.DB, nodeID uint) {
 	var domain model.NodeDomainBinding
 	var traffic model.NodeClientTraffic
 	var certificate model.NodeCertificateBinding
+	var version model.Setting
 	requireNodeTestSuccess(t, candidate.First(&node, nodeID).Error)
 	requireNodeTestSuccess(t, candidate.First(&access, "node_id = ?", nodeID).Error)
 	requireNodeTestSuccess(t, candidate.First(&template, 1).Error)
 	requireNodeTestSuccess(t, candidate.First(&domain, "node_id = ?", nodeID).Error)
 	requireNodeTestSuccess(t, candidate.First(&traffic, "node_id = ?", nodeID).Error)
 	requireNodeTestSuccess(t, candidate.First(&certificate, "node_id = ?", nodeID).Error)
+	requireNodeTestSuccess(t, candidate.First(&version, "key = ?", "version").Error)
+	if version.Value != config.GetVersion() {
+		t.Fatal("new backup retained an outdated database version")
+	}
 	if node.SettingsVersion != 2 || node.TemplateTargetVersion != 4 || template.Version != 4 || access.DesiredRevision != 3 || access.AppliedRevision != 2 || node.DesiredRevision != 2 || node.AppliedRevision != 1 {
 		t.Fatal("new backup omitted pending settings or access changes")
 	}
@@ -79,9 +88,21 @@ func checkLatestNodeBackup(t *testing.T, candidate *gorm.DB, nodeID uint) {
 }
 
 func TestRestoreAcceptsArchivedNodeStateAfterLaterChanges(t *testing.T) {
+	for _, format := range []string{"sqlite", "zip"} {
+		t.Run(format, func(t *testing.T) {
+			checkArchivedNodeStateRestore(t, format)
+		})
+	}
+}
+
+func checkArchivedNodeStateRestore(t *testing.T, format string) {
+	t.Helper()
 	node, _ := nodeBackupStateFixture(t)
-	requireNodeTestSuccess(t, db.Create(&model.Setting{Key: "version", Value: config.GetVersion()}).Error)
-	archive, err := GetFullBackup("")
+	export := GetDb
+	if format == "zip" {
+		export = GetFullBackup
+	}
+	archive, err := export("")
 	requireNodeTestSuccess(t, err)
 	requireNodeTestSuccess(t, db.Model(&node).Updates(map[string]any{"settings_version": 9, "desired_revision": 9, "control_epoch": "later-fixture-epoch"}).Error)
 	requireNodeTestSuccess(t, db.Model(&model.NodeAccessState{}).Where("node_id = ?", node.Id).Update("desired_revision", 9).Error)
@@ -111,7 +132,7 @@ func TestRestoreFullNodeBackupOnFreshPanel(t *testing.T) {
 func checkFullNodeBackupOnFreshPanel(t *testing.T, version string) {
 	t.Helper()
 	node, key := nodeBackupStateFixture(t)
-	requireNodeTestSuccess(t, db.Create(&model.Setting{Key: "version", Value: version}).Error)
+	requireNodeTestSuccess(t, db.Model(&model.Setting{}).Where("key = ?", "version").Update("value", version).Error)
 	archive, err := GetFullBackup("")
 	requireNodeTestSuccess(t, err)
 	pool, err := db.DB()
