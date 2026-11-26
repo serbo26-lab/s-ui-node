@@ -30,9 +30,7 @@ func TestCertificatePinnedACMEHTTP01FlowAndArtifact(t *testing.T) {
 	now := time.Now()
 	root := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "fixture CA"}, IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature, NotBefore: now.Add(-time.Hour), NotAfter: now.Add(24 * time.Hour)}
 	rootDER, err := x509.CreateCertificate(rand.Reader, root, root, &rootKey.PublicKey, rootKey)
-	if err != nil {
-		t.Fatal(err)
-	}
+	requireNodeTestSuccess(t, err)
 	root, _ = x509.ParseCertificate(rootDER)
 	roots := x509.NewCertPool()
 	roots.AddCert(root)
@@ -139,17 +137,13 @@ func TestCertificatePinnedACMEHTTP01FlowAndArtifact(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	bundle, err := issue(ctx, &acme.Client{Directory: server.URL + "/directory", HTTPClient: server.Client(), PollInterval: time.Millisecond}, "", key, "node.example", "http-01", solver)
-	if err != nil {
-		t.Fatal(err)
-	}
+	requireNodeTestSuccess(t, err)
 	if !authorized.Load() {
 		t.Fatal("ACME skipped HTTP proof")
 	}
 	directory := t.TempDir()
 	meta, err := Install(directory, bundle, "node.example", roots)
-	if err != nil {
-		t.Fatal(err)
-	}
+	requireNodeTestSuccess(t, err)
 	if _, err := Validate(bundle, "wrong.example", roots, now); err == nil {
 		t.Fatal("wrong hostname accepted")
 	}
@@ -175,9 +169,7 @@ func TestCertificatePinnedACMEHTTP01FlowAndArtifact(t *testing.T) {
 
 func TestCertificateHTTP01BusyPortDoesNotReplaceListener(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
+	requireNodeTestSuccess(t, err)
 	defer listener.Close()
 	solver := &HTTP01{Address: listener.Addr().String()}
 	defer solver.Close()

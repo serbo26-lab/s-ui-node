@@ -65,9 +65,7 @@ func TestProvisionPythonPackageCommands(t *testing.T) {
 			ready, trace := filepath.Join(dir, "python-ready"), filepath.Join(dir, "packages")
 			write := func(name, script string) {
 				t.Helper()
-				if err := os.WriteFile(filepath.Join(dir, name), []byte(script), 0700); err != nil {
-					t.Fatal(err)
-				}
+				requireNodeTestSuccess(t, os.WriteFile(filepath.Join(dir, name), []byte(script), 0700))
 			}
 			write("python3", "#!/bin/sh\n[ -f \"$PYTHON_READY\" ]\n")
 			write("timeout", "#!/bin/sh\nshift 3\nexec \"$@\"\n")
@@ -86,9 +84,7 @@ case " $* " in *" install python3 "*) : > "$PYTHON_READY" ;; esac
 			cmd.Stdin = strings.NewReader("packages=" + tc.family + "\n" + installProvisionPython)
 			err := cmd.Run()
 			if tc.wantExit == 0 {
-				if err != nil {
-					t.Fatal(err)
-				}
+				requireNodeTestSuccess(t, err)
 			} else {
 				var result *exec.ExitError
 				if !errors.As(err, &result) || result.ExitCode() != tc.wantExit {

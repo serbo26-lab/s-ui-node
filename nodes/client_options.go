@@ -61,26 +61,8 @@ func validateNodeClientOptions(entry SpecEntry) error {
 			return errClientOptions
 		}
 	}
-	if raw := options["addresses"]; len(raw) != 0 {
-		var addresses []struct {
-			Server string `json:"server"`
-			Port   int    `json:"server_port"`
-			Remark string `json:"remark,omitempty"`
-			TLS    *struct {
-				Enabled    bool   `json:"enabled"`
-				ServerName string `json:"server_name,omitempty"`
-				Insecure   bool   `json:"insecure,omitempty"`
-			} `json:"tls,omitempty"`
-		}
-		if err := decodeJSON(raw, &addresses, true); err != nil || len(addresses) > 32 {
-			return errClientOptions
-		}
-		for _, address := range addresses {
-			if !validPublishedAddress(address.Server) || address.Port < 1 || address.Port > 65535 ||
-				(address.TLS != nil && address.TLS.ServerName != "" && !validPublishedAddress(address.TLS.ServerName)) {
-				return errClientOptions
-			}
-		}
+	if err := validateClientAddresses(options["addresses"]); err != nil {
+		return err
 	}
 	if raw := options["realm"]; len(raw) != 0 {
 		var realm struct {
@@ -127,35 +109,11 @@ func sealRealmDraft(entry *SpecEntry) error {
 		entry.RealmServerSecret, entry.RealmClientSecret = "", ""
 		return nil
 	}
-	store := func(raw *json.RawMessage, sealed *string, purpose string) error {
-		if len(*raw) == 0 {
-			return nil
-		}
-		options, err := objectJSON(*raw)
-		if err != nil {
-			return err
-		}
-		realm, _ := options["realm"].(map[string]any)
-		if value, exists := realm["token"]; exists {
-			token, ok := value.(string)
-			if !ok || len(token) > 4096 {
-				return errClientOptions
-			}
-			if token == "" {
-				*sealed = ""
-			} else if *sealed, err = sealSecret(purpose + "\x00" + entry.Key + "\x00" + token); err != nil {
-				return err
-			}
-			delete(realm, "token")
-			*raw, err = json.Marshal(options)
-			return err
-		}
-		return nil
-	}
-	if err := store(&entry.Options, &entry.RealmServerSecret, "server"); err != nil {
+
+	if err := storeRealmToken(&entry.Options, &entry.RealmServerSecret, "server", entry.Key); err != nil {
 		return err
 	}
-	return store(&entry.ClientOptions, &entry.RealmClientSecret, "client")
+	return storeRealmToken(&entry.ClientOptions, &entry.RealmClientSecret, "client", entry.Key)
 }
 
 func openRealmDraft(entry *SpecEntry) error {
@@ -200,4 +158,55 @@ func openRealmDraft(entry *SpecEntry) error {
 		return err
 	}
 	return restore(&entry.ClientOptions, entry.RealmClientSecret, "client")
+}
+
+func validateClientAddresses(raw json.RawMessage) error {
+	if len(raw) != 0 {
+		var addresses []struct {
+			Server string `json:"server"`
+			Port   int    `json:"server_port"`
+			Remark string `json:"remark,omitempty"`
+			TLS    *struct {
+				Enabled    bool   `json:"enabled"`
+				ServerName string `json:"server_name,omitempty"`
+				Insecure   bool   `json:"insecure,omitempty"`
+			} `json:"tls,omitempty"`
+		}
+		if err := decodeJSON(raw, &addresses, true); err != nil || len(addresses) > 32 {
+			return errClientOptions
+		}
+		for _, address := range addresses {
+			if !validPublishedAddress(address.Server) || address.Port < 1 || address.Port > 65535 ||
+				(address.TLS != nil && address.TLS.ServerName != "" && !validPublishedAddress(address.TLS.ServerName)) {
+				return errClientOptions
+			}
+		}
+	}
+	return nil
+}
+
+func storeRealmToken(raw *json.RawMessage, sealed *string, purpose, key string) error {
+	if len(*raw) == 0 {
+		return nil
+	}
+	options, err := objectJSON(*raw)
+	if err != nil {
+		return err
+	}
+	realm, _ := options["realm"].(map[string]any)
+	if value, exists := realm["token"]; exists {
+		token, ok := value.(string)
+		if !ok || len(token) > 4096 {
+			return errClientOptions
+		}
+		if token == "" {
+			*sealed = ""
+		} else if *sealed, err = sealSecret(purpose + "\x00" + key + "\x00" + token); err != nil {
+			return err
+		}
+		delete(realm, "token")
+		*raw, err = json.Marshal(options)
+		return err
+	}
+	return nil
 }

@@ -45,12 +45,8 @@ func liveSetup(t *testing.T, count int, realCore ...bool) liveFixture {
 	}
 	db, node, client := fixture(t)
 	t.Setenv("SUI_DB_FOLDER", t.TempDir())
-	if err := db.Where("node_id = ?", node.Id).Delete(&model.NodeInbound{}).Error; err != nil {
-		t.Fatal(err)
-	}
-	if err := db.Where("client_id = ?", client.Id).Delete(&model.ClientNodeInbound{}).Error; err != nil {
-		t.Fatal(err)
-	}
+	requireNodeTestSuccess(t, db.Where("node_id = ?", node.Id).Delete(&model.NodeInbound{}).Error)
+	requireNodeTestSuccess(t, db.Where("client_id = ?", client.Id).Delete(&model.ClientNodeInbound{}).Error)
 	f := liveFixture{db: db, client: client}
 	for index := 0; index < count; index++ {
 		n := model.Node{Id: uint(index + 1), Name: []string{"First", "Second"}[index], Enable: true, LinkAddress: []string{"first.example", "second.example"}[index], AgentProtocol: 2, AssignmentMode: model.NodeAssignmentWhole}
@@ -61,18 +57,12 @@ func liveSetup(t *testing.T, count int, realCore ...bool) liveFixture {
 			safe = nodeagent.NewCoreRuntimeWithState(state)
 		}
 		manager := nodeagent.NewManagerV2(uint64(n.Id), nodeagent.FileStoreV2{Directory: state}, safe)
-		if err := manager.Restore(nil); err != nil {
-			t.Fatal(err)
-		}
+		requireNodeTestSuccess(t, manager.Restore(nil))
 		t.Cleanup(func() { manager.Close() })
 		server, identity := controlHandlerServer(t, nodeagent.HandlerV2(manager))
 		n.Address, n.ControlCA, n.ControlCertificate, n.ControlKey, n.ControlEpoch = server.URL, identity.CA, identity.Certificate, identity.Key, manager.Status().Epoch
-		if err := db.Save(&n).Error; err != nil {
-			t.Fatal(err)
-		}
-		if err := db.Create(&model.ClientNode{NodeId: n.Id, ClientId: client.Id, Active: true, Generation: 1}).Error; err != nil {
-			t.Fatal(err)
-		}
+		requireNodeTestSuccess(t, db.Save(&n).Error)
+		requireNodeTestSuccess(t, db.Create(&model.ClientNode{NodeId: n.Id, ClientId: client.Id, Active: true, Generation: 1}).Error)
 		f.nodes = append(f.nodes, n)
 		f.managers = append(f.managers, manager)
 		f.runtimes = append(f.runtimes, runtime)
@@ -93,45 +83,31 @@ func (f *liveFixture) save(t *testing.T, spec TemplateSpec) {
 		request["id"], request["expected_version"] = f.template.Id, f.template.Version
 	}
 	body, _ := json.Marshal(request)
-	if err := Save("nodetemplates", action, body, "test"); err != nil {
-		t.Fatal(err)
-	}
-	if err := f.db.Where("name = ?", "shared").First(&f.template).Error; err != nil {
-		t.Fatal(err)
-	}
+	requireNodeTestSuccess(t, Save("nodetemplates", action, body, "test"))
+	requireNodeTestSuccess(t, f.db.Where("name = ?", "shared").First(&f.template).Error)
 }
 func (f *liveFixture) bind(t *testing.T, index int, template uint, replace bool) {
 	t.Helper()
 	body, _ := json.Marshal(map[string]interface{}{"id": f.nodes[index].Id, "template_id": template, "confirm_replace": replace})
-	if err := Save("nodes", "applytemplate", body, "test"); err != nil {
-		t.Fatal(err)
-	}
-	if err := f.db.First(&f.nodes[index], f.nodes[index].Id).Error; err != nil {
-		t.Fatal(err)
-	}
+	requireNodeTestSuccess(t, Save("nodes", "applytemplate", body, "test"))
+	requireNodeTestSuccess(t, f.db.First(&f.nodes[index], f.nodes[index].Id).Error)
 }
 func (f *liveFixture) run(t *testing.T, index int) {
 	t.Helper()
-	if err := Reconcile(context.Background(), f.nodes[index].Id); err != nil {
-		t.Fatal(err)
-	}
+	requireNodeTestSuccess(t, Reconcile(context.Background(), f.nodes[index].Id))
 	f.db.First(&f.nodes[index], f.nodes[index].Id)
 }
 func (f *liveFixture) links(t *testing.T) int {
 	t.Helper()
 	links, err := ClientInbounds(f.db, f.client)
-	if err != nil {
-		t.Fatal(err)
-	}
+	requireNodeTestSuccess(t, err)
 	return len(links)
 }
 func (f *liveFixture) overrides(t *testing.T, index int, values []SpecOverride) {
 	t.Helper()
 	f.db.First(&f.nodes[index], f.nodes[index].Id)
 	body, _ := json.Marshal(map[string]interface{}{"id": f.nodes[index].Id, "expected_version": f.nodes[index].SettingsVersion, "overrides": values})
-	if err := Save("nodes", "setoverrides", body, "test"); err != nil {
-		t.Fatal(err)
-	}
+	requireNodeTestSuccess(t, Save("nodes", "setoverrides", body, "test"))
 }
 
 func TestLiveTemplateFanoutStableIDsAndPerNodeResources(t *testing.T) {
@@ -215,9 +191,7 @@ func TestLiveRetireArchivesOverridesAndRestoreKeepsIdentity(t *testing.T) {
 		t.Fatal("removed entry override remained live")
 	}
 	body, _ := json.Marshal(map[string]interface{}{"id": f.template.Id, "version": 1, "expected_version": 2})
-	if err := Save("nodetemplates", "restoreversion", body, "test"); err != nil {
-		t.Fatal(err)
-	}
+	requireNodeTestSuccess(t, Save("nodetemplates", "restoreversion", body, "test"))
 	f.run(t, 0)
 	f.db.First(&retired, old.Id)
 	if retired.Retired || !retired.Enable || retired.Id != old.Id || f.links(t) != 1 {
@@ -252,9 +226,7 @@ func TestLiveOverrideEqualityResetCloneAndUnrelatedTemplateGuard(t *testing.T) {
 	}
 	f.db.First(&f.nodes[0], 1)
 	body, _ := json.Marshal(map[string]interface{}{"id": 1, "name": "private", "expected_version": f.nodes[0].SettingsVersion})
-	if err := Save("nodes", "privatecopy", body, "test"); err != nil {
-		t.Fatal(err)
-	}
+	requireNodeTestSuccess(t, Save("nodes", "privatecopy", body, "test"))
 	f.run(t, 0)
 	var clone model.NodeTemplate
 	f.db.Where("name = ?", "private").First(&clone)
@@ -293,15 +265,9 @@ func TestLiveFailureIsolationRejectionAndAccessPriority(t *testing.T) {
 	if second.AppliedTemplateVersion != 2 {
 		t.Fatal("broken node blocked other target")
 	}
-	if err := f.db.Model(&model.Client{}).Where("id = ?", f.client.Id).Update("enable", false).Error; err != nil {
-		t.Fatal(err)
-	}
-	if err := database.QueueClientNodeAccess(f.db, []uint{f.client.Id}); err != nil {
-		t.Fatal(err)
-	}
-	if err := ReconcileAccess(context.Background(), 1); err != nil {
-		t.Fatal(err)
-	}
+	requireNodeTestSuccess(t, f.db.Model(&model.Client{}).Where("id = ?", f.client.Id).Update("enable", false).Error)
+	requireNodeTestSuccess(t, database.QueueClientNodeAccess(f.db, []uint{f.client.Id}))
+	requireNodeTestSuccess(t, ReconcileAccess(context.Background(), 1))
 	if bytes.Contains(f.runtimes[0].body, []byte("11111111")) {
 		t.Fatal("bad template blocked revoke")
 	}
@@ -328,9 +294,7 @@ func TestLiveDelayedAckPreservesNewTargetAndLostAckRecovers(t *testing.T) {
 	}))
 	n := f.nodes[0]
 	n.Address, n.ControlCA, n.ControlCertificate, n.ControlKey = server.URL, identity.CA, identity.Certificate, identity.Key
-	if err := f.db.Save(&n).Error; err != nil {
-		t.Fatal(err)
-	}
+	requireNodeTestSuccess(t, f.db.Save(&n).Error)
 	spec := liveSpec()
 	spec.Entries[0].Name = "B"
 	f.save(t, spec)
@@ -345,9 +309,7 @@ func TestLiveDelayedAckPreservesNewTargetAndLostAckRecovers(t *testing.T) {
 	spec.Entries[0].Name = "C"
 	f.save(t, spec)
 	close(release)
-	if err := <-done; err != nil {
-		t.Fatal(err)
-	}
+	requireNodeTestSuccess(t, <-done)
 	f.db.First(&n, 1)
 	if n.TemplateTargetVersion != 3 || n.AppliedTemplateVersion != 2 {
 		t.Fatal("late B overwrote desired C")
@@ -368,9 +330,7 @@ func TestLiveDelayedAckPreservesNewTargetAndLostAckRecovers(t *testing.T) {
 	var snapshot Snapshot
 	json.Unmarshal(old.Snapshot, &snapshot)
 	oldStatus := nodeagent.StatusV2{NodeID: 1, Epoch: n.ControlEpoch, Running: true, SpecRevision: old.Revision, SpecDigest: (nodeagent.Structure{NodeID: 1, Epoch: n.ControlEpoch, Revision: old.Revision, Config: snapshot.Deployment.Config}).Digest()}
-	if err := observeStructure(f.db, n, oldStatus); err != nil {
-		t.Fatal(err)
-	}
+	requireNodeTestSuccess(t, observeStructure(f.db, n, oldStatus))
 	f.db.First(&n, 1)
 	if n.AppliedTemplateVersion != 3 {
 		t.Fatal("older observation replaced newer ACK")
@@ -386,12 +346,8 @@ func TestLiveLeaseExpiryAndNewNodeUsesLatestTemplate(t *testing.T) {
 	if f.nodes[1].TemplateTargetVersion != 2 {
 		t.Fatal("attachment missed current template version")
 	}
-	if err := f.db.Model(&model.NodeTask{}).Where("node_id = ? AND kind = ?", 1, "structure").Update("lease_until", time.Now().Unix()+60).Error; err != nil {
-		t.Fatal(err)
-	}
-	if err := Reconcile(context.Background(), 1); err != nil {
-		t.Fatal(err)
-	}
+	requireNodeTestSuccess(t, f.db.Model(&model.NodeTask{}).Where("node_id = ? AND kind = ?", 1, "structure").Update("lease_until", time.Now().Unix()+60).Error)
+	requireNodeTestSuccess(t, Reconcile(context.Background(), 1))
 	if f.managers[0].Status().SpecRevision != 0 {
 		t.Fatal("unexpired lease stolen")
 	}
@@ -475,16 +431,12 @@ func TestLiveUnavailableNodeAndRejectedSpecDoNotBlockOtherNode(t *testing.T) {
 		t.Fatal("failed spec acknowledged")
 	}
 	attempts := f.runtimes[0].attempts
-	if err := Reconcile(context.Background(), 1); err != nil {
-		t.Fatal(err)
-	}
+	requireNodeTestSuccess(t, Reconcile(context.Background(), 1))
 	if f.runtimes[0].attempts != attempts {
 		t.Fatal("rejected target restarted every poll")
 	}
 	f.runtimes[0].reject = false
-	if err := Save("nodes", "retry", json.RawMessage(`{"id":1}`), "test"); err != nil {
-		t.Fatal(err)
-	}
+	requireNodeTestSuccess(t, Save("nodes", "retry", json.RawMessage(`{"id":1}`), "test"))
 	f.run(t, 0)
 	if f.nodes[0].AppliedTemplateVersion != 2 {
 		t.Fatal("explicit retry failed")
@@ -537,9 +489,7 @@ func TestLiveTwoRealCoresApplyTemplateAndServeTraffic(t *testing.T) {
 	for _, port := range automaticListenerPorts {
 		listener, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", fmt.Sprint(port)))
 		if err != nil {
-			if err := f.db.Create(&model.NodePortReservation{NodeId: 999, ConnectionKey: "fixture-busy", Host: host, Network: "tcp", Port: port}).Error; err != nil {
-				t.Fatal(err)
-			}
+			requireNodeTestSuccess(t, f.db.Create(&model.NodePortReservation{NodeId: 999, ConnectionKey: "fixture-busy", Host: host, Network: "tcp", Port: port}).Error)
 			continue
 		}
 		listener.Close()
@@ -583,16 +533,12 @@ func assertLiveTraffic(t *testing.T, links []*model.Inbound) {
 			t.Fatal(err)
 		}
 		listener, err := net.Listen("tcp", "127.0.0.1:0")
-		if err != nil {
-			t.Fatal(err)
-		}
+		requireNodeTestSuccess(t, err)
 		port := listener.Addr().(*net.TCPAddr).Port
 		listener.Close()
 		clientCore := core.NewCoreWithContext(context.Background())
 		body := []byte(fmt.Sprintf(`{"inbounds":[{"type":"socks","tag":"socks","listen":"127.0.0.1","listen_port":%d}],"outbounds":[{"type":"vless","tag":"proxy","server":"127.0.0.1","server_port":%d,"uuid":"11111111-1111-4111-8111-111111111111"}],"route":{"final":"proxy"}}`, port, addresses[0].Port))
-		if err := clientCore.Start(body); err != nil {
-			t.Fatal(err)
-		}
+		requireNodeTestSuccess(t, clientCore.Start(body))
 		proxy, _ := url.Parse(fmt.Sprintf("socks5://127.0.0.1:%d", port))
 		transport := &http.Transport{Proxy: http.ProxyURL(proxy), DisableKeepAlives: true}
 		client := &http.Client{Transport: transport, Timeout: 3 * time.Second}
@@ -613,9 +559,7 @@ func assertLiveTraffic(t *testing.T, links []*model.Inbound) {
 
 func TestLiveConcurrentAttachAndSaveAreTransactional(t *testing.T) {
 	f := liveSetup(t, 2)
-	if err := f.db.Model(&model.Node{}).Where("id = ?", 2).Updates(map[string]interface{}{"template_id": 0, "template_target_version": 0}).Error; err != nil {
-		t.Fatal(err)
-	}
+	requireNodeTestSuccess(t, f.db.Model(&model.Node{}).Where("id = ?", 2).Updates(map[string]interface{}{"template_id": 0, "template_target_version": 0}).Error)
 	spec := liveSpec()
 	spec.Entries[0].Name = "B"
 	edit, _ := json.Marshal(map[string]interface{}{"id": f.template.Id, "name": "shared", "expected_version": 1, "spec": spec})
@@ -626,9 +570,7 @@ func TestLiveConcurrentAttachAndSaveAreTransactional(t *testing.T) {
 	go func() { <-start; done <- Save("nodes", "applytemplate", bind, "test") }()
 	close(start)
 	for i := 0; i < 2; i++ {
-		if err := <-done; err != nil {
-			t.Fatal(err)
-		}
+		requireNodeTestSuccess(t, <-done)
 	}
 	var second model.Node
 	f.db.First(&second, 2)
@@ -723,9 +665,7 @@ func TestLiveSharedCopyExportsSourcesAndUnrelatedKeysNeedMapping(t *testing.T) {
 	ReconcileAll(context.Background())
 	f.db.First(&f.nodes[0], 1)
 	body, _ := json.Marshal(map[string]interface{}{"id": 1, "name": "exported", "expected_version": f.nodes[0].SettingsVersion})
-	if err := Save("nodes", "sharedcopy", body, "test"); err != nil {
-		t.Fatal(err)
-	}
+	requireNodeTestSuccess(t, Save("nodes", "sharedcopy", body, "test"))
 	var draft model.NodeTemplate
 	f.db.Where("name = ?", "exported").First(&draft)
 	var version model.NodeTemplateVersion
@@ -740,9 +680,7 @@ func TestLiveSharedCopyExportsSourcesAndUnrelatedKeysNeedMapping(t *testing.T) {
 	}
 	unrelated := map[string]interface{}{"name": "unrelated", "spec": liveSpec()}
 	body, _ = json.Marshal(unrelated)
-	if err := Save("nodetemplates", "new", body, "test"); err != nil {
-		t.Fatal(err)
-	}
+	requireNodeTestSuccess(t, Save("nodetemplates", "new", body, "test"))
 	var target model.NodeTemplate
 	f.db.Where("name = ?", "unrelated").First(&target)
 	body, _ = json.Marshal(map[string]interface{}{"id": 1, "template_id": target.Id, "confirm_replace": true})
@@ -753,19 +691,11 @@ func TestLiveSharedCopyExportsSourcesAndUnrelatedKeysNeedMapping(t *testing.T) {
 
 func TestLiveSchemaUpgradeKeepsExistingLegacyConnections(t *testing.T) {
 	db, node, client := fixture(t)
-	if err := db.Create(&model.NodeOverride{NodeId: node.Id, ConnectionKey: "primary", Path: "/tls/server_name", Operation: "set", Source: json.RawMessage(`{"kind":"literal","value":"old.example"}`)}).Error; err != nil {
-		t.Fatal(err)
-	}
-	if err := db.Migrator().DropColumn(&model.NodeInbound{}, "retired"); err != nil {
-		t.Fatal(err)
-	}
-	if err := db.Migrator().DropColumn(&model.NodeOverride{}, "archived"); err != nil {
-		t.Fatal(err)
-	}
+	requireNodeTestSuccess(t, db.Create(&model.NodeOverride{NodeId: node.Id, ConnectionKey: "primary", Path: "/tls/server_name", Operation: "set", Source: json.RawMessage(`{"kind":"literal","value":"old.example"}`)}).Error)
+	requireNodeTestSuccess(t, db.Migrator().DropColumn(&model.NodeInbound{}, "retired"))
+	requireNodeTestSuccess(t, db.Migrator().DropColumn(&model.NodeOverride{}, "archived"))
 	var files []struct{ Name, File string }
-	if err := db.Raw("PRAGMA database_list").Scan(&files).Error; err != nil {
-		t.Fatal(err)
-	}
+	requireNodeTestSuccess(t, db.Raw("PRAGMA database_list").Scan(&files).Error)
 	path := ""
 	for _, file := range files {
 		if file.Name == "main" {
@@ -774,9 +704,7 @@ func TestLiveSchemaUpgradeKeepsExistingLegacyConnections(t *testing.T) {
 	}
 	sqlDB, _ := db.DB()
 	sqlDB.Close()
-	if err := database.InitDB(path); err != nil {
-		t.Fatal(err)
-	}
+	requireNodeTestSuccess(t, database.InitDB(path))
 	reopened := database.GetDB()
 	connection, _ := reopened.DB()
 	t.Cleanup(func() { connection.Close() })

@@ -13,9 +13,7 @@ func wholeNodeDB(t *testing.T) *gorm.DB {
 	t.Helper()
 	db := nodeAssignmentDB(t)
 	for _, node := range []model.Node{{Id: 1, Name: "whole", Enable: true, AssignmentMode: model.NodeAssignmentWhole}, {Id: 2, Name: "legacy", Enable: true, AssignmentMode: model.NodeAssignmentLegacy}} {
-		if err := db.Create(&node).Error; err != nil {
-			t.Fatal(err)
-		}
+		requireNodeTestSuccess(t, db.Create(&node).Error)
 	}
 	return db
 }
@@ -23,9 +21,7 @@ func wholeNodeDB(t *testing.T) *gorm.DB {
 func saveWholeClient(t *testing.T, db *gorm.DB, action string, value interface{}) error {
 	t.Helper()
 	body, err := json.Marshal(value)
-	if err != nil {
-		t.Fatal(err)
-	}
+	requireNodeTestSuccess(t, err)
 	return db.Transaction(func(tx *gorm.DB) error {
 		_, err := (&ClientService{}).Save(tx, action, body, "example.com")
 		return err
@@ -35,13 +31,9 @@ func saveWholeClient(t *testing.T, db *gorm.DB, action string, value interface{}
 func TestWholeNodesCredentialsOmissionAndGeneration(t *testing.T) {
 	db := wholeNodeDB(t)
 	initial := map[string]interface{}{"name": "whole-client", "enable": true, "config": map[string]interface{}{"vless": map[string]interface{}{"name": "whole-client", "uuid": "11111111-1111-4111-8111-111111111111"}}, "inbounds": []uint{21}, "nodes": []uint{1}, "links": []interface{}{}}
-	if err := saveWholeClient(t, db, "new", initial); err != nil {
-		t.Fatal(err)
-	}
+	requireNodeTestSuccess(t, saveWholeClient(t, db, "new", initial))
 	loaded, err := (&ClientService{}).Get("1")
-	if err != nil {
-		t.Fatal(err)
-	}
+	requireNodeTestSuccess(t, err)
 	client := (*loaded)[0]
 	if string(client.Nodes) != "[1]" || string(client.Inbounds) != "[21]" || client.NodeMigrationRequired {
 		t.Fatal("whole-node/local selection mismatch")
@@ -62,13 +54,9 @@ func TestWholeNodesCredentialsOmissionAndGeneration(t *testing.T) {
 		delete(cfg, kind)
 	}
 	client.Config, _ = json.Marshal(cfg)
-	if err := saveWholeClient(t, db, "edit", client); err != nil {
-		t.Fatal(err)
-	}
+	requireNodeTestSuccess(t, saveWholeClient(t, db, "edit", client))
 	loaded, err = (&ClientService{}).Get("1")
-	if err != nil {
-		t.Fatal(err)
-	}
+	requireNodeTestSuccess(t, err)
 	client = (*loaded)[0]
 	if string(client.Config) != original {
 		t.Fatal("old-client edit changed the new protocol credentials")
@@ -81,35 +69,27 @@ func TestWholeNodesCredentialsOmissionAndGeneration(t *testing.T) {
 	var task model.NodeTask
 	db.First(&task)
 	beforeTask := task.Generation
-	if err := saveWholeClient(t, db, "edit", client); err != nil {
-		t.Fatal(err)
-	}
+	requireNodeTestSuccess(t, saveWholeClient(t, db, "edit", client))
 	db.First(&task, task.Id)
 	if task.Generation != beforeTask {
 		t.Fatal("idempotent edit produced an access event")
 	}
 	client.Nodes = nil
 	client.NodeInbounds = nil
-	if err := saveWholeClient(t, db, "edit", client); err != nil {
-		t.Fatal(err)
-	}
+	requireNodeTestSuccess(t, saveWholeClient(t, db, "edit", client))
 	var grant model.ClientNode
 	db.First(&grant)
 	if !grant.Active || grant.Generation != 1 {
 		t.Fatal("omitted nodes changed grant")
 	}
 	client.Nodes = json.RawMessage(`[]`)
-	if err := saveWholeClient(t, db, "edit", client); err != nil {
-		t.Fatal(err)
-	}
+	requireNodeTestSuccess(t, saveWholeClient(t, db, "edit", client))
 	db.First(&grant)
 	if grant.Active || grant.Generation != 2 {
 		t.Fatal("clear did not preserve revoke tombstone")
 	}
 	client.Nodes = json.RawMessage(`[1]`)
-	if err := saveWholeClient(t, db, "edit", client); err != nil {
-		t.Fatal(err)
-	}
+	requireNodeTestSuccess(t, saveWholeClient(t, db, "edit", client))
 	db.First(&grant)
 	if !grant.Active || grant.Generation != 3 {
 		t.Fatal("re-add lost revoke generation")
@@ -137,12 +117,8 @@ func TestWholeNodesInvalidAndLegacyInputsAreAtomic(t *testing.T) {
 	if count != 0 {
 		t.Fatal("invalid input committed client")
 	}
-	if err := db.Model(&model.NodeInbound{}).Where("id = 1").Update("node_id", 2).Error; err != nil {
-		t.Fatal(err)
-	}
-	if err := saveWholeClient(t, db, "new", map[string]interface{}{"name": "legacy-client", "enable": true, "config": map[string]interface{}{}, "inbounds": []uint{21}, "nodeinbounds": []uint{1}, "links": []interface{}{}}); err != nil {
-		t.Fatal(err)
-	}
+	requireNodeTestSuccess(t, db.Model(&model.NodeInbound{}).Where("id = 1").Update("node_id", 2).Error)
+	requireNodeTestSuccess(t, saveWholeClient(t, db, "new", map[string]interface{}{"name": "legacy-client", "enable": true, "config": map[string]interface{}{}, "inbounds": []uint{21}, "nodeinbounds": []uint{1}, "links": []interface{}{}}))
 	loaded, _ := (&ClientService{}).Get("1")
 	client := (*loaded)[0]
 	if !client.NodeMigrationRequired || client.Nodes != nil {
@@ -171,12 +147,8 @@ func TestWholeNodesBulkFailureAndDeletionQueue(t *testing.T) {
 	if count != 0 {
 		t.Fatal("bulk partially saved")
 	}
-	if err := saveWholeClient(t, db, "addbulk", []interface{}{client("first", 1), client("second", 1)}); err != nil {
-		t.Fatal(err)
-	}
-	if err := saveWholeClient(t, db, "delbulk", []uint{1, 2}); err != nil {
-		t.Fatal(err)
-	}
+	requireNodeTestSuccess(t, saveWholeClient(t, db, "addbulk", []interface{}{client("first", 1), client("second", 1)}))
+	requireNodeTestSuccess(t, saveWholeClient(t, db, "delbulk", []uint{1, 2}))
 	db.Model(&model.ClientNode{}).Where("active = ?", true).Count(&count)
 	if count != 0 {
 		t.Fatal("deletion left active grants")
@@ -193,15 +165,9 @@ func TestWholeNodesBulkFailureAndDeletionQueue(t *testing.T) {
 
 func TestWholeNodesQuotaAndResetPersistAccessEpoch(t *testing.T) {
 	db := wholeNodeDB(t)
-	if err := saveWholeClient(t, db, "new", map[string]interface{}{"name": "quota-client", "enable": true, "config": map[string]interface{}{}, "inbounds": []uint{21}, "nodes": []uint{1}, "links": []interface{}{}}); err != nil {
-		t.Fatal(err)
-	}
-	if err := db.Model(&model.Client{}).Where("id = ?", 1).Updates(map[string]interface{}{"volume": 1, "down": 2}).Error; err != nil {
-		t.Fatal(err)
-	}
-	if err := db.Model(&model.Client{}).Where("id = 1").Updates(map[string]interface{}{"volume": 1, "up": 2}).Error; err != nil {
-		t.Fatal(err)
-	}
+	requireNodeTestSuccess(t, saveWholeClient(t, db, "new", map[string]interface{}{"name": "quota-client", "enable": true, "config": map[string]interface{}{}, "inbounds": []uint{21}, "nodes": []uint{1}, "links": []interface{}{}}))
+	requireNodeTestSuccess(t, db.Model(&model.Client{}).Where("id = ?", 1).Updates(map[string]interface{}{"volume": 1, "down": 2}).Error)
+	requireNodeTestSuccess(t, db.Model(&model.Client{}).Where("id = 1").Updates(map[string]interface{}{"volume": 1, "up": 2}).Error)
 	if _, err := (&ClientService{}).DepleteClients(); err != nil {
 		t.Fatal(err)
 	}

@@ -16,9 +16,7 @@ func TestV2NodeDeletionRemovesGrantsAndControlState(t *testing.T) {
 	node.Enable = false
 	node.DesiredRevision, node.AppliedRevision = 3, 3
 	node.AppliedSnapshot, _ = json.Marshal(Snapshot{Node: Publication{Enable: false}})
-	if err := db.Save(&node).Error; err != nil {
-		t.Fatal(err)
-	}
+	requireNodeTestSuccess(t, db.Save(&node).Error)
 	rows := []interface{}{
 		&model.ClientNode{NodeId: node.Id, ClientId: client.Id, Active: true},
 		&model.NodeAccessState{NodeId: node.Id, DesiredRevision: 2},
@@ -31,13 +29,9 @@ func TestV2NodeDeletionRemovesGrantsAndControlState(t *testing.T) {
 		&model.NodeJob{Id: "done", NodeId: node.Id, State: "done"},
 	}
 	for _, row := range rows {
-		if err := db.Create(row).Error; err != nil {
-			t.Fatal(err)
-		}
+		requireNodeTestSuccess(t, db.Create(row).Error)
 	}
-	if err := Save("nodes", "del", json.RawMessage(`1`), "test"); err != nil {
-		t.Fatal(err)
-	}
+	requireNodeTestSuccess(t, Save("nodes", "del", json.RawMessage(`1`), "test"))
 	for _, row := range append(rows, &model.NodeInbound{}) {
 		var count int64
 		if err := db.Model(row).Where("node_id = ?", node.Id).Count(&count).Error; err != nil || count != 0 {
@@ -56,9 +50,7 @@ func TestV2NodeDeletionRemovesGrantsAndControlState(t *testing.T) {
 	}
 	// A database restore may reuse a deleted numeric ID. It must have no grants.
 	node = model.Node{Id: 1, AssignmentMode: model.NodeAssignmentWhole}
-	if err := db.Create(&node).Error; err != nil {
-		t.Fatal(err)
-	}
+	requireNodeTestSuccess(t, db.Create(&node).Error)
 	if err := db.Model(&model.ClientNode{}).Where("node_id = ?", node.Id).Count(&count).Error; err != nil || count != 0 {
 		t.Fatal("new node inherited old client rights", count, err)
 	}
@@ -70,23 +62,17 @@ func TestNodeDeletionAfterReinstallRequiresDisabledNodeAndExplicitConfirmation(t
 	if err := DeleteNode(t.Context(), request, "unit"); err == nil || err.Error() != "node_disable_pending_delete" {
 		t.Fatal("manual stop confirmation bypassed the enabled-node guard", err)
 	}
-	if err := db.Model(&node).Update("enable", false).Error; err != nil {
-		t.Fatal(err)
-	}
+	requireNodeTestSuccess(t, db.Model(&node).Update("enable", false).Error)
 	if err := DeleteNode(t.Context(), json.RawMessage(`1`), "unit"); err == nil || err.Error() != "node_disable_pending_delete" {
 		t.Fatal("unacknowledged node disappeared without confirmation", err)
 	}
-	if err := DeleteNode(t.Context(), request, "unit"); err != nil {
-		t.Fatal(err)
-	}
+	requireNodeTestSuccess(t, DeleteNode(t.Context(), request, "unit"))
 	var remaining int64
 	if err := db.Model(&model.Node{}).Where("id = ?", node.Id).Count(&remaining).Error; err != nil || remaining != 0 {
 		t.Fatal("confirmed deleted OS node remains", err)
 	}
 	var audit model.Changes
-	if err := db.Where("key = ? AND action = ?", "nodes", "del").Last(&audit).Error; err != nil {
-		t.Fatal(err)
-	}
+	requireNodeTestSuccess(t, db.Where("key = ? AND action = ?", "nodes", "del").Last(&audit).Error)
 	var recorded nodeDeleteRequest
 	if json.Unmarshal(audit.Obj, &recorded) != nil || !recorded.ServerAlreadyStopped {
 		t.Fatal("manual stop confirmation was not audited")
@@ -98,18 +84,14 @@ func TestV2NodeDeletionWaitsForOldHostAndProvisioning(t *testing.T) {
 	node.Enable = false
 	node.DesiredRevision, node.AppliedRevision = 3, 3
 	node.AppliedSnapshot, _ = json.Marshal(Snapshot{Node: Publication{Enable: false}})
-	if err := db.Save(&node).Error; err != nil {
-		t.Fatal(err)
-	}
+	requireNodeTestSuccess(t, db.Save(&node).Error)
 	provisionJobs.Store(node.Id, true)
 	defer provisionJobs.Delete(node.Id)
 	if err := Save("nodes", "del", json.RawMessage(`1`), "test"); err == nil {
 		t.Fatal("node deleted during provisioning")
 	}
 	provisionJobs.Delete(node.Id)
-	if err := db.Create(&model.NodeInstallation{NodeId: node.Id, PreviousTarget: json.RawMessage(`[{"IP":"192.0.2.1"}]`)}).Error; err != nil {
-		t.Fatal(err)
-	}
+	requireNodeTestSuccess(t, db.Create(&model.NodeInstallation{NodeId: node.Id, PreviousTarget: json.RawMessage(`[{"IP":"192.0.2.1"}]`)}).Error)
 	if err := Save("nodes", "del", json.RawMessage(`1`), "test"); err == nil {
 		t.Fatal("pending old host forgotten")
 	}
@@ -122,9 +104,7 @@ func TestV2NodeRecreatedAtSameAddressStartsWithFreshSSHIdentity(t *testing.T) {
 		NodeId: node.Id, IP: "192.0.2.30", SSHPort: 22, SSHUser: "root",
 		OwnerID: "old-owner-fixture", HostKey: "old-host-fixture", PrivateKey: "old-ssh-fixture",
 	}
-	if err := db.Create(&previous).Error; err != nil {
-		t.Fatal(err)
-	}
+	requireNodeTestSuccess(t, db.Create(&previous).Error)
 	request := json.RawMessage(`1`)
 	if err := DeleteNode(t.Context(), request, "test"); err == nil || err.Error() != "node_disable_pending_delete" {
 		t.Fatalf("unconfirmed revocation allowed deletion: %v", err)
@@ -132,12 +112,8 @@ func TestV2NodeRecreatedAtSameAddressStartsWithFreshSSHIdentity(t *testing.T) {
 	node.Enable = false
 	node.AppliedRevision, node.DesiredRevision = 3, 3
 	node.AppliedSnapshot, _ = json.Marshal(Snapshot{Node: Publication{Enable: false}})
-	if err := db.Save(&node).Error; err != nil {
-		t.Fatal(err)
-	}
-	if err := DeleteNode(t.Context(), request, "test"); err != nil {
-		t.Fatal(err)
-	}
+	requireNodeTestSuccess(t, db.Save(&node).Error)
+	requireNodeTestSuccess(t, DeleteNode(t.Context(), request, "test"))
 	job, created, err := createLiveProvision(ProvisionRequest{
 		ModelVersion: 2, RequestKey: "fresh-install-fixture", Name: node.Name,
 		IP: previous.IP, SSHPort: previous.SSHPort, SSHUser: previous.SSHUser, Password: "fixture",
@@ -146,9 +122,7 @@ func TestV2NodeRecreatedAtSameAddressStartsWithFreshSSHIdentity(t *testing.T) {
 		t.Fatalf("fresh installation at the same address was blocked: %v", err)
 	}
 	plan, err := loadLivePlan(job)
-	if err != nil {
-		t.Fatal(err)
-	}
+	requireNodeTestSuccess(t, err)
 	if plan.Target.OwnerID == "" || plan.Target.OwnerID == previous.OwnerID ||
 		plan.Target.HostKey != "" || plan.Target.PrivateKey != "" {
 		t.Fatal("fresh installation reused old SSH identity")
@@ -168,9 +142,7 @@ func TestNodeDeletionWithStaleDNS(t *testing.T) {
 			cloud.missingStatus, cloud.rejectReads = http.StatusBadRequest, rejected
 			profile := profileFixture(t, "token")
 			record := model.NodeDNSRecord{NodeId: node.Id, ProfileId: profile.Id, ZoneId: fixtureZone, Name: "retired.example.com", RemoteId: "00000000000000000000000000000002", Type: "A", Content: "192.0.2.1", Owner: "fixture"}
-			if err := db.Create(&record).Error; err != nil {
-				t.Fatal(err)
-			}
+			requireNodeTestSuccess(t, db.Create(&record).Error)
 			ordinary := json.RawMessage(`1`)
 			manual := json.RawMessage(`{"id":1,"dns_already_removed":true}`)
 			if err := DeleteNode(t.Context(), manual, "test"); err == nil || err.Error() != "node_disable_pending_delete" {
@@ -182,9 +154,7 @@ func TestNodeDeletionWithStaleDNS(t *testing.T) {
 			node.Enable = false
 			node.AppliedRevision, node.DesiredRevision = 3, 3
 			node.AppliedSnapshot, _ = json.Marshal(Snapshot{Node: Publication{Enable: false}})
-			if err := db.Save(&node).Error; err != nil {
-				t.Fatal(err)
-			}
+			requireNodeTestSuccess(t, db.Save(&node).Error)
 			err := DeleteNode(t.Context(), ordinary, "test")
 			if rejected {
 				if err == nil || err.Error() != "dns_api_rejected" {
@@ -231,9 +201,7 @@ func TestLiveNodeCanShutDownAndBeDeletedWhileCertificateIsPending(t *testing.T) 
 	if err := Reconcile(t.Context(), 1); !errors.Is(err, errNodeCertificatePending) {
 		t.Fatal("expected the enabled draft to require its TLS resource", err)
 	}
-	if err := Save("nodes", "edit", json.RawMessage(`{"id":1,"enable":false}`), "test"); err != nil {
-		t.Fatal(err)
-	}
+	requireNodeTestSuccess(t, Save("nodes", "edit", json.RawMessage(`{"id":1,"enable":false}`), "test"))
 	if err := DeleteNode(t.Context(), json.RawMessage(`1`), "test"); err == nil || err.Error() != "node_disable_pending_delete" {
 		t.Fatal("deletion accepted the previous enabled snapshot", err)
 	}
@@ -244,9 +212,7 @@ func TestLiveNodeCanShutDownAndBeDeletedWhileCertificateIsPending(t *testing.T) 
 		t.Fatal("agent did not confirm shutdown with the pending certificate")
 	}
 	var applied Snapshot
-	if err := json.Unmarshal(node.AppliedSnapshot, &applied); err != nil {
-		t.Fatal(err)
-	}
+	requireNodeTestSuccess(t, json.Unmarshal(node.AppliedSnapshot, &applied))
 	var config struct {
 		Inbounds []json.RawMessage `json:"inbounds"`
 	}
@@ -255,9 +221,7 @@ func TestLiveNodeCanShutDownAndBeDeletedWhileCertificateIsPending(t *testing.T) 
 	}
 	var access model.NodeAccessState
 	var grants nodeagent.AccessSnapshot
-	if err := f.db.First(&access, "node_id = ?", node.Id).Error; err != nil {
-		t.Fatal(err)
-	}
+	requireNodeTestSuccess(t, f.db.First(&access, "node_id = ?", node.Id).Error)
 	if err := json.Unmarshal(access.AppliedSnapshot, &grants); err != nil || grants.Clients == nil || len(grants.Clients) != 0 {
 		t.Fatal("agent did not acknowledge empty access", err)
 	}

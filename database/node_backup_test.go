@@ -21,13 +21,9 @@ import (
 func backupFixtureSeal(t *testing.T, key []byte) string {
 	t.Helper()
 	block, err := aes.NewCipher(key)
-	if err != nil {
-		t.Fatal(err)
-	}
+	requireNodeTestSuccess(t, err)
 	aead, err := cipher.NewGCM(block)
-	if err != nil {
-		t.Fatal(err)
-	}
+	requireNodeTestSuccess(t, err)
 	nonce := make([]byte, aead.NonceSize())
 	if _, err = rand.Read(nonce); err != nil {
 		t.Fatal(err)
@@ -39,17 +35,11 @@ func nodeBackupFixture(t *testing.T) (string, []byte) {
 	folder := t.TempDir()
 	t.Setenv("SUI_DB_FOLDER", folder)
 	path := filepath.Join(folder, "s-ui.db")
-	if err := InitDB(path); err != nil {
-		t.Fatal(err)
-	}
+	requireNodeTestSuccess(t, InitDB(path))
 	t.Cleanup(func() { pool, _ := db.DB(); pool.Close() })
 	key := bytes.Repeat([]byte{0x31}, 32)
-	if err := os.WriteFile(filepath.Join(folder, "node-provision.key"), key, 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := db.Create(&model.NodeDNSProfile{Name: "Fixture", AuthType: "token", Zones: json.RawMessage(`[]`), Secret: backupFixtureSeal(t, key)}).Error; err != nil {
-		t.Fatal(err)
-	}
+	requireNodeTestSuccess(t, os.WriteFile(filepath.Join(folder, "node-provision.key"), key, 0600))
+	requireNodeTestSuccess(t, db.Create(&model.NodeDNSProfile{Name: "Fixture", AuthType: "token", Zones: json.RawMessage(`[]`), Secret: backupFixtureSeal(t, key)}).Error)
 	return path, key
 }
 
@@ -59,9 +49,7 @@ func TestFullBackupCarriesCorrectKeyAndRejectsMissingOrWrongKey(t *testing.T) {
 		t.Fatal("incomplete node export called full backup")
 	}
 	archive, err := GetFullBackup("stats,changes")
-	if err != nil {
-		t.Fatal(err)
-	}
+	requireNodeTestSuccess(t, err)
 	body, restoredKey, err := readFullBackup(bytes.NewReader(archive), int64(len(archive)))
 	if err != nil || !bytes.Equal(restoredKey, key) {
 		t.Fatal("archive roundtrip", err)
@@ -86,21 +74,15 @@ func TestFullBackupCarriesCorrectKeyAndRejectsMissingOrWrongKey(t *testing.T) {
 
 func TestFullBackupValidatesAllSecretsAndArchiveNames(t *testing.T) {
 	_, key := nodeBackupFixture(t)
-	if err := db.Create(&model.NodeJob{Id: "fixture-job", Plan: "not-a-valid-cipher"}).Error; err != nil {
-		t.Fatal(err)
-	}
+	requireNodeTestSuccess(t, db.Create(&model.NodeJob{Id: "fixture-job", Plan: "not-a-valid-cipher"}).Error)
 	if _, err := GetFullBackup(""); err == nil {
 		t.Fatal("later cipher column corruption missed")
 	}
 	db.Delete(&model.NodeJob{}, "id = ?", "fixture-job")
 	archive, err := GetFullBackup("")
-	if err != nil {
-		t.Fatal(err)
-	}
+	requireNodeTestSuccess(t, err)
 	dbBody, _, err := readFullBackup(bytes.NewReader(archive), int64(len(archive)))
-	if err != nil {
-		t.Fatal(err)
-	}
+	requireNodeTestSuccess(t, err)
 	for _, name := range []string{"../panel.db", "nested/panel.db", "node-provision.key"} {
 		var out bytes.Buffer
 		z := zip.NewWriter(&out)
@@ -119,16 +101,10 @@ func TestFullBackupValidatesAllSecretsAndArchiveNames(t *testing.T) {
 func TestBackupPreservesDeletedIDHighWater(t *testing.T) {
 	_, _ = nodeBackupFixture(t)
 	high := model.Client{Id: 9000, Name: "deleted", Config: json.RawMessage(`{}`)}
-	if err := db.Create(&high).Error; err != nil {
-		t.Fatal(err)
-	}
-	if err := db.Delete(&high).Error; err != nil {
-		t.Fatal(err)
-	}
+	requireNodeTestSuccess(t, db.Create(&high).Error)
+	requireNodeTestSuccess(t, db.Delete(&high).Error)
 	contents, err := GetDb("")
-	if err != nil {
-		t.Fatal(err)
-	}
+	requireNodeTestSuccess(t, err)
 	restored := openBackup(t, contents)
 	next := model.Client{Name: "new", Config: json.RawMessage(`{}`)}
 	if err = restored.Create(&next).Error; err != nil {
@@ -144,35 +120,21 @@ func TestInterruptedDBKeyPairRestoresOldPairBeforeOpen(t *testing.T) {
 	pool, _ := db.DB()
 	pool.Close()
 	files, err := openRestoreFiles(path)
-	if err != nil {
-		t.Fatal(err)
-	}
+	requireNodeTestSuccess(t, err)
 	defer files.root.Close()
 	fallback := files.database + ".backup-fixture"
-	if err := files.root.Rename(files.database, fallback); err != nil {
-		t.Fatal(err)
-	}
-	if err := files.writePrivate(backupKeyName, bytes.Repeat([]byte{0x32}, 32)); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, []byte("interrupted replacement"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := files.writeJournal(backupPairJournal{Version: 1, Fallback: fallback, OldKey: true}); err != nil {
-		t.Fatal(err)
-	}
+	requireNodeTestSuccess(t, files.root.Rename(files.database, fallback))
+	requireNodeTestSuccess(t, files.writePrivate(backupKeyName, bytes.Repeat([]byte{0x32}, 32)))
+	requireNodeTestSuccess(t, os.WriteFile(path, []byte("interrupted replacement"), 0600))
+	requireNodeTestSuccess(t, files.writeJournal(backupPairJournal{Version: 1, Fallback: fallback, OldKey: true}))
 	if err := OpenDB(path); !os.IsNotExist(err) {
 		t.Fatalf("want recovery to stop on missing saved key, got %v", err)
 	}
 	if _, err := files.root.Stat(fallback); err != nil {
 		t.Fatal("failed recovery consumed the saved database", err)
 	}
-	if err := files.writePrivate(fallback+".key", key); err != nil {
-		t.Fatal(err)
-	}
-	if err := InitDB(path); err != nil {
-		t.Fatal(err)
-	}
+	requireNodeTestSuccess(t, files.writePrivate(fallback+".key", key))
+	requireNodeTestSuccess(t, InitDB(path))
 	restored, err := os.ReadFile(filepath.Join(filepath.Dir(path), "node-provision.key"))
 	if err != nil || !bytes.Equal(restored, key) {
 		t.Fatal("key pair not restored", err)
@@ -190,25 +152,15 @@ func TestReadyPairWithWrongKeyFailsClosed(t *testing.T) {
 	pool, _ := db.DB()
 	pool.Close()
 	files, err := openRestoreFiles(path)
-	if err != nil {
-		t.Fatal(err)
-	}
+	requireNodeTestSuccess(t, err)
 	defer files.root.Close()
-	if err := files.writeJournal(backupPairJournal{Version: 1, Fallback: files.database + ".backup-fixture", OldKey: true, Ready: true}); err != nil {
-		t.Fatal(err)
-	}
-	if err := files.writePrivate(backupKeyName, bytes.Repeat([]byte{0x32}, 32)); err != nil {
-		t.Fatal(err)
-	}
+	requireNodeTestSuccess(t, files.writeJournal(backupPairJournal{Version: 1, Fallback: files.database + ".backup-fixture", OldKey: true, Ready: true}))
+	requireNodeTestSuccess(t, files.writePrivate(backupKeyName, bytes.Repeat([]byte{0x32}, 32)))
 	if err := OpenDB(path); err == nil {
 		t.Fatal("opened mismatched ready pair")
 	}
-	if err := files.writePrivate(backupKeyName, key); err != nil {
-		t.Fatal(err)
-	}
-	if err := InitDB(path); err != nil {
-		t.Fatal(err)
-	}
+	requireNodeTestSuccess(t, files.writePrivate(backupKeyName, key))
+	requireNodeTestSuccess(t, InitDB(path))
 }
 
 func TestRestoreLegacySQLiteAndFullArchive(t *testing.T) {
@@ -220,39 +172,23 @@ func TestRestoreLegacySQLiteAndFullArchive(t *testing.T) {
 			version := config.GetVersion()
 			if format == "sqlite" {
 				version = "1.6.7"
-				if err := db.Delete(&model.NodeDNSProfile{}, "name = ?", "Fixture").Error; err != nil {
-					t.Fatal(err)
-				}
-				if err := os.Remove(keyPath); err != nil {
-					t.Fatal(err)
-				}
+				requireNodeTestSuccess(t, db.Delete(&model.NodeDNSProfile{}, "name = ?", "Fixture").Error)
+				requireNodeTestSuccess(t, os.Remove(keyPath))
 			}
-			if err := db.Create(&model.Setting{Key: "version", Value: version}).Error; err != nil {
-				t.Fatal(err)
-			}
+			requireNodeTestSuccess(t, db.Create(&model.Setting{Key: "version", Value: version}).Error)
 			item := model.Client{Name: "backup-fixture", Config: json.RawMessage(`{}`)}
-			if err := db.Create(&item).Error; err != nil {
-				t.Fatal(err)
-			}
+			requireNodeTestSuccess(t, db.Create(&item).Error)
 			getBackup := GetDb
 			if format == "zip" {
 				getBackup = GetFullBackup
 			}
 			body, err := getBackup("")
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := db.Delete(&item).Error; err != nil {
-				t.Fatal(err)
-			}
+			requireNodeTestSuccess(t, err)
+			requireNodeTestSuccess(t, db.Delete(&item).Error)
 			if format == "zip" {
-				if err := os.WriteFile(keyPath, bytes.Repeat([]byte{0x32}, 32), 0600); err != nil {
-					t.Fatal(err)
-				}
+				requireNodeTestSuccess(t, os.WriteFile(keyPath, bytes.Repeat([]byte{0x32}, 32), 0600))
 			}
-			if err := restoreDB(backupMemoryFile{bytes.NewReader(body)}); err != nil {
-				t.Fatal(err)
-			}
+			requireNodeTestSuccess(t, restoreDB(backupMemoryFile{bytes.NewReader(body)}))
 			var restored model.Client
 			if err := db.First(&restored, item.Id).Error; err != nil || restored.Name != item.Name {
 				t.Fatalf("restored client: %v", err)

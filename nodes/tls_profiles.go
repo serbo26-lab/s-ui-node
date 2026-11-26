@@ -30,15 +30,8 @@ func tlsProfilePolicy(profile model.Tls) (map[string]interface{}, map[string]int
 			return nil, nil, errors.New("node_tls_profile_invalid")
 		}
 	}
-	for _, side := range []map[string]interface{}{server, client} {
-		ech, _ := side["ech"].(map[string]interface{})
-		if ech["enabled"] == true || side["client_authentication"] != nil || side["client_certificate"] != nil || side["client_certificate_path"] != nil || side["client_certificate_public_key_sha256"] != nil || side["client_key"] != nil || side["client_key_path"] != nil {
-			return nil, nil, errors.New("node_tls_profile_unsupported")
-		}
-		delete(side, "ech")
-		for _, field := range []string{"certificate", "key", "certificate_path", "key_path", "certificate_provider", "certificate_public_key_sha256"} {
-			delete(side, field)
-		}
+	if err := cleanTLSProfileSides(server, client); err != nil {
+		return nil, nil, err
 	}
 	reality, _ := server["reality"].(map[string]interface{})
 	if reality["enabled"] == true {
@@ -183,4 +176,18 @@ func QueueTLSProfileChange(tx *gorm.DB, profile model.Tls) error {
 		ids = append(ids, linked...)
 	}
 	return database.QueueNodeTasks(tx, ids, "structure")
+}
+
+func cleanTLSProfileSides(server, client map[string]interface{}) error {
+	for _, side := range []map[string]interface{}{server, client} {
+		ech, _ := side["ech"].(map[string]interface{})
+		if ech["enabled"] == true || side["client_authentication"] != nil || side["client_certificate"] != nil || side["client_certificate_path"] != nil || side["client_certificate_public_key_sha256"] != nil || side["client_key"] != nil || side["client_key_path"] != nil {
+			return errors.New("node_tls_profile_unsupported")
+		}
+		delete(side, "ech")
+		for _, field := range []string{"certificate", "key", "certificate_path", "key_path", "certificate_provider", "certificate_public_key_sha256"} {
+			delete(side, field)
+		}
+	}
+	return nil
 }

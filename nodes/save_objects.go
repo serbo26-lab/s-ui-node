@@ -36,7 +36,7 @@ func parseSaveIdentity(object, action string, data json.RawMessage) (uint, nodeD
 		if object == "nodes" && jobRunning(id) {
 			return id, deleteRequest, errors.New("node_job_running")
 		}
-		if action != "new" && action != "edit" && !(object == "nodes" && (action == "applytemplate" || action == "selectinbounds" || action == "retry")) {
+		if !knownNodeSaveAction(object, action) {
 			return id, deleteRequest, errors.New("unknown Nodes action")
 		}
 		if action == "new" && id != 0 {
@@ -208,36 +208,7 @@ func deleteNodeObject(tx *gorm.DB, value model.Node, deleteRequest nodeDeleteReq
 			return errNodeDNSCleanupRequired
 		}
 	}
-	var ids []uint
-	if err := tx.Model(&model.NodeInbound{}).Where(whereNodeID, id).Pluck("id", &ids).Error; err != nil {
-		return err
-	}
-	if len(ids) > 0 {
-		if err := tx.Where("node_inbound_id in ?", ids).Delete(&model.ClientNodeInbound{}).Error; err != nil {
-			return err
-		}
-	}
-	if err := tx.Where(whereNodeID, id).Delete(&model.NodeInbound{}).Error; err != nil {
-		return err
-	}
-	// No grants or control state may survive a logical node deletion.
-	// A restored database can otherwise reuse the deleted numeric ID.
-	for _, row := range []interface{}{&model.ClientNode{}, &model.NodeAccessState{}, &model.NodeTask{}, &model.NodeOverride{}, &model.NodeGeneratedMaterial{}, &model.NodeAssignmentMigration{}, &model.NodeInstallation{}, &model.NodeJob{}, &model.NodeDeployment{}, &model.NodePortReservation{}, &model.NodeDomainBinding{}, &model.NodeCertificateBinding{}, &model.NodeCertificateVersion{}, &model.NodeDNSRecord{}} {
-		if err := tx.Where(whereNodeID, id).Delete(row).Error; err != nil {
-			return err
-		}
-	}
-	if err := tx.Delete(&model.Node{}, id).Error; err != nil {
-		return err
-	}
-	if err := tx.Where(whereNodeID, id).Delete(&model.NodeClientTraffic{}).Error; err != nil {
-		return err
-	}
-	if err := detachOrphanedPrivateDeployments(tx); err != nil {
-		return err
-	}
-
-	return nil
+	return purgeDeletedNode(tx, id)
 }
 
 func retryNodeObject(tx *gorm.DB, value model.Node) error {
@@ -306,52 +277,13 @@ func applyNodeObjectTemplate(tx *gorm.DB, value model.Node, data json.RawMessage
 
 func editNodeObject(tx *gorm.DB, value model.Node, action string, data json.RawMessage) (uint, error) {
 	id := value.Id
-	var request struct {
-		Name        *string         `json:"name"`
-		Enable      *bool           `json:"enable"`
-		Address     *string         `json:"address"`
-		LinkAddress *string         `json:"linkaddress"`
-		TemplateID  *uint           `json:"template_id"`
-		Config      json.RawMessage `json:"config"`
-		TLS         *ControlTLS     `json:"control_tls"`
-	}
-	previousAddress, previousCertificate, previousKey, previousCA := value.Address, value.ControlCertificate, value.ControlKey, value.ControlCA
+	var request nodeEditRequest
 	if err := json.Unmarshal(data, &request); err != nil {
 		return id, err
 	}
-	if request.Name != nil {
-		value.Name = *request.Name
-	}
-	if request.Enable != nil {
-		value.Enable = *request.Enable
-	}
-	if request.Address != nil {
-		value.Address = strings.TrimRight(*request.Address, "/")
-	}
-	if request.LinkAddress != nil {
-		value.LinkAddress = *request.LinkAddress
-	}
-	targetTemplate := value.TemplateId
-	if request.TemplateID != nil {
-		targetTemplate = *request.TemplateID
-	}
-	if request.Config != nil {
-		if value.TemplateTargetVersion > 0 {
-			return id, errors.New("live_template_use_explicit_overrides")
-		}
-		if _, err := decodeObject(request.Config); err != nil {
-			return id, err
-		}
-		value.Config = request.Config
-	}
-	if request.TLS != nil {
-		value.ControlCA = request.TLS.CA
-		value.ControlCertificate = request.TLS.Certificate
-		value.ControlKey = request.TLS.Key
-	}
-	if previousAddress != value.Address || previousCertificate != value.ControlCertificate || previousKey != value.ControlKey || previousCA != value.ControlCA {
-		value.LastSeen = 0
-		value.LastError = ""
+	targetTemplate, err := applyNodeEditRequest(&value, request)
+	if err != nil {
+		return id, err
 	}
 	if strings.TrimSpace(value.Name) == "" {
 		return id, errors.New("node needs a name")
@@ -371,29 +303,8 @@ func editNodeObject(tx *gorm.DB, value model.Node, action string, data json.RawM
 	if err := tx.Save(&value).Error; err != nil {
 		return id, err
 	}
-	if targetTemplate != 0 && (action == "new" || targetTemplate != value.TemplateId) {
-		if err := applyTemplate(tx, &value, targetTemplate); err != nil {
-			return id, err
-		}
-	} else if targetTemplate == 0 && value.TemplateId != 0 {
-		if value.TemplateTargetVersion > 0 {
-			return id, errors.New("live_template_use_private_copy")
-		}
-		if len(value.Config) == 0 {
-			var prior model.NodeTemplate
-			if err := tx.First(&prior, value.TemplateId).Error; err != nil {
-				return id, err
-			}
-			value.Config = prior.Config
-		}
-		value.TemplateId = 0
-		value.TemplateBase = nil
-		if err := tx.Save(&value).Error; err != nil {
-			return id, err
-		}
-		if err := tx.Model(&model.NodeInbound{}).Where(whereNodeID, value.Id).Updates(map[string]interface{}{"source_template_id": 0, "template_key": "", "template_base": nil}).Error; err != nil {
-			return id, err
-		}
+	if err := updateNodeTemplate(tx, &value, targetTemplate, action); err != nil {
+		return id, err
 	}
 	id = value.Id
 	if value.TemplateTargetVersion > 0 {
@@ -435,56 +346,10 @@ func saveInboundObject(tx *gorm.DB, action string, data json.RawMessage, id uint
 			return id, err
 		}
 	} else {
-		previousNode := value.NodeId
-		previousType, sourceTemplate, key, base := value.Type, value.SourceTemplateId, value.TemplateKey, value.TemplateBase
-		if err := json.Unmarshal(data, &value); err != nil {
-			return id, err
-		}
-		if action == "edit" && value.NodeId != previousNode {
-			return id, errors.New("create a new inbound to move it to another node")
-		}
-		if action == "edit" && value.Type != previousType {
-			return id, errors.New("create a new inbound to change its protocol")
-		}
-		value.SourceTemplateId, value.TemplateKey, value.TemplateBase = sourceTemplate, key, base
-		var count int64
-		if err := tx.Model(&model.Node{}).Where("id = ?", value.NodeId).Count(&count).Error; err != nil {
-			return id, err
-		}
-		if count != 1 {
-			return id, errors.New("unknown node")
-		}
-		if strings.TrimSpace(value.Tag) == "" {
-			return id, errors.New("remote inbound needs a tag")
-		}
-		switch value.Type {
-		case "vless", "tuic", "hysteria2":
-		default:
-			return id, errors.New("unsupported node protocol")
-		}
-		var options map[string]interface{}
-		if json.Unmarshal(value.Options, &options) != nil || options == nil {
-			return id, errors.New("invalid node inbound options")
-		}
-		port, ok := options["listen_port"].(float64)
-		if !ok || port < 1 || port > 65535 || float64(int(port)) != port {
-			return id, errors.New("invalid remote listen port")
-		}
-		delete(options, "users")
-		delete(options, "type")
-		delete(options, "tag")
-		value.Options, _ = json.Marshal(options)
-		if _, _, err := clientTLS(value); err != nil {
-			return id, err
-		}
-		if err := tx.Save(&value).Error; err != nil {
-			return id, err
-		}
-		id = value.Id
+		return editLegacyInbound(tx, value, action, data)
 	}
 	return id, nil
 }
-
 func finishNodeSave(tx *gorm.DB, object, action string, id uint, deleteRequest nodeDeleteRequest, actor string) error {
 	// Do not put write-only control keys or server options in the audit entry.
 	if action != "del" && (object == "nodes" || object == "nodeinbounds") {
@@ -511,4 +376,180 @@ func finishNodeSave(tx *gorm.DB, object, action string, id uint, deleteRequest n
 		obj, _ = json.Marshal(deleteRequest)
 	}
 	return tx.Create(&model.Changes{DateTime: time.Now().Unix(), Actor: actor, Key: object, Action: action, Obj: obj}).Error
+}
+
+func knownNodeSaveAction(object, action string) bool {
+	switch action {
+	case "new", "edit":
+		return true
+	case "applytemplate", "selectinbounds", "retry":
+		return object == "nodes"
+	default:
+		return false
+	}
+}
+
+func purgeDeletedNode(tx *gorm.DB, id uint) error {
+	var ids []uint
+	if err := tx.Model(&model.NodeInbound{}).Where(whereNodeID, id).Pluck("id", &ids).Error; err != nil {
+		return err
+	}
+	if len(ids) > 0 {
+		if err := tx.Where("node_inbound_id in ?", ids).Delete(&model.ClientNodeInbound{}).Error; err != nil {
+			return err
+		}
+	}
+	if err := tx.Where(whereNodeID, id).Delete(&model.NodeInbound{}).Error; err != nil {
+		return err
+	}
+	// No grants or control state may survive a logical node deletion.
+	// A restored database can otherwise reuse the deleted numeric ID.
+	for _, row := range []interface{}{&model.ClientNode{}, &model.NodeAccessState{}, &model.NodeTask{}, &model.NodeOverride{}, &model.NodeGeneratedMaterial{}, &model.NodeAssignmentMigration{}, &model.NodeInstallation{}, &model.NodeJob{}, &model.NodeDeployment{}, &model.NodePortReservation{}, &model.NodeDomainBinding{}, &model.NodeCertificateBinding{}, &model.NodeCertificateVersion{}, &model.NodeDNSRecord{}} {
+		if err := tx.Where(whereNodeID, id).Delete(row).Error; err != nil {
+			return err
+		}
+	}
+	if err := tx.Delete(&model.Node{}, id).Error; err != nil {
+		return err
+	}
+	if err := tx.Where(whereNodeID, id).Delete(&model.NodeClientTraffic{}).Error; err != nil {
+		return err
+	}
+	if err := detachOrphanedPrivateDeployments(tx); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+type nodeEditRequest struct {
+	Name        *string         `json:"name"`
+	Enable      *bool           `json:"enable"`
+	Address     *string         `json:"address"`
+	LinkAddress *string         `json:"linkaddress"`
+	TemplateID  *uint           `json:"template_id"`
+	Config      json.RawMessage `json:"config"`
+	TLS         *ControlTLS     `json:"control_tls"`
+}
+
+func applyNodeEditRequest(value *model.Node, request nodeEditRequest) (uint, error) {
+	targetTemplate := value.TemplateId
+	previousAddress, previousCertificate, previousKey, previousCA := value.Address, value.ControlCertificate, value.ControlKey, value.ControlCA
+	if request.Name != nil {
+		value.Name = *request.Name
+	}
+	if request.Enable != nil {
+		value.Enable = *request.Enable
+	}
+	if request.Address != nil {
+		value.Address = strings.TrimRight(*request.Address, "/")
+	}
+	if request.LinkAddress != nil {
+		value.LinkAddress = *request.LinkAddress
+	}
+	if request.TemplateID != nil {
+		targetTemplate = *request.TemplateID
+	}
+	if request.Config != nil {
+		if value.TemplateTargetVersion > 0 {
+			return targetTemplate, errors.New("live_template_use_explicit_overrides")
+		}
+		if _, err := decodeObject(request.Config); err != nil {
+			return targetTemplate, err
+		}
+		value.Config = request.Config
+	}
+	if request.TLS != nil {
+		value.ControlCA = request.TLS.CA
+		value.ControlCertificate = request.TLS.Certificate
+		value.ControlKey = request.TLS.Key
+	}
+	if previousAddress != value.Address || previousCertificate != value.ControlCertificate || previousKey != value.ControlKey || previousCA != value.ControlCA {
+		value.LastSeen = 0
+		value.LastError = ""
+	}
+	return targetTemplate, nil
+}
+
+func updateNodeTemplate(tx *gorm.DB, value *model.Node, target uint, action string) error {
+	if target != 0 && (action == "new" || target != value.TemplateId) {
+		return applyTemplate(tx, value, target)
+	}
+	if target == 0 && value.TemplateId != 0 {
+		return detachLegacyNodeTemplate(tx, value)
+	}
+	return nil
+}
+
+func detachLegacyNodeTemplate(tx *gorm.DB, value *model.Node) error {
+	if value.TemplateTargetVersion > 0 {
+		return errors.New("live_template_use_private_copy")
+	}
+	if len(value.Config) == 0 {
+		var prior model.NodeTemplate
+		if err := tx.First(&prior, value.TemplateId).Error; err != nil {
+			return err
+		}
+		value.Config = prior.Config
+	}
+	value.TemplateId = 0
+	value.TemplateBase = nil
+	if err := tx.Save(value).Error; err != nil {
+		return err
+	}
+	if err := tx.Model(&model.NodeInbound{}).Where(whereNodeID, value.Id).Updates(map[string]interface{}{"source_template_id": 0, "template_key": "", "template_base": nil}).Error; err != nil {
+		return err
+	}
+	return nil
+}
+
+func editLegacyInbound(tx *gorm.DB, value model.NodeInbound, action string, data json.RawMessage) (uint, error) {
+	id := value.Id
+	previousNode := value.NodeId
+	previousType, sourceTemplate, key, base := value.Type, value.SourceTemplateId, value.TemplateKey, value.TemplateBase
+	if err := json.Unmarshal(data, &value); err != nil {
+		return id, err
+	}
+	if action == "edit" && value.NodeId != previousNode {
+		return id, errors.New("create a new inbound to move it to another node")
+	}
+	if action == "edit" && value.Type != previousType {
+		return id, errors.New("create a new inbound to change its protocol")
+	}
+	value.SourceTemplateId, value.TemplateKey, value.TemplateBase = sourceTemplate, key, base
+	var count int64
+	if err := tx.Model(&model.Node{}).Where("id = ?", value.NodeId).Count(&count).Error; err != nil {
+		return id, err
+	}
+	if count != 1 {
+		return id, errors.New("unknown node")
+	}
+	if strings.TrimSpace(value.Tag) == "" {
+		return id, errors.New("remote inbound needs a tag")
+	}
+	switch value.Type {
+	case "vless", "tuic", "hysteria2":
+	default:
+		return id, errors.New("unsupported node protocol")
+	}
+	var options map[string]interface{}
+	if json.Unmarshal(value.Options, &options) != nil || options == nil {
+		return id, errors.New("invalid node inbound options")
+	}
+	port, ok := options["listen_port"].(float64)
+	if !ok || port < 1 || port > 65535 || float64(int(port)) != port {
+		return id, errors.New("invalid remote listen port")
+	}
+	delete(options, "users")
+	delete(options, "type")
+	delete(options, "tag")
+	value.Options, _ = json.Marshal(options)
+	if _, _, err := clientTLS(value); err != nil {
+		return id, err
+	}
+	if err := tx.Save(&value).Error; err != nil {
+		return id, err
+	}
+	id = value.Id
+	return id, nil
 }

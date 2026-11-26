@@ -62,25 +62,9 @@ func normalizeBlueprints(value *model.NodeTemplate, old model.NodeTemplate) erro
 	keys, tags := map[string]bool{}, map[string]bool{}
 	for i := range list {
 		item := &list[i]
-		if item.Key == "" {
-			key, err := uuid.NewV4()
-			if err != nil {
-				return err
-			}
-			item.Key = key.String()
-		}
-		if len(item.Key) > 128 || keys[item.Key] || tags[item.Tag] {
-			return errors.New("duplicate template inbound key/tag")
-		}
-		if prior, ok := oldTypes[item.Key]; ok && prior != item.Type {
-			return errors.New("create a new template inbound to change its protocol")
-		}
-		keys[item.Key], tags[item.Tag] = true, true
-		inbound := model.NodeInbound{Tag: item.Tag, Type: item.Type, Enable: item.Enable, Options: item.Options, ClientTLS: item.ClientTLS}
-		if err := validateInbound(&inbound, false); err != nil {
+		if err := normalizeBlueprint(item, oldTypes, keys, tags); err != nil {
 			return err
 		}
-		item.Options = inbound.Options
 	}
 	value.Blueprints, _ = json.Marshal(list)
 	config, err := decodeObject(value.Config)
@@ -126,23 +110,10 @@ func mergeTemplate(old, current, next interface{}) interface{} {
 		keys[key] = true
 	}
 	for key := range keys {
-		a, aOK := oldMap[key]
-		b, bOK := currentMap[key]
-		c, cOK := nextMap[key]
-		if aOK == bOK && reflect.DeepEqual(a, b) {
-			if cOK {
-				result[key] = c
-			}
-			continue
+		value, exists := mergeTemplateField(oldMap, currentMap, nextMap, key)
+		if exists {
+			result[key] = value
 		}
-		if !bOK {
-			continue
-		}
-		if !cOK {
-			result[key] = b
-			continue
-		}
-		result[key] = mergeTemplate(a, b, c)
 	}
 	return result
 }
@@ -279,4 +250,43 @@ func resolveNodeParameters(raw json.RawMessage, node model.Node) (json.RawMessag
 		return value
 	}
 	return json.Marshal(resolve(value))
+}
+
+func normalizeBlueprint(item *Blueprint, oldTypes map[string]string, keys, tags map[string]bool) error {
+	if item.Key == "" {
+		key, err := uuid.NewV4()
+		if err != nil {
+			return err
+		}
+		item.Key = key.String()
+	}
+	if len(item.Key) > 128 || keys[item.Key] || tags[item.Tag] {
+		return errors.New("duplicate template inbound key/tag")
+	}
+	if prior, ok := oldTypes[item.Key]; ok && prior != item.Type {
+		return errors.New("create a new template inbound to change its protocol")
+	}
+	keys[item.Key], tags[item.Tag] = true, true
+	inbound := model.NodeInbound{Tag: item.Tag, Type: item.Type, Enable: item.Enable, Options: item.Options, ClientTLS: item.ClientTLS}
+	if err := validateInbound(&inbound, false); err != nil {
+		return err
+	}
+	item.Options = inbound.Options
+	return nil
+}
+
+func mergeTemplateField(old, current, next map[string]interface{}, key string) (interface{}, bool) {
+	a, aOK := old[key]
+	b, bOK := current[key]
+	c, cOK := next[key]
+	if aOK == bOK && reflect.DeepEqual(a, b) {
+		return c, cOK
+	}
+	if !bOK {
+		return nil, false
+	}
+	if !cOK {
+		return b, true
+	}
+	return mergeTemplate(a, b, c), true
 }

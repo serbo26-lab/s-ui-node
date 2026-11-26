@@ -116,13 +116,8 @@ func validPublishedAddress(value string) bool {
 		return false
 	}
 	for _, label := range strings.Split(ascii, ".") {
-		if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+		if !validNodeDNSLabel(label) {
 			return false
-		}
-		for _, c := range label {
-			if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-') {
-				return false
-			}
 		}
 	}
 	return true
@@ -178,4 +173,16 @@ func Save(object, action string, data json.RawMessage, actor string) error {
 		}
 		return finishNodeSave(tx, object, action, id, deleteRequest, actor)
 	})
+}
+
+func validNodeDNSLabel(label string) bool {
+	if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+		return false
+	}
+	for _, c := range label {
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-') {
+			return false
+		}
+	}
+	return true
 }

@@ -77,6 +77,10 @@ func validateRealityTargets(entries []SpecEntry, addresses []string) error {
 			next[port] = target.Port
 		}
 	}
+	return validateRealityGraph(next)
+}
+
+func validateRealityGraph(next map[int]int) error {
 	visited := make(map[int]int)
 	for start := range next {
 		for port := start; port != 0; port = next[port] {

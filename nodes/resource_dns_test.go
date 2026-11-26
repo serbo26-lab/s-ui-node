@@ -131,9 +131,7 @@ func newCloudFixture(t *testing.T) *cloudFixture {
 func saveResourceFixture(t *testing.T, kind string, value interface{}) {
 	t.Helper()
 	body, _ := json.Marshal(value)
-	if err := SaveNodeResource(kind, "save", body, "test"); err != nil {
-		t.Fatal(err)
-	}
+	requireNodeTestSuccess(t, SaveNodeResource(kind, "save", body, "test"))
 }
 func profileFixture(t *testing.T, auth string) model.NodeDNSProfile {
 	t.Helper()
@@ -143,9 +141,7 @@ func profileFixture(t *testing.T, auth string) model.NodeDNSProfile {
 	}
 	saveResourceFixture(t, "dnsprofiles", request)
 	var profile model.NodeDNSProfile
-	if err := database.GetDB().Where("name = ?", auth).First(&profile).Error; err != nil {
-		t.Fatal(err)
-	}
+	requireNodeTestSuccess(t, database.GetDB().Where("name = ?", auth).First(&profile).Error)
 	return profile
 }
 
@@ -158,9 +154,7 @@ func TestResourceDNSOwnershipAckLossAndCredentialModes(t *testing.T) {
 		t.Fatal("lost provider ACK accepted")
 	}
 	record, err := ensureResourceRecord(context.Background(), 1, profile, fixtureZone, "own.example.com", "A", "192.0.2.1")
-	if err != nil {
-		t.Fatal(err)
-	}
+	requireNodeTestSuccess(t, err)
 	if cloud.Writes() != 1 || record.RemoteId == "" {
 		t.Fatal("lost ACK duplicated DNS record")
 	}
@@ -186,9 +180,7 @@ func TestResourceDNSOwnershipAckLossAndCredentialModes(t *testing.T) {
 		t.Fatal("token auth incorrect")
 	}
 	public, err := ResourcesBundle()
-	if err != nil {
-		t.Fatal(err)
-	}
+	requireNodeTestSuccess(t, err)
 	body, _ := json.Marshal(public)
 	if strings.Contains(string(body), "fixture-cloudflare-token") || strings.Contains(string(body), "fixture-global-key") {
 		t.Fatal("DNS credentials leaked")
@@ -212,9 +204,7 @@ func TestResourceManagedPrefixStableAndForeignNameNeverOverwritten(t *testing.T)
 	saveResourceFixture(t, "domains", request)
 	var first model.NodeDomainBinding
 	f.db.First(&first, "node_id = ?", 1)
-	if err := ReconcileResources(context.Background(), 1); err != nil {
-		t.Fatal(err)
-	}
+	requireNodeTestSuccess(t, ReconcileResources(context.Background(), 1))
 	request["expected_version"] = first.Generation
 	saveResourceFixture(t, "domains", request)
 	var second model.NodeDomainBinding
@@ -222,9 +212,7 @@ func TestResourceManagedPrefixStableAndForeignNameNeverOverwritten(t *testing.T)
 	if second.FQDN != first.FQDN || second.Prefix == "" || second.Generation != first.Generation || second.State != "ready" {
 		t.Fatal("repeat regenerated domain prefix")
 	}
-	if err := ReconcileResources(context.Background(), 1); err != nil {
-		t.Fatal(err)
-	}
+	requireNodeTestSuccess(t, ReconcileResources(context.Background(), 1))
 	if cloud.Writes() != 1 {
 		t.Fatal("repeat duplicated record")
 	}
@@ -278,12 +266,8 @@ func TestResourceManualDNSRejectsWrongAAAAWithoutProviderWrites(t *testing.T) {
 		t.Fatal("bad AAAA ignored", err)
 	}
 	wrong = false
-	if err := RetryNodeResources(1, "test"); err != nil {
-		t.Fatal(err)
-	}
-	if err := ReconcileResources(context.Background(), 1); err != nil {
-		t.Fatal(err)
-	}
+	requireNodeTestSuccess(t, RetryNodeResources(1, "test"))
+	requireNodeTestSuccess(t, ReconcileResources(context.Background(), 1))
 	if cloud.Calls() != 0 {
 		t.Fatal("manual DNS contacted provider")
 	}
@@ -326,13 +310,9 @@ func TestResourceDNSRecheckPreservesRecentlyVerifiedDomain(t *testing.T) {
 				t.Fatalf("expected an absolute DNS lookup and a ready domain: %v %q", err, lookupName)
 			}
 			var before model.NodeDomainBinding
-			if err := f.db.First(&before, 1).Error; err != nil {
-				t.Fatal(err)
-			}
+			requireNodeTestSuccess(t, f.db.First(&before, 1).Error)
 			if tt.expired {
-				if err := f.db.Model(&before).Update("checked_at", time.Now().Add(-2*dnsRecheckGrace).Unix()).Error; err != nil {
-					t.Fatal(err)
-				}
+				requireNodeTestSuccess(t, f.db.Model(&before).Update("checked_at", time.Now().Add(-2*dnsRecheckGrace).Unix()).Error)
 			}
 			if tt.changed {
 				request["expected_version"] = before.Generation
@@ -349,9 +329,7 @@ func TestResourceDNSRecheckPreservesRecentlyVerifiedDomain(t *testing.T) {
 				t.Fatalf("unexpected DNS check result: %v", err)
 			}
 			var after model.NodeDomainBinding
-			if err := f.db.First(&after, 1).Error; err != nil {
-				t.Fatal(err)
-			}
+			requireNodeTestSuccess(t, f.db.First(&after, 1).Error)
 			if tt.ready {
 				if after.State != "ready" || after.LastError != "" || after.CheckedAt != before.CheckedAt {
 					t.Fatalf("temporary DNS error replaced the last verified state: %+v", after)

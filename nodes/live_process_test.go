@@ -29,12 +29,8 @@ func TestLiveAgentProcessesSurvivePanelReopenAndAgentCrash(t *testing.T) {
 	logger.InitLogger(logging.CRITICAL)
 	db, node, client := fixture(t)
 	t.Setenv("SUI_DB_FOLDER", t.TempDir())
-	if err := db.Where("node_id = ?", node.Id).Delete(&model.NodeInbound{}).Error; err != nil {
-		t.Fatal(err)
-	}
-	if err := db.Where("client_id = ?", client.Id).Delete(&model.ClientNodeInbound{}).Error; err != nil {
-		t.Fatal(err)
-	}
+	requireNodeTestSuccess(t, db.Where("node_id = ?", node.Id).Delete(&model.NodeInbound{}).Error)
+	requireNodeTestSuccess(t, db.Where("client_id = ?", client.Id).Delete(&model.ClientNodeInbound{}).Error)
 	f := liveFixture{db: db, client: client}
 	restarts := []func(){}
 	for i := 0; i < 2; i++ {
@@ -44,17 +40,11 @@ func TestLiveAgentProcessesSurvivePanelReopenAndAgentCrash(t *testing.T) {
 		placeholder.Close()
 		state := t.TempDir()
 		for name, value := range map[string]string{"server.pem": identity.Certificate, "server-key.pem": identity.Key, "ca.pem": identity.CA} {
-			if err := os.WriteFile(filepath.Join(state, name), []byte(value), 0600); err != nil {
-				t.Fatal(err)
-			}
+			requireNodeTestSuccess(t, os.WriteFile(filepath.Join(state, name), []byte(value), 0600))
 		}
 		n := model.Node{Id: uint(i + 1), Name: fmt.Sprintf("Process %d", i+1), Enable: true, AssignmentMode: model.NodeAssignmentWhole, AgentProtocol: 2, Address: address, LinkAddress: fmt.Sprintf("node-%d.example", i+1), ControlCA: identity.CA, ControlCertificate: identity.Certificate, ControlKey: identity.Key}
-		if err := db.Save(&n).Error; err != nil {
-			t.Fatal(err)
-		}
-		if err := db.Create(&model.ClientNode{NodeId: n.Id, ClientId: client.Id, Active: true, Generation: 1}).Error; err != nil {
-			t.Fatal(err)
-		}
+		requireNodeTestSuccess(t, db.Save(&n).Error)
+		requireNodeTestSuccess(t, db.Create(&model.ClientNode{NodeId: n.Id, ClientId: client.Id, Active: true, Generation: 1}).Error)
 		var command *exec.Cmd
 		stop := func() {
 			if command != nil && command.ProcessState == nil {
@@ -65,9 +55,7 @@ func TestLiveAgentProcessesSurvivePanelReopenAndAgentCrash(t *testing.T) {
 		t.Cleanup(stop)
 		start := func() {
 			log, err := os.OpenFile(filepath.Join(state, "agent.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
-			if err != nil {
-				t.Fatal(err)
-			}
+			requireNodeTestSuccess(t, err)
 			command = exec.Command(binary, "--node-id", strconv.Itoa(int(n.Id)), "--state", state, "--listen", listen, "--tls-cert", filepath.Join(state, "server.pem"), "--tls-key", filepath.Join(state, "server-key.pem"), "--client-ca", filepath.Join(state, "ca.pem"))
 			command.Stdout, command.Stderr = log, log
 			if err := command.Start(); err != nil {
@@ -95,9 +83,7 @@ func TestLiveAgentProcessesSurvivePanelReopenAndAgentCrash(t *testing.T) {
 				stop()
 				t.Fatal("agent process not ready; inspect private test log")
 			}
-			if err := pinV2(&n, status); err != nil {
-				t.Fatal(err)
-			}
+			requireNodeTestSuccess(t, pinV2(&n, status))
 		}
 		start()
 		restarts = append(restarts, func() { stop(); start() })
@@ -136,15 +122,9 @@ func TestLiveAgentProcessesSurvivePanelReopenAndAgentCrash(t *testing.T) {
 		}
 	}
 	sqlDB, err := db.DB()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := sqlDB.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if err := database.InitDB(path); err != nil {
-		t.Fatal(err)
-	}
+	requireNodeTestSuccess(t, err)
+	requireNodeTestSuccess(t, sqlDB.Close())
+	requireNodeTestSuccess(t, database.InitDB(path))
 	f.db = database.GetDB()
 	reopened, _ := f.db.DB()
 	t.Cleanup(func() { reopened.Close() })

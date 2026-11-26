@@ -47,18 +47,22 @@ def _firewall_load():
     if state.get('version') != 1 or not isinstance(state.get('owners'), dict) or not isinstance(state.get('rules'), dict):
         raise ValueError('invalid firewall ownership state')
     for key, rule in state['rules'].items():
-        if not isinstance(rule, dict) or not isinstance(rule.get('port'), int) or isinstance(rule['port'], bool):
-            raise ValueError('invalid tracked firewall port')
-        if not isinstance(rule.get('permanent'), bool) or not isinstance(rule.get('owned'), bool):
-            raise ValueError('invalid tracked firewall ownership')
-        if key != _firewall_key(rule):
-            raise ValueError('invalid tracked firewall identity')
-        zone = rule.get('zone')
-        if not isinstance(zone, str) or (rule['backend'] == 'ufw' and zone != ''):
-            raise ValueError('invalid tracked firewall zone')
-        if rule['backend'] == 'firewalld':
-            _firewall_zone(zone)
+        _validate_firewall_rule(key, rule)
     return state
+
+
+def _validate_firewall_rule(key, rule):
+    if not isinstance(rule, dict) or not isinstance(rule.get('port'), int) or isinstance(rule['port'], bool):
+        raise ValueError('invalid tracked firewall port')
+    if not isinstance(rule.get('permanent'), bool) or not isinstance(rule.get('owned'), bool):
+        raise ValueError('invalid tracked firewall ownership')
+    if key != _firewall_key(rule):
+        raise ValueError('invalid tracked firewall identity')
+    zone = rule.get('zone')
+    if not isinstance(zone, str) or (rule['backend'] == 'ufw' and zone != ''):
+        raise ValueError('invalid tracked firewall zone')
+    if rule['backend'] == 'firewalld':
+        _firewall_zone(zone)
 
 
 def _firewall_backends():
