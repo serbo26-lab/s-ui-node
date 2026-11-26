@@ -14,8 +14,6 @@ import (
 
 	"github.com/alireza0/s-ui/config"
 	"github.com/alireza0/s-ui/database/model"
-	"github.com/alireza0/s-ui/logger"
-	"github.com/op/go-logging"
 )
 
 func backupFixtureSeal(t *testing.T, key []byte) string {
@@ -164,7 +162,6 @@ func TestReadyPairWithWrongKeyFailsClosed(t *testing.T) {
 }
 
 func TestRestoreLegacySQLiteAndFullArchive(t *testing.T) {
-	logger.InitLogger(logging.ERROR)
 	for _, format := range []string{"sqlite", "zip"} {
 		t.Run(format, func(t *testing.T) {
 			checkRestoredBackupFormat(t, format)

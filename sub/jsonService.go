@@ -379,6 +379,9 @@ func (j *JsonService) pushMixed(outbounds *[]map[string]interface{}, outTags *[]
 
 func applyClientOutboundConfig(inData *model.Inbound, configs, outbound map[string]interface{}) error {
 	protocol, _ := outbound["type"].(string)
+	if protocol == "naive" {
+		util.StripNaiveTls(outbound)
+	}
 
 	// Shadowsocks
 	if protocol == "shadowsocks" {
