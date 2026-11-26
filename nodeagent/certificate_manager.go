@@ -64,13 +64,14 @@ type CertificateManager struct {
 	epoch       string
 	state       certificateState
 	roots       *x509.CertPool
-	ctx         context.Context
-	cancel      context.CancelFunc
-	jobCancel   context.CancelFunc
-	started     bool
-	trial       *nodecert.Metadata
-	kick        chan struct{}
-	issue       func(context.Context, string, string, string, string, string, *nodecert.HTTP01) (nodecert.Bundle, error)
+	// Owned background-worker lifetime, never inherited from an HTTP request.
+	ctx       context.Context
+	cancel    context.CancelFunc
+	jobCancel context.CancelFunc
+	started   bool
+	trial     *nodecert.Metadata
+	kick      chan struct{}
+	issue     func(context.Context, string, string, string, string, string, *nodecert.HTTP01) (nodecert.Bundle, error)
 }
 
 func NewCertificateManager(id uint64, epoch, directory string) (*CertificateManager, error) {

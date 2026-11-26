@@ -166,65 +166,78 @@ func observeStructure(db *gorm.DB, node model.Node, status nodeagent.StatusV2) e
 	if !status.Running || status.SpecRevision == 0 {
 		return nil
 	}
-	return db.Transaction(func(tx *gorm.DB) error {
-		var deployment model.NodeDeployment
-		if err := tx.First(&deployment, "node_id = ? AND revision = ?", node.Id, status.SpecRevision).Error; err != nil {
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return nil
-			}
-			return err
+	return db.Transaction(func(tx *gorm.DB) error { return observeStructureTransaction(tx, node, status) })
+}
+
+func reservationMatchesSnapshot(row model.NodePortReservation, snapshot Snapshot) bool {
+	for _, in := range snapshot.Inbounds {
+		var options struct {
+			Port      int               `json:"listen_port"`
+			Transport listenerTransport `json:"transport"`
+			Network   string            `json:"network"`
 		}
-		var snapshot Snapshot
-		if json.Unmarshal(deployment.Snapshot, &snapshot) != nil {
-			return errors.New("invalid_saved_structural_delivery")
+		_ = json.Unmarshal(in.Options, &options)
+		network := listenerNetwork(in.Type, options.Transport, options.Network)
+		if in.ConnectionKey == row.ConnectionKey && options.Port == row.Port && (network == row.Network || network == "both") {
+			return true
 		}
-		spec := nodeagent.Structure{NodeID: uint64(node.Id), Epoch: node.ControlEpoch, Revision: status.SpecRevision, Config: snapshot.Deployment.Config}
-		if spec.Digest() != status.SpecDigest {
-			return errors.New("structural_observation_digest_mismatch")
-		}
-		legacy := nodeagent.Status{NodeID: status.NodeID, Protocol: 2, Revision: status.SpecRevision, Running: true, Certificates: status.Certificates}
-		updates := map[string]interface{}{"applied_revision": status.SpecRevision, "applied_snapshot": deployment.Snapshot, "applied_template_version": snapshot.TemplateVersion, "last_seen": time.Now().Unix(), "tls_status": certificateReport(legacy)}
-		var current model.Node
-		if err := tx.First(&current, node.Id).Error; err != nil {
-			return err
-		}
-		if current.ManagementGeneration != node.ManagementGeneration {
-			return errors.New("management_target_changed")
-		}
-		if current.TemplateId == snapshot.TemplateId && current.TemplateTargetVersion == snapshot.TemplateVersion && current.SettingsVersion == snapshot.SettingsVersion {
-			updates["last_error"], updates["rejected_revision"] = "", 0
-		}
-		result := tx.Model(&model.Node{}).Where("id = ? AND control_epoch = ? AND address = ? AND management_generation = ? AND applied_revision <= ?", node.Id, node.ControlEpoch, node.Address, node.ManagementGeneration, status.SpecRevision).Updates(updates)
-		if result.Error != nil {
-			return result.Error
-		}
-		// Do not free reservations for a newer materialized target while an old ACK arrives.
-		if result.RowsAffected > 0 && current.TemplateTargetVersion > 0 && current.TemplateId == snapshot.TemplateId && current.TemplateTargetVersion == snapshot.TemplateVersion && current.SettingsVersion == snapshot.SettingsVersion {
-			var reservations []model.NodePortReservation
-			if err := tx.Where(whereNodeID, node.Id).Find(&reservations).Error; err != nil {
+	}
+	return false
+}
+
+func retireObservedReservations(tx *gorm.DB, id uint, snapshot Snapshot) error {
+	var reservations []model.NodePortReservation
+	if err := tx.Where(whereNodeID, id).Find(&reservations).Error; err != nil {
+		return err
+	}
+	for _, row := range reservations {
+		keep := reservationMatchesSnapshot(row, snapshot)
+		if !keep {
+			if err := tx.Delete(&row).Error; err != nil {
 				return err
 			}
-			for _, row := range reservations {
-				keep := false
-				for _, in := range snapshot.Inbounds {
-					var options struct {
-						Port      int               `json:"listen_port"`
-						Transport listenerTransport `json:"transport"`
-						Network   string            `json:"network"`
-					}
-					_ = json.Unmarshal(in.Options, &options)
-					network := listenerNetwork(in.Type, options.Transport, options.Network)
-					if in.ConnectionKey == row.ConnectionKey && options.Port == row.Port && (network == row.Network || network == "both") {
-						keep = true
-					}
-				}
-				if !keep {
-					if err := tx.Delete(&row).Error; err != nil {
-						return err
-					}
-				}
-			}
 		}
-		return nil
-	})
+	}
+	return nil
+}
+
+func observeStructureTransaction(tx *gorm.DB, node model.Node, status nodeagent.StatusV2) error {
+	var deployment model.NodeDeployment
+	if err := tx.First(&deployment, "node_id = ? AND revision = ?", node.Id, status.SpecRevision).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil
+		}
+		return err
+	}
+	var snapshot Snapshot
+	if json.Unmarshal(deployment.Snapshot, &snapshot) != nil {
+		return errors.New("invalid_saved_structural_delivery")
+	}
+	spec := nodeagent.Structure{NodeID: uint64(node.Id), Epoch: node.ControlEpoch, Revision: status.SpecRevision, Config: snapshot.Deployment.Config}
+	if spec.Digest() != status.SpecDigest {
+		return errors.New("structural_observation_digest_mismatch")
+	}
+	legacy := nodeagent.Status{NodeID: status.NodeID, Protocol: 2, Revision: status.SpecRevision, Running: true, Certificates: status.Certificates}
+	updates := map[string]interface{}{"applied_revision": status.SpecRevision, "applied_snapshot": deployment.Snapshot, "applied_template_version": snapshot.TemplateVersion, "last_seen": time.Now().Unix(), "tls_status": certificateReport(legacy)}
+	var current model.Node
+	if err := tx.First(&current, node.Id).Error; err != nil {
+		return err
+	}
+	if current.ManagementGeneration != node.ManagementGeneration {
+		return errors.New("management_target_changed")
+	}
+	if current.TemplateId == snapshot.TemplateId && current.TemplateTargetVersion == snapshot.TemplateVersion && current.SettingsVersion == snapshot.SettingsVersion {
+		updates["last_error"], updates["rejected_revision"] = "", 0
+	}
+	result := tx.Model(&model.Node{}).Where("id = ? AND control_epoch = ? AND address = ? AND management_generation = ? AND applied_revision <= ?", node.Id, node.ControlEpoch, node.Address, node.ManagementGeneration, status.SpecRevision).Updates(updates)
+	if result.Error != nil {
+		return result.Error
+	}
+	// Do not free reservations for a newer materialized target while an old ACK arrives.
+	if result.RowsAffected > 0 && current.TemplateTargetVersion > 0 && current.TemplateId == snapshot.TemplateId && current.TemplateTargetVersion == snapshot.TemplateVersion && current.SettingsVersion == snapshot.SettingsVersion {
+		if err := retireObservedReservations(tx, node.Id, snapshot); err != nil {
+			return err
+		}
+	}
+	return nil
 }
