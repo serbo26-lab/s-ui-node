@@ -25,7 +25,7 @@ func disableConfirmed(node model.Node) bool {
 type nodeDeleteRequest struct {
 	Id                   uint `json:"id"`
 	DNSAlreadyRemoved    bool `json:"dns_already_removed"`
-	ServerAlreadyStopped bool `json:"server_already_stopped"`
+	ServerAlreadyStopped bool `json:"server_already_stopped,omitempty"`
 }
 
 func parseNodeDelete(data json.RawMessage) (nodeDeleteRequest, error) {
