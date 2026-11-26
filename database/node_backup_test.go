@@ -167,38 +167,43 @@ func TestRestoreLegacySQLiteAndFullArchive(t *testing.T) {
 	logger.InitLogger(logging.ERROR)
 	for _, format := range []string{"sqlite", "zip"} {
 		t.Run(format, func(t *testing.T) {
-			path, key := nodeBackupFixture(t)
-			keyPath := filepath.Join(filepath.Dir(path), backupKeyName)
-			version := config.GetVersion()
-			if format == "sqlite" {
-				version = "1.6.7"
-				requireNodeTestSuccess(t, db.Delete(&model.NodeDNSProfile{}, "name = ?", "Fixture").Error)
-				requireNodeTestSuccess(t, os.Remove(keyPath))
-			}
-			requireNodeTestSuccess(t, db.Create(&model.Setting{Key: "version", Value: version}).Error)
-			item := model.Client{Name: "backup-fixture", Config: json.RawMessage(`{}`)}
-			requireNodeTestSuccess(t, db.Create(&item).Error)
-			getBackup := GetDb
-			if format == "zip" {
-				getBackup = GetFullBackup
-			}
-			body, err := getBackup("")
-			requireNodeTestSuccess(t, err)
-			requireNodeTestSuccess(t, db.Delete(&item).Error)
-			if format == "zip" {
-				requireNodeTestSuccess(t, os.WriteFile(keyPath, bytes.Repeat([]byte{0x32}, 32), 0600))
-			}
-			requireNodeTestSuccess(t, restoreDB(backupMemoryFile{bytes.NewReader(body)}))
-			var restored model.Client
-			if err := db.First(&restored, item.Id).Error; err != nil || restored.Name != item.Name {
-				t.Fatalf("restored client: %v", err)
-			}
-			if format == "zip" {
-				actual, err := os.ReadFile(keyPath)
-				if err != nil || !bytes.Equal(actual, key) {
-					t.Fatal("restored key does not match the backup", err)
-				}
-			}
+			checkRestoredBackupFormat(t, format)
 		})
+	}
+}
+
+func checkRestoredBackupFormat(t *testing.T, format string) {
+	t.Helper()
+	path, key := nodeBackupFixture(t)
+	keyPath := filepath.Join(filepath.Dir(path), backupKeyName)
+	version := config.GetVersion()
+	if format == "sqlite" {
+		version = "1.6.7"
+		requireNodeTestSuccess(t, db.Delete(&model.NodeDNSProfile{}, "name = ?", "Fixture").Error)
+		requireNodeTestSuccess(t, os.Remove(keyPath))
+	}
+	requireNodeTestSuccess(t, db.Create(&model.Setting{Key: "version", Value: version}).Error)
+	item := model.Client{Name: "backup-fixture", Config: json.RawMessage(`{}`)}
+	requireNodeTestSuccess(t, db.Create(&item).Error)
+	getBackup := GetDb
+	if format == "zip" {
+		getBackup = GetFullBackup
+	}
+	body, err := getBackup("")
+	requireNodeTestSuccess(t, err)
+	requireNodeTestSuccess(t, db.Delete(&item).Error)
+	if format == "zip" {
+		requireNodeTestSuccess(t, os.WriteFile(keyPath, bytes.Repeat([]byte{0x32}, 32), 0600))
+	}
+	requireNodeTestSuccess(t, restoreDB(backupMemoryFile{bytes.NewReader(body)}))
+	var restored model.Client
+	if err := db.First(&restored, item.Id).Error; err != nil || restored.Name != item.Name {
+		t.Fatalf("restored client: %v", err)
+	}
+	if format == "zip" {
+		actual, err := os.ReadFile(keyPath)
+		if err != nil || !bytes.Equal(actual, key) {
+			t.Fatal("restored key does not match the backup", err)
+		}
 	}
 }

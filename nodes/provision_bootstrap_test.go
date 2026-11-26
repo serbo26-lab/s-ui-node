@@ -45,13 +45,7 @@ func TestProvisionPythonPackageCommands(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("package scripts run on Linux")
 	}
-	cases := []struct {
-		name, family, commands string
-		managers               []string
-		pythonPresent          bool
-		managerExit            string
-		wantExit               int
-	}{
+	cases := []provisionPythonCase{
 		{name: "Existing Python", family: "rpm", managers: []string{"dnf"}, pythonPresent: true},
 		{name: "APT", family: "apt", managers: []string{"apt-get"}, commands: "apt-get\napt-get\n"},
 		{name: "DNF preferred", family: "rpm", managers: []string{"dnf", "yum"}, commands: "dnf\n"},
@@ -61,43 +55,56 @@ func TestProvisionPythonPackageCommands(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			dir := t.TempDir()
-			ready, trace := filepath.Join(dir, "python-ready"), filepath.Join(dir, "packages")
-			write := func(name, script string) {
-				t.Helper()
-				requireNodeTestSuccess(t, os.WriteFile(filepath.Join(dir, name), []byte(script), 0700))
-			}
-			write("python3", "#!/bin/sh\n[ -f \"$PYTHON_READY\" ]\n")
-			write("timeout", "#!/bin/sh\nshift 3\nexec \"$@\"\n")
-			if tc.pythonPresent {
-				write("python-ready", "")
-			}
-			for _, name := range tc.managers {
-				write(name, `#!/bin/sh
+			checkProvisionPythonCommands(t, tc)
+		})
+	}
+}
+
+type provisionPythonCase struct {
+	name, family, commands string
+	managers               []string
+	pythonPresent          bool
+	managerExit            string
+	wantExit               int
+}
+
+func checkProvisionPythonCommands(t *testing.T, tc provisionPythonCase) {
+	t.Helper()
+	dir := t.TempDir()
+	ready, trace := filepath.Join(dir, "python-ready"), filepath.Join(dir, "packages")
+	write := func(name, script string) {
+		t.Helper()
+		requireNodeTestSuccess(t, os.WriteFile(filepath.Join(dir, name), []byte(script), 0700))
+	}
+	write("python3", "#!/bin/sh\n[ -f \"$PYTHON_READY\" ]\n")
+	write("timeout", "#!/bin/sh\nshift 3\nexec \"$@\"\n")
+	if tc.pythonPresent {
+		write("python-ready", "")
+	}
+	for _, name := range tc.managers {
+		write(name, `#!/bin/sh
 printf '%s\n' "${0##*/}" >> "$PACKAGE_TRACE"
 if [ -n "$PACKAGE_EXIT" ]; then exit "$PACKAGE_EXIT"; fi
 case " $* " in *" install python3 "*) : > "$PYTHON_READY" ;; esac
 `)
-			}
-			cmd := exec.CommandContext(t.Context(), "/bin/sh", "-s")
-			cmd.Env = []string{"PATH=" + dir, "PYTHON_READY=" + ready, "PACKAGE_TRACE=" + trace, "PACKAGE_EXIT=" + tc.managerExit}
-			cmd.Stdin = strings.NewReader("packages=" + tc.family + "\n" + installProvisionPython)
-			err := cmd.Run()
-			if tc.wantExit == 0 {
-				requireNodeTestSuccess(t, err)
-			} else {
-				var result *exec.ExitError
-				if !errors.As(err, &result) || result.ExitCode() != tc.wantExit {
-					t.Fatalf("unexpected exit: %v, want %d", err, tc.wantExit)
-				}
-			}
-			got, err := os.ReadFile(trace)
-			if err != nil && !errors.Is(err, os.ErrNotExist) {
-				t.Fatal(err)
-			}
-			if string(got) != tc.commands {
-				t.Fatalf("got package commands %q, want %q", got, tc.commands)
-			}
-		})
+	}
+	cmd := exec.CommandContext(t.Context(), "/bin/sh", "-s")
+	cmd.Env = []string{"PATH=" + dir, "PYTHON_READY=" + ready, "PACKAGE_TRACE=" + trace, "PACKAGE_EXIT=" + tc.managerExit}
+	cmd.Stdin = strings.NewReader("packages=" + tc.family + "\n" + installProvisionPython)
+	err := cmd.Run()
+	if tc.wantExit == 0 {
+		requireNodeTestSuccess(t, err)
+	} else {
+		var result *exec.ExitError
+		if !errors.As(err, &result) || result.ExitCode() != tc.wantExit {
+			t.Fatalf("unexpected exit: %v, want %d", err, tc.wantExit)
+		}
+	}
+	got, err := os.ReadFile(trace)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatal(err)
+	}
+	if string(got) != tc.commands {
+		t.Fatalf("got package commands %q, want %q", got, tc.commands)
 	}
 }

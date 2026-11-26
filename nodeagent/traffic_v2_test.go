@@ -86,24 +86,13 @@ func TestV2ActualVLESSTrafficDeniedAfterRevokeAndRestart(t *testing.T) {
 		_ = conn.SetDeadline(time.Time{})
 		return conn
 	}
-	assertClosed := func(conn net.Conn) {
-		t.Helper()
-		_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
-		_, _ = conn.Write([]byte("ping"))
-		buf := make([]byte, 4)
-		if _, err := io.ReadFull(conn, buf); err == nil {
-			t.Fatal("old authenticated session survived access generation change")
-		} else if timeout, ok := err.(net.Error); ok && timeout.Timeout() {
-			t.Fatal("session remained open after access revocation")
-		}
-	}
 	oldSession := openSession()
 	deny := AccessSnapshot{NodeID: 7, Epoch: m.Status().Epoch, Revision: 1, Clients: []Grant{}}
 	requireNodeTestSuccess(t, m.ApplyAccess(deny))
 	if fetch() {
 		t.Fatal("old VLESS credential still authenticated after revoke")
 	}
-	assertClosed(oldSession)
+	assertRevokedVLESSSessionClosed(t, oldSession)
 	requireNodeTestSuccess(t, m.Close())
 	next := NewManagerV2(7, FileStoreV2{Directory: state}, NewCoreRuntimeWithState(state))
 	defer next.Close()
@@ -123,8 +112,20 @@ func TestV2ActualVLESSTrafficDeniedAfterRevokeAndRestart(t *testing.T) {
 	grant.Revision = 3
 	grant.Clients[0].Name = "client/1/g3"
 	requireNodeTestSuccess(t, next.ApplyAccess(grant))
-	assertClosed(oldSession)
+	assertRevokedVLESSSessionClosed(t, oldSession)
 	if !fetch() {
 		t.Fatal("generation change broke fresh valid sessions")
+	}
+}
+
+func assertRevokedVLESSSessionClosed(t *testing.T, conn net.Conn) {
+	t.Helper()
+	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+	_, _ = conn.Write([]byte("ping"))
+	buf := make([]byte, 4)
+	if _, err := io.ReadFull(conn, buf); err == nil {
+		t.Fatal("old authenticated session survived access generation change")
+	} else if timeout, ok := err.(net.Error); ok && timeout.Timeout() {
+		t.Fatal("session remained open after access revocation")
 	}
 }

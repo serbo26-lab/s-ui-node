@@ -17,6 +17,7 @@ import (
 	"github.com/alireza0/s-ui/logger"
 	"github.com/alireza0/s-ui/nodeagent"
 	"github.com/op/go-logging"
+	"gorm.io/gorm"
 )
 
 // The normal suite skips this executable check. Isolated server checks set the
@@ -34,59 +35,8 @@ func TestLiveAgentProcessesSurvivePanelReopenAndAgentCrash(t *testing.T) {
 	f := liveFixture{db: db, client: client}
 	restarts := []func(){}
 	for i := 0; i < 2; i++ {
-		placeholder, identity := controlHandlerServer(t, http.NotFoundHandler())
-		address := placeholder.URL
-		listen := placeholder.Listener.Addr().String()
-		placeholder.Close()
-		state := t.TempDir()
-		for name, value := range map[string]string{"server.pem": identity.Certificate, "server-key.pem": identity.Key, "ca.pem": identity.CA} {
-			requireNodeTestSuccess(t, os.WriteFile(filepath.Join(state, name), []byte(value), 0600))
-		}
-		n := model.Node{Id: uint(i + 1), Name: fmt.Sprintf("Process %d", i+1), Enable: true, AssignmentMode: model.NodeAssignmentWhole, AgentProtocol: 2, Address: address, LinkAddress: fmt.Sprintf("node-%d.example", i+1), ControlCA: identity.CA, ControlCertificate: identity.Certificate, ControlKey: identity.Key}
-		requireNodeTestSuccess(t, db.Save(&n).Error)
-		requireNodeTestSuccess(t, db.Create(&model.ClientNode{NodeId: n.Id, ClientId: client.Id, Active: true, Generation: 1}).Error)
-		var command *exec.Cmd
-		stop := func() {
-			if command != nil && command.ProcessState == nil {
-				_ = command.Process.Kill()
-				_ = command.Wait()
-			}
-		}
-		t.Cleanup(stop)
-		start := func() {
-			log, err := os.OpenFile(filepath.Join(state, "agent.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
-			requireNodeTestSuccess(t, err)
-			command = exec.Command(binary, "--node-id", strconv.Itoa(int(n.Id)), "--state", state, "--listen", listen, "--tls-cert", filepath.Join(state, "server.pem"), "--tls-key", filepath.Join(state, "server-key.pem"), "--client-ca", filepath.Join(state, "ca.pem"))
-			command.Stdout, command.Stderr = log, log
-			if err := command.Start(); err != nil {
-				log.Close()
-				t.Fatal(err)
-			}
-			log.Close()
-			var status nodeagent.StatusV2
-			ready := false
-			for attempt := 0; attempt < 60; attempt++ {
-				ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-				control, closeControl, err := controlClient(ctx, n)
-				if err == nil {
-					status, err = getStatusV2(ctx, control, n)
-					closeControl()
-				}
-				cancel()
-				if err == nil {
-					ready = true
-					break
-				}
-				time.Sleep(50 * time.Millisecond)
-			}
-			if !ready {
-				stop()
-				t.Fatal("agent process not ready; inspect private test log")
-			}
-			requireNodeTestSuccess(t, pinV2(&n, status))
-		}
-		start()
-		restarts = append(restarts, func() { stop(); start() })
+		n, restart := liveProcessNodeFixture(t, db, binary, client.Id, i)
+		restarts = append(restarts, restart)
 		f.nodes = append(f.nodes, n)
 	}
 	f.save(t, liveSpec())
@@ -141,4 +91,61 @@ func TestLiveAgentProcessesSurvivePanelReopenAndAgentCrash(t *testing.T) {
 	if string(before) != string(body) {
 		t.Fatal("panel reopen/agent crash changed materialized identities")
 	}
+}
+
+func liveProcessNodeFixture(t *testing.T, db *gorm.DB, binary string, clientID uint, i int) (model.Node, func()) {
+	t.Helper()
+	placeholder, identity := controlHandlerServer(t, http.NotFoundHandler())
+	address := placeholder.URL
+	listen := placeholder.Listener.Addr().String()
+	placeholder.Close()
+	state := t.TempDir()
+	for name, value := range map[string]string{"server.pem": identity.Certificate, "server-key.pem": identity.Key, "ca.pem": identity.CA} {
+		requireNodeTestSuccess(t, os.WriteFile(filepath.Join(state, name), []byte(value), 0600))
+	}
+	n := model.Node{Id: uint(i + 1), Name: fmt.Sprintf("Process %d", i+1), Enable: true, AssignmentMode: model.NodeAssignmentWhole, AgentProtocol: 2, Address: address, LinkAddress: fmt.Sprintf("node-%d.example", i+1), ControlCA: identity.CA, ControlCertificate: identity.Certificate, ControlKey: identity.Key}
+	requireNodeTestSuccess(t, db.Save(&n).Error)
+	requireNodeTestSuccess(t, db.Create(&model.ClientNode{NodeId: n.Id, ClientId: clientID, Active: true, Generation: 1}).Error)
+	var command *exec.Cmd
+	stop := func() {
+		if command != nil && command.ProcessState == nil {
+			_ = command.Process.Kill()
+			_ = command.Wait()
+		}
+	}
+	t.Cleanup(stop)
+	start := func() {
+		log, err := os.OpenFile(filepath.Join(state, "agent.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+		requireNodeTestSuccess(t, err)
+		command = exec.Command(binary, "--node-id", strconv.Itoa(int(n.Id)), "--state", state, "--listen", listen, "--tls-cert", filepath.Join(state, "server.pem"), "--tls-key", filepath.Join(state, "server-key.pem"), "--client-ca", filepath.Join(state, "ca.pem"))
+		command.Stdout, command.Stderr = log, log
+		if err := command.Start(); err != nil {
+			log.Close()
+			t.Fatal(err)
+		}
+		log.Close()
+		var status nodeagent.StatusV2
+		ready := false
+		for attempt := 0; attempt < 60; attempt++ {
+			ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+			control, closeControl, err := controlClient(ctx, n)
+			if err == nil {
+				status, err = getStatusV2(ctx, control, n)
+				closeControl()
+			}
+			cancel()
+			if err == nil {
+				ready = true
+				break
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		if !ready {
+			stop()
+			t.Fatal("agent process not ready; inspect private test log")
+		}
+		requireNodeTestSuccess(t, pinV2(&n, status))
+	}
+	start()
+	return n, func() { stop(); start() }
 }

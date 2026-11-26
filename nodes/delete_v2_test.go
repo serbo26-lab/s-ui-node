@@ -9,6 +9,7 @@ import (
 
 	"github.com/alireza0/s-ui/database/model"
 	"github.com/alireza0/s-ui/nodeagent"
+	"gorm.io/gorm"
 )
 
 func TestV2NodeDeletionRemovesGrantsAndControlState(t *testing.T) {
@@ -136,54 +137,7 @@ func TestNodeDeletionWithStaleDNS(t *testing.T) {
 			name = "administrator confirms manual cleanup"
 		}
 		t.Run(name, func(t *testing.T) {
-			db, node, _ := fixture(t)
-			t.Setenv("SUI_DB_FOLDER", t.TempDir())
-			cloud := newCloudFixture(t)
-			cloud.missingStatus, cloud.rejectReads = http.StatusBadRequest, rejected
-			profile := profileFixture(t, "token")
-			record := model.NodeDNSRecord{NodeId: node.Id, ProfileId: profile.Id, ZoneId: fixtureZone, Name: "retired.example.com", RemoteId: "00000000000000000000000000000002", Type: "A", Content: "192.0.2.1", Owner: "fixture"}
-			requireNodeTestSuccess(t, db.Create(&record).Error)
-			ordinary := json.RawMessage(`1`)
-			manual := json.RawMessage(`{"id":1,"dns_already_removed":true}`)
-			if err := DeleteNode(t.Context(), manual, "test"); err == nil || err.Error() != "node_disable_pending_delete" {
-				t.Fatal("manual confirmation bypassed access revocation", err)
-			}
-			if err := DeleteNode(t.Context(), ordinary, "test"); err == nil || cloud.Calls() != 0 {
-				t.Fatal("deletion contacted DNS for an active node", err)
-			}
-			node.Enable = false
-			node.AppliedRevision, node.DesiredRevision = 3, 3
-			node.AppliedSnapshot, _ = json.Marshal(Snapshot{Node: Publication{Enable: false}})
-			requireNodeTestSuccess(t, db.Save(&node).Error)
-			err := DeleteNode(t.Context(), ordinary, "test")
-			if rejected {
-				if err == nil || err.Error() != "dns_api_rejected" {
-					t.Fatal("provider authorization error treated as record absence", err)
-				}
-				var saved model.NodeDNSRecord
-				if err := db.First(&saved, record.Id).Error; err != nil || saved.Retired {
-					t.Fatal("failed provider check discarded the record", err)
-				}
-				calls := cloud.Calls()
-				err = DeleteNode(t.Context(), manual, "test")
-				if cloud.Calls() != calls {
-					t.Fatal("manual confirmation contacted the DNS provider")
-				}
-				var change model.Changes
-				if db.Where("key = ? AND action = ?", "nodes", "del").First(&change).Error != nil || string(change.Obj) != string(manual) {
-					t.Fatal("manual DNS confirmation was not audited")
-				}
-			}
-			if err != nil || cloud.Writes() != 0 {
-				t.Fatal("could not delete a node whose DNS records were removed", err)
-			}
-			var remaining int64
-			if err := db.Model(&model.NodeDNSRecord{}).Where("node_id = ?", node.Id).Count(&remaining).Error; err != nil || remaining != 0 {
-				t.Fatal("stale DNS records survived deletion", err)
-			}
-			if err := db.Model(&model.Node{}).Where("id = ?", node.Id).Count(&remaining).Error; err != nil || remaining != 0 {
-				t.Fatal("deleted node still exists", err)
-			}
+			checkDeletionWithStaleDNS(t, rejected)
 		})
 	}
 }
@@ -228,4 +182,62 @@ func TestLiveNodeCanShutDownAndBeDeletedWhileCertificateIsPending(t *testing.T) 
 	if err := DeleteNode(t.Context(), json.RawMessage(`1`), "test"); err != nil {
 		t.Fatal("could not delete the disabled node", err)
 	}
+}
+
+func checkDeletionWithStaleDNS(t *testing.T, rejected bool) {
+	t.Helper()
+	db, node, _ := fixture(t)
+	t.Setenv("SUI_DB_FOLDER", t.TempDir())
+	cloud := newCloudFixture(t)
+	cloud.missingStatus, cloud.rejectReads = http.StatusBadRequest, rejected
+	profile := profileFixture(t, "token")
+	record := model.NodeDNSRecord{NodeId: node.Id, ProfileId: profile.Id, ZoneId: fixtureZone, Name: "retired.example.com", RemoteId: "00000000000000000000000000000002", Type: "A", Content: "192.0.2.1", Owner: "fixture"}
+	requireNodeTestSuccess(t, db.Create(&record).Error)
+	ordinary := json.RawMessage(`1`)
+	manual := json.RawMessage(`{"id":1,"dns_already_removed":true}`)
+	if err := DeleteNode(t.Context(), manual, "test"); err == nil || err.Error() != "node_disable_pending_delete" {
+		t.Fatal("manual confirmation bypassed access revocation", err)
+	}
+	if err := DeleteNode(t.Context(), ordinary, "test"); err == nil || cloud.Calls() != 0 {
+		t.Fatal("deletion contacted DNS for an active node", err)
+	}
+	node.Enable = false
+	node.AppliedRevision, node.DesiredRevision = 3, 3
+	node.AppliedSnapshot, _ = json.Marshal(Snapshot{Node: Publication{Enable: false}})
+	requireNodeTestSuccess(t, db.Save(&node).Error)
+	err := DeleteNode(t.Context(), ordinary, "test")
+	if rejected {
+		err = confirmStaleDNSCleanup(t, db, cloud, record, manual, err)
+	}
+	if err != nil || cloud.Writes() != 0 {
+		t.Fatal("could not delete a node whose DNS records were removed", err)
+	}
+	var remaining int64
+	if err := db.Model(&model.NodeDNSRecord{}).Where("node_id = ?", node.Id).Count(&remaining).Error; err != nil || remaining != 0 {
+		t.Fatal("stale DNS records survived deletion", err)
+	}
+	if err := db.Model(&model.Node{}).Where("id = ?", node.Id).Count(&remaining).Error; err != nil || remaining != 0 {
+		t.Fatal("deleted node still exists", err)
+	}
+}
+
+func confirmStaleDNSCleanup(t *testing.T, db *gorm.DB, cloud *cloudFixture, record model.NodeDNSRecord, manual json.RawMessage, err error) error {
+	t.Helper()
+	if err == nil || err.Error() != "dns_api_rejected" {
+		t.Fatal("provider authorization error treated as record absence", err)
+	}
+	var saved model.NodeDNSRecord
+	if err := db.First(&saved, record.Id).Error; err != nil || saved.Retired {
+		t.Fatal("failed provider check discarded the record", err)
+	}
+	calls := cloud.Calls()
+	err = DeleteNode(t.Context(), manual, "test")
+	if cloud.Calls() != calls {
+		t.Fatal("manual confirmation contacted the DNS provider")
+	}
+	var change model.Changes
+	if db.Where("key = ? AND action = ?", "nodes", "del").First(&change).Error != nil || string(change.Obj) != string(manual) {
+		t.Fatal("manual DNS confirmation was not audited")
+	}
+	return err
 }

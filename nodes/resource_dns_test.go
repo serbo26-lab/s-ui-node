@@ -44,80 +44,7 @@ func newCloudFixture(t *testing.T) *cloudFixture {
 	t.Helper()
 	f := &cloudFixture{records: map[string]resourceRecord{}}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		f.mu.Lock()
-		defer f.mu.Unlock()
-		f.calls++
-		f.headers = append(f.headers, r.Header.Clone())
-		w.Header().Set("Content-Type", "application/json")
-		result := func(value interface{}) {
-			json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "result": value})
-		}
-		parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
-		if len(parts) == 2 && parts[0] == "zones" {
-			result(DNSZone{Id: parts[1], Name: "example.com"})
-			return
-		}
-		if len(parts) < 3 {
-			t.Error("unexpected Cloudflare route", r.URL.Path)
-			w.WriteHeader(404)
-			return
-		}
-		id := ""
-		if len(parts) > 3 {
-			id = parts[3]
-		}
-		switch r.Method {
-		case "GET":
-			if f.rejectReads {
-				w.WriteHeader(http.StatusForbidden)
-				fmt.Fprint(w, `{"success":false,"errors":[{"code":10000}]}`)
-				return
-			}
-			if id != "" {
-				record, ok := f.records[id]
-				if !ok {
-					if f.missingStatus != 0 {
-						w.WriteHeader(f.missingStatus)
-						fmt.Fprint(w, `{"success":false,"errors":[{"code":81044}]}`)
-						return
-					}
-					w.WriteHeader(404)
-					return
-				}
-				result(record)
-			} else {
-				records := []resourceRecord{}
-				for _, record := range f.records {
-					if record.Name == r.URL.Query().Get("name") {
-						records = append(records, record)
-					}
-				}
-				result(records)
-			}
-		case "POST", "PATCH":
-			var record resourceRecord
-			if json.NewDecoder(r.Body).Decode(&record) != nil {
-				t.Error("bad CF body")
-			}
-			f.writes++
-			if id == "" {
-				id = fmt.Sprintf("%032x", f.writes+100)
-			}
-			record.Id = id
-			f.records[id] = record
-			if f.failCreateAck && r.Method == "POST" {
-				f.failCreateAck = false
-				w.WriteHeader(503)
-				return
-			}
-			result(record)
-		case "DELETE":
-			delete(f.records, id)
-			f.writes++
-			result(map[string]string{"id": id})
-		default:
-			t.Error("unexpected CF method", r.Method)
-		}
+		f.handleRequest(t, w, r)
 	}))
 	t.Cleanup(server.Close)
 	oldURL, oldHTTP := cloudflareResourceURL, resourceHTTP
@@ -279,16 +206,7 @@ func TestResourceManualDNSRejectsWrongAAAAWithoutProviderWrites(t *testing.T) {
 }
 
 func TestResourceDNSRecheckPreservesRecentlyVerifiedDomain(t *testing.T) {
-	for _, tt := range []struct {
-		name      string
-		lookupErr error
-		noAnswer  bool
-		wrong     bool
-		expired   bool
-		changed   bool
-		code      string
-		ready     bool
-	}{
+	for _, tt := range []dnsRecheckCase{
 		{name: "temporary lookup error", lookupErr: &net.DNSError{IsTimeout: true}, code: "dns_lookup_failed", ready: true},
 		{name: "temporary missing answer", noAnswer: true, code: "dns_address_not_resolved", ready: true},
 		{name: "persistent lookup error", lookupErr: &net.DNSError{IsTimeout: true}, expired: true, code: "dns_lookup_failed"},
@@ -296,47 +214,153 @@ func TestResourceDNSRecheckPreservesRecentlyVerifiedDomain(t *testing.T) {
 		{name: "unverified new domain", lookupErr: &net.DNSError{IsNotFound: true}, changed: true, code: "dns_address_not_resolved"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			f := liveSetup(t, 1)
-			oldLookup := resourceLookupIP
-			t.Cleanup(func() { resourceLookupIP = oldLookup })
-			request := map[string]interface{}{"node_id": 1, "mode": "manual", "fqdn": "manual.example.com", "ip": "192.0.2.1", "certificate_mode": "provided"}
-			lookupName := ""
-			resourceLookupIP = func(_ context.Context, name string) ([]net.IPAddr, error) {
-				lookupName = name
-				return []net.IPAddr{{IP: net.ParseIP("192.0.2.1")}}, nil
-			}
-			saveResourceFixture(t, "domains", request)
-			if err := ReconcileResources(t.Context(), 1); err != nil || lookupName != "manual.example.com." {
-				t.Fatalf("expected an absolute DNS lookup and a ready domain: %v %q", err, lookupName)
-			}
-			var before model.NodeDomainBinding
-			requireNodeTestSuccess(t, f.db.First(&before, 1).Error)
-			if tt.expired {
-				requireNodeTestSuccess(t, f.db.Model(&before).Update("checked_at", time.Now().Add(-2*dnsRecheckGrace).Unix()).Error)
-			}
-			if tt.changed {
-				request["expected_version"] = before.Generation
-				request["fqdn"] = "replacement.example.com"
-				saveResourceFixture(t, "domains", request)
-			}
-			resourceLookupIP = func(context.Context, string) ([]net.IPAddr, error) {
-				if tt.wrong {
-					return []net.IPAddr{{IP: net.ParseIP("192.0.2.2")}}, nil
-				}
-				return nil, tt.lookupErr
-			}
-			if err := ReconcileResources(t.Context(), 1); err == nil || err.Error() != tt.code {
-				t.Fatalf("unexpected DNS check result: %v", err)
-			}
-			var after model.NodeDomainBinding
-			requireNodeTestSuccess(t, f.db.First(&after, 1).Error)
-			if tt.ready {
-				if after.State != "ready" || after.LastError != "" || after.CheckedAt != before.CheckedAt {
-					t.Fatalf("temporary DNS error replaced the last verified state: %+v", after)
-				}
-			} else if after.State != "failed" || after.LastError != tt.code {
-				t.Fatalf("genuine DNS error was not reported: %+v", after)
-			}
+			checkDNSRecheck(t, tt)
 		})
 	}
+}
+
+type dnsRecheckCase struct {
+	name      string
+	lookupErr error
+	noAnswer  bool
+	wrong     bool
+	expired   bool
+	changed   bool
+	code      string
+	ready     bool
+}
+
+func checkDNSRecheck(t *testing.T, tt dnsRecheckCase) {
+	t.Helper()
+	f := liveSetup(t, 1)
+	oldLookup := resourceLookupIP
+	t.Cleanup(func() { resourceLookupIP = oldLookup })
+	request := map[string]interface{}{"node_id": 1, "mode": "manual", "fqdn": "manual.example.com", "ip": "192.0.2.1", "certificate_mode": "provided"}
+	lookupName := ""
+	resourceLookupIP = func(_ context.Context, name string) ([]net.IPAddr, error) {
+		lookupName = name
+		return []net.IPAddr{{IP: net.ParseIP("192.0.2.1")}}, nil
+	}
+	saveResourceFixture(t, "domains", request)
+	if err := ReconcileResources(t.Context(), 1); err != nil || lookupName != "manual.example.com." {
+		t.Fatalf("expected an absolute DNS lookup and a ready domain: %v %q", err, lookupName)
+	}
+	var before model.NodeDomainBinding
+	requireNodeTestSuccess(t, f.db.First(&before, 1).Error)
+	if tt.expired {
+		requireNodeTestSuccess(t, f.db.Model(&before).Update("checked_at", time.Now().Add(-2*dnsRecheckGrace).Unix()).Error)
+	}
+	if tt.changed {
+		request["expected_version"] = before.Generation
+		request["fqdn"] = "replacement.example.com"
+		saveResourceFixture(t, "domains", request)
+	}
+	resourceLookupIP = func(context.Context, string) ([]net.IPAddr, error) {
+		if tt.wrong {
+			return []net.IPAddr{{IP: net.ParseIP("192.0.2.2")}}, nil
+		}
+		return nil, tt.lookupErr
+	}
+	if err := ReconcileResources(t.Context(), 1); err == nil || err.Error() != tt.code {
+		t.Fatalf("unexpected DNS check result: %v", err)
+	}
+	var after model.NodeDomainBinding
+	requireNodeTestSuccess(t, f.db.First(&after, 1).Error)
+	assertDNSRecheckState(t, tt, before, after)
+}
+
+func assertDNSRecheckState(t *testing.T, tt dnsRecheckCase, before, after model.NodeDomainBinding) {
+	t.Helper()
+	if tt.ready {
+		if after.State != "ready" || after.LastError != "" || after.CheckedAt != before.CheckedAt {
+			t.Fatalf("temporary DNS error replaced the last verified state: %+v", after)
+		}
+	} else if after.State != "failed" || after.LastError != tt.code {
+		t.Fatalf("genuine DNS error was not reported: %+v", after)
+	}
+}
+
+func (f *cloudFixture) handleRequest(t *testing.T, w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls++
+	f.headers = append(f.headers, r.Header.Clone())
+	w.Header().Set("Content-Type", "application/json")
+	result := func(value interface{}) {
+		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "result": value})
+	}
+	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	if len(parts) == 2 && parts[0] == "zones" {
+		result(DNSZone{Id: parts[1], Name: "example.com"})
+		return
+	}
+	if len(parts) < 3 {
+		t.Error("unexpected Cloudflare route", r.URL.Path)
+		w.WriteHeader(404)
+		return
+	}
+	id := ""
+	if len(parts) > 3 {
+		id = parts[3]
+	}
+	switch r.Method {
+	case "GET":
+		f.readRecord(w, r, id, result)
+	case "POST", "PATCH":
+		f.writeRecord(t, w, r, id, result)
+	case "DELETE":
+		delete(f.records, id)
+		f.writes++
+		result(map[string]string{"id": id})
+	default:
+		t.Error("unexpected CF method", r.Method)
+	}
+}
+
+func (f *cloudFixture) readRecord(w http.ResponseWriter, r *http.Request, id string, result func(interface{})) {
+	if f.rejectReads {
+		w.WriteHeader(http.StatusForbidden)
+		fmt.Fprint(w, `{"success":false,"errors":[{"code":10000}]}`)
+		return
+	}
+	if id != "" {
+		record, ok := f.records[id]
+		if !ok {
+			if f.missingStatus != 0 {
+				w.WriteHeader(f.missingStatus)
+				fmt.Fprint(w, `{"success":false,"errors":[{"code":81044}]}`)
+				return
+			}
+			w.WriteHeader(404)
+			return
+		}
+		result(record)
+	} else {
+		records := []resourceRecord{}
+		for _, record := range f.records {
+			if record.Name == r.URL.Query().Get("name") {
+				records = append(records, record)
+			}
+		}
+		result(records)
+	}
+}
+
+func (f *cloudFixture) writeRecord(t *testing.T, w http.ResponseWriter, r *http.Request, id string, result func(interface{})) {
+	var record resourceRecord
+	if json.NewDecoder(r.Body).Decode(&record) != nil {
+		t.Error("bad CF body")
+	}
+	f.writes++
+	if id == "" {
+		id = fmt.Sprintf("%032x", f.writes+100)
+	}
+	record.Id = id
+	f.records[id] = record
+	if f.failCreateAck && r.Method == "POST" {
+		f.failCreateAck = false
+		w.WriteHeader(503)
+		return
+	}
+	result(record)
 }

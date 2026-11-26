@@ -35,17 +35,7 @@ func TestWholeNodesCredentialsOmissionAndGeneration(t *testing.T) {
 	loaded, err := (&ClientService{}).Get("1")
 	requireNodeTestSuccess(t, err)
 	client := (*loaded)[0]
-	if string(client.Nodes) != "[1]" || string(client.Inbounds) != "[21]" || client.NodeMigrationRequired {
-		t.Fatal("whole-node/local selection mismatch")
-	}
-	var cfg map[string]map[string]interface{}
-	json.Unmarshal(client.Config, &cfg)
-	if cfg["vless"]["uuid"] != "11111111-1111-4111-8111-111111111111" || cfg["tuic"]["uuid"] == nil || cfg["hysteria2"]["password"] == nil {
-		t.Fatal("credentials were replaced or not prepared for future protocols")
-	}
-	if _, ok := cfg["vless"]["flow"]; ok {
-		t.Fatal("assigning a node changed existing VLESS settings")
-	}
+	cfg := assertWholeNodeCredentials(t, client)
 	original := string(client.Config)
 	for _, kind := range []string{"vmess", "trojan", "anytls"} {
 		if len(cfg[kind]) == 0 {
@@ -184,4 +174,20 @@ func TestWholeNodesQuotaAndResetPersistAccessEpoch(t *testing.T) {
 	if !enabled.Enable || enabled.NodeGeneration <= disabled.NodeGeneration {
 		t.Fatal("reset lost re-enable generation")
 	}
+}
+
+func assertWholeNodeCredentials(t *testing.T, client model.Client) map[string]map[string]interface{} {
+	t.Helper()
+	if string(client.Nodes) != "[1]" || string(client.Inbounds) != "[21]" || client.NodeMigrationRequired {
+		t.Fatal("whole-node/local selection mismatch")
+	}
+	var cfg map[string]map[string]interface{}
+	json.Unmarshal(client.Config, &cfg)
+	if cfg["vless"]["uuid"] != "11111111-1111-4111-8111-111111111111" || cfg["tuic"]["uuid"] == nil || cfg["hysteria2"]["password"] == nil {
+		t.Fatal("credentials were replaced or not prepared for future protocols")
+	}
+	if _, ok := cfg["vless"]["flow"]; ok {
+		t.Fatal("assigning a node changed existing VLESS settings")
+	}
+	return cfg
 }

@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/alireza0/s-ui/database/model"
+	"gorm.io/gorm"
 )
 
 func TestInboundCatalogUpgradeAndSharedEditPreserveConnections(t *testing.T) {
@@ -144,56 +145,7 @@ func TestAccessFailureDoesNotReportStructuralFailure(t *testing.T) {
 func TestPrivateInboundDeletionAfterNodeRemoval(t *testing.T) {
 	for _, name := range []string{"delete node", "upgrade old database"} {
 		t.Run(name, func(t *testing.T) {
-			db, node, _ := fixture(t)
-			addDeployment := func(owner uint) (model.NodeTemplate, model.NodeTemplate) {
-				t.Helper()
-				group := model.NodeTemplate{Name: "Private deployment", Kind: deploymentTemplate, Scope: "private", OwnerNodeId: owner, SchemaVersion: 1, Version: 1}
-				inbound := model.NodeTemplate{Name: "Private inbound", Kind: inboundTemplate, Scope: "private", OwnerNodeId: owner, SchemaVersion: 1, Version: 1}
-				for _, row := range []*model.NodeTemplate{&group, &inbound} {
-					requireNodeTestSuccess(t, db.Create(row).Error)
-				}
-				payload, _ := json.Marshal(liveSpec())
-				version := model.NodeTemplateVersion{TemplateId: group.Id, Version: 1, SchemaVersion: 1, Payload: payload, Digest: versionDigest(payload)}
-				member := model.NodeTemplateMember{TemplateId: group.Id, InboundId: inbound.Id}
-				for _, row := range []interface{}{&version, &member} {
-					requireNodeTestSuccess(t, db.Create(row).Error)
-				}
-				return group, inbound
-			}
-			group, inbound := addDeployment(node.Id)
-			activeGroup, activeInbound := addDeployment(node.Id + 1)
-			activeNode := model.Node{Id: node.Id + 1, Name: "Other node", TemplateId: activeGroup.Id}
-			requireNodeTestSuccess(t, db.Create(&activeNode).Error)
-			node.TemplateId, node.Enable = group.Id, false
-			node.DesiredRevision, node.AppliedRevision = 3, 3
-			node.AppliedSnapshot, _ = json.Marshal(Snapshot{Node: Publication{Enable: false}})
-			requireNodeTestSuccess(t, db.Save(&node).Error)
-			deleteTemplate := func(id uint) error {
-				body, _ := json.Marshal(id)
-				return Save("nodetemplates", "del", body, "test")
-			}
-			if err := deleteTemplate(inbound.Id); err == nil || err.Error() != "node_template_in_use" {
-				t.Fatalf("template deletion should be blocked while its node exists: %v", err)
-			}
-			if name == "delete node" {
-				body, _ := json.Marshal(node.Id)
-				requireNodeTestSuccess(t, Save("nodes", "del", body, "test"))
-			} else {
-				requireNodeTestSuccess(t, db.Delete(&node).Error)
-				for range 2 {
-					requireNodeTestSuccess(t, UpgradeInboundCatalog(db))
-				}
-			}
-			if err := deleteTemplate(inbound.Id); err != nil {
-				t.Fatalf("deleted node still blocks the inbound template: %v", err)
-			}
-			if err := deleteTemplate(activeInbound.Id); err == nil || err.Error() != "node_template_in_use" {
-				t.Fatalf("the other node's template lost protection: %v", err)
-			}
-			versions, err := TemplateHistory(group.Id)
-			if err != nil || len(versions) != 1 {
-				t.Fatalf("historical deployment version lost: %v %v", versions, err)
-			}
+			checkPrivateInboundDeletion(t, name)
 		})
 	}
 }
@@ -233,4 +185,59 @@ func TestStructureResumesWhenDNSBecomesReadyWithoutManualRetry(t *testing.T) {
 	if task.State != "done" || task.LastError != "" || domain.LastError != "" || f.nodes[0].LastError != "" {
 		t.Fatal("recovered DNS left an error or a blocked structural task")
 	}
+}
+
+func checkPrivateInboundDeletion(t *testing.T, name string) {
+	t.Helper()
+	db, node, _ := fixture(t)
+	group, inbound := addPrivateDeploymentFixture(t, db, node.Id)
+	activeGroup, activeInbound := addPrivateDeploymentFixture(t, db, node.Id+1)
+	activeNode := model.Node{Id: node.Id + 1, Name: "Other node", TemplateId: activeGroup.Id}
+	requireNodeTestSuccess(t, db.Create(&activeNode).Error)
+	node.TemplateId, node.Enable = group.Id, false
+	node.DesiredRevision, node.AppliedRevision = 3, 3
+	node.AppliedSnapshot, _ = json.Marshal(Snapshot{Node: Publication{Enable: false}})
+	requireNodeTestSuccess(t, db.Save(&node).Error)
+	deleteTemplate := func(id uint) error {
+		body, _ := json.Marshal(id)
+		return Save("nodetemplates", "del", body, "test")
+	}
+	if err := deleteTemplate(inbound.Id); err == nil || err.Error() != "node_template_in_use" {
+		t.Fatalf("template deletion should be blocked while its node exists: %v", err)
+	}
+	if name == "delete node" {
+		body, _ := json.Marshal(node.Id)
+		requireNodeTestSuccess(t, Save("nodes", "del", body, "test"))
+	} else {
+		requireNodeTestSuccess(t, db.Delete(&node).Error)
+		for range 2 {
+			requireNodeTestSuccess(t, UpgradeInboundCatalog(db))
+		}
+	}
+	if err := deleteTemplate(inbound.Id); err != nil {
+		t.Fatalf("deleted node still blocks the inbound template: %v", err)
+	}
+	if err := deleteTemplate(activeInbound.Id); err == nil || err.Error() != "node_template_in_use" {
+		t.Fatalf("the other node's template lost protection: %v", err)
+	}
+	versions, err := TemplateHistory(group.Id)
+	if err != nil || len(versions) != 1 {
+		t.Fatalf("historical deployment version lost: %v %v", versions, err)
+	}
+}
+
+func addPrivateDeploymentFixture(t *testing.T, db *gorm.DB, owner uint) (model.NodeTemplate, model.NodeTemplate) {
+	t.Helper()
+	group := model.NodeTemplate{Name: "Private deployment", Kind: deploymentTemplate, Scope: "private", OwnerNodeId: owner, SchemaVersion: 1, Version: 1}
+	inbound := model.NodeTemplate{Name: "Private inbound", Kind: inboundTemplate, Scope: "private", OwnerNodeId: owner, SchemaVersion: 1, Version: 1}
+	for _, row := range []*model.NodeTemplate{&group, &inbound} {
+		requireNodeTestSuccess(t, db.Create(row).Error)
+	}
+	payload, _ := json.Marshal(liveSpec())
+	version := model.NodeTemplateVersion{TemplateId: group.Id, Version: 1, SchemaVersion: 1, Payload: payload, Digest: versionDigest(payload)}
+	member := model.NodeTemplateMember{TemplateId: group.Id, InboundId: inbound.Id}
+	for _, row := range []interface{}{&version, &member} {
+		requireNodeTestSuccess(t, db.Create(row).Error)
+	}
+	return group, inbound
 }

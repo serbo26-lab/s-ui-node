@@ -134,20 +134,7 @@ func TestLiveTemplateFanoutStableIDsAndPerNodeResources(t *testing.T) {
 	if f.links(t) != 4 {
 		t.Fatal("template save did not fan out")
 	}
-	for _, old := range before {
-		var current model.NodeInbound
-		f.db.First(&current, old.Id)
-		if current.ConnectionKey != old.ConnectionKey || string(current.Options) != string(old.Options) || current.DisplayName != "Renamed" {
-			t.Fatal("rename changed identity/material")
-		}
-	}
-	var versions []model.Node
-	f.db.Order("id").Find(&versions)
-	for _, n := range versions {
-		if n.TemplateTargetVersion != 2 || n.MaterializedTemplateVersion != 2 || n.AppliedTemplateVersion != 2 {
-			t.Fatal("template counters diverged")
-		}
-	}
+	assertLiveFanoutIdentity(t, f, before)
 	var ports []model.NodePortReservation
 	f.db.Find(&ports)
 	if len(ports) != 4 {
@@ -721,5 +708,23 @@ func TestLiveSchemaUpgradeKeepsExistingLegacyConnections(t *testing.T) {
 	links, err := ClientInbounds(reopened, client)
 	if err != nil || len(links) != 1 {
 		t.Fatal("legacy assignment lost after migration", err)
+	}
+}
+
+func assertLiveFanoutIdentity(t *testing.T, f liveFixture, before []model.NodeInbound) {
+	t.Helper()
+	for _, old := range before {
+		var current model.NodeInbound
+		f.db.First(&current, old.Id)
+		if current.ConnectionKey != old.ConnectionKey || string(current.Options) != string(old.Options) || current.DisplayName != "Renamed" {
+			t.Fatal("rename changed identity/material")
+		}
+	}
+	var versions []model.Node
+	f.db.Order("id").Find(&versions)
+	for _, n := range versions {
+		if n.TemplateTargetVersion != 2 || n.MaterializedTemplateVersion != 2 || n.AppliedTemplateVersion != 2 {
+			t.Fatal("template counters diverged")
+		}
 	}
 }

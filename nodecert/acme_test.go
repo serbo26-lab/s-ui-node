@@ -39,106 +39,18 @@ func TestCertificatePinnedACMEHTTP01FlowAndArtifact(t *testing.T) {
 	listener.Close()
 	solver := &HTTP01{Address: address}
 	defer solver.Close()
-	var authorized atomic.Bool
-	var nonce atomic.Int64
-	var chain string
-	var server *httptest.Server
-	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Replay-Nonce", base64.RawURLEncoding.EncodeToString([]byte(big.NewInt(nonce.Add(1)).String())))
-		w.Header().Set("Content-Type", "application/json")
-		decode := func(target interface{}) {
-			var envelope struct {
-				Payload string `json:"payload"`
-			}
-			if json.NewDecoder(r.Body).Decode(&envelope) != nil {
-				t.Error("invalid JWS envelope")
-				return
-			}
-			body, _ := base64.RawURLEncoding.DecodeString(envelope.Payload)
-			_ = json.Unmarshal(body, target)
-		}
-		order := func() map[string]interface{} {
-			state := "pending"
-			if authorized.Load() {
-				state = "ready"
-			}
-			result := map[string]interface{}{"status": state, "identifiers": []map[string]string{{"type": "dns", "value": "node.example"}}, "authorizations": []string{server.URL + "/auth"}, "finalize": server.URL + "/finalize"}
-			if chain != "" {
-				result["status"], result["certificate"] = "valid", server.URL+"/cert"
-			}
-			return result
-		}
-		switch r.URL.Path {
-		case "/directory":
-			json.NewEncoder(w).Encode(map[string]string{"newNonce": server.URL + "/nonce", "newAccount": server.URL + "/account", "newOrder": server.URL + "/new-order"})
-		case "/nonce":
-			w.WriteHeader(204)
-		case "/account":
-			w.Header().Set("Location", server.URL+"/account/1")
-			w.WriteHeader(201)
-			io.WriteString(w, `{"status":"valid","orders":"/orders"}`)
-		case "/new-order":
-			w.Header().Set("Location", server.URL+"/order")
-			w.WriteHeader(201)
-			json.NewEncoder(w).Encode(order())
-		case "/auth":
-			state := "pending"
-			if authorized.Load() {
-				state = "valid"
-			}
-			json.NewEncoder(w).Encode(map[string]interface{}{"status": state, "identifier": map[string]string{"type": "dns", "value": "node.example"}, "challenges": []map[string]string{{"type": "http-01", "url": server.URL + "/challenge", "token": "fixture-token", "status": state}}})
-		case "/challenge":
-			req, _ := http.NewRequest("GET", "http://"+address+"/.well-known/acme-challenge/fixture-token", nil)
-			req.Host = "node.example"
-			response, err := http.DefaultClient.Do(req)
-			if err != nil {
-				t.Error(err)
-				w.WriteHeader(500)
-				return
-			}
-			body, _ := io.ReadAll(response.Body)
-			response.Body.Close()
-			if !strings.HasPrefix(string(body), "fixture-token.") {
-				t.Error("HTTP01 challenge not served")
-			}
-			authorized.Store(true)
-			json.NewEncoder(w).Encode(map[string]string{"type": "http-01", "status": "valid", "url": server.URL + "/challenge", "token": "fixture-token"})
-		case "/order":
-			json.NewEncoder(w).Encode(order())
-		case "/finalize":
-			var request struct {
-				CSR string `json:"csr"`
-			}
-			decode(&request)
-			der, _ := base64.RawURLEncoding.DecodeString(request.CSR)
-			csr, err := x509.ParseCertificateRequest(der)
-			if err != nil {
-				t.Error(err)
-				w.WriteHeader(500)
-				return
-			}
-			leaf := &x509.Certificate{SerialNumber: big.NewInt(2), DNSNames: csr.DNSNames, NotBefore: now.Add(-time.Minute), NotAfter: now.Add(12 * time.Hour), KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}
-			der, err = x509.CreateCertificate(rand.Reader, leaf, root, csr.PublicKey, rootKey)
-			if err != nil {
-				t.Error(err)
-			}
-			chain = string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})) + string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: rootDER}))
-			json.NewEncoder(w).Encode(order())
-		case "/cert":
-			w.Header().Set("Content-Type", "application/pem-certificate-chain")
-			io.WriteString(w, chain)
-		default:
-			t.Error("unexpected ACME endpoint", r.URL.Path)
-			w.WriteHeader(404)
-		}
+	f := &pinnedACMEFixture{now: now, root: root, rootKey: rootKey, rootDER: rootDER, address: address}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		f.handle(t, w, r)
 	}))
+	f.server = server
 	defer server.Close()
 	key, _ := NewAccountKey()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	bundle, err := issue(ctx, &acme.Client{Directory: server.URL + "/directory", HTTPClient: server.Client(), PollInterval: time.Millisecond}, "", key, "node.example", "http-01", solver)
 	requireNodeTestSuccess(t, err)
-	if !authorized.Load() {
+	if !f.authorized.Load() {
 		t.Fatal("ACME skipped HTTP proof")
 	}
 	directory := t.TempDir()
@@ -182,4 +94,127 @@ func TestCertificateHTTP01BusyPortDoesNotReplaceListener(t *testing.T) {
 		t.Fatal("foreign listener stopped", err)
 	}
 	conn.Close()
+}
+
+func proveACMEFixtureHTTP01(t *testing.T, w http.ResponseWriter, address string) bool {
+	t.Helper()
+	req, _ := http.NewRequest("GET", "http://"+address+"/.well-known/acme-challenge/fixture-token", nil)
+	req.Host = "node.example"
+	response, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Error(err)
+		w.WriteHeader(500)
+		return false
+	}
+	body, _ := io.ReadAll(response.Body)
+	response.Body.Close()
+	if !strings.HasPrefix(string(body), "fixture-token.") {
+		t.Error("HTTP01 challenge not served")
+	}
+	return true
+}
+
+func finalizeACMEFixture(t *testing.T, w http.ResponseWriter, now time.Time, root *x509.Certificate, rootKey *ecdsa.PrivateKey, rootDER []byte, decode func(interface{})) (string, bool) {
+	t.Helper()
+	var request struct {
+		CSR string `json:"csr"`
+	}
+	decode(&request)
+	der, _ := base64.RawURLEncoding.DecodeString(request.CSR)
+	csr, err := x509.ParseCertificateRequest(der)
+	if err != nil {
+		t.Error(err)
+		w.WriteHeader(500)
+		return "", false
+	}
+	leaf := &x509.Certificate{SerialNumber: big.NewInt(2), DNSNames: csr.DNSNames, NotBefore: now.Add(-time.Minute), NotAfter: now.Add(12 * time.Hour), KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}
+	der, err = x509.CreateCertificate(rand.Reader, leaf, root, csr.PublicKey, rootKey)
+	if err != nil {
+		t.Error(err)
+	}
+	chain := string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})) + string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: rootDER}))
+	return chain, true
+}
+
+func decodeACMEFixturePayload(t *testing.T, r *http.Request, target interface{}) {
+	t.Helper()
+	var envelope struct {
+		Payload string `json:"payload"`
+	}
+	if json.NewDecoder(r.Body).Decode(&envelope) != nil {
+		t.Error("invalid JWS envelope")
+		return
+	}
+	body, _ := base64.RawURLEncoding.DecodeString(envelope.Payload)
+	_ = json.Unmarshal(body, target)
+}
+
+type pinnedACMEFixture struct {
+	now        time.Time
+	root       *x509.Certificate
+	rootKey    *ecdsa.PrivateKey
+	rootDER    []byte
+	address    string
+	server     *httptest.Server
+	authorized atomic.Bool
+	nonce      atomic.Int64
+	chain      string
+}
+
+func (f *pinnedACMEFixture) handle(t *testing.T, w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Replay-Nonce", base64.RawURLEncoding.EncodeToString([]byte(big.NewInt(f.nonce.Add(1)).String())))
+	w.Header().Set("Content-Type", "application/json")
+	decode := func(target interface{}) { decodeACMEFixturePayload(t, r, target) }
+	order := func() map[string]interface{} {
+		state := "pending"
+		if f.authorized.Load() {
+			state = "ready"
+		}
+		result := map[string]interface{}{"status": state, "identifiers": []map[string]string{{"type": "dns", "value": "node.example"}}, "authorizations": []string{f.server.URL + "/auth"}, "finalize": f.server.URL + "/finalize"}
+		if f.chain != "" {
+			result["status"], result["certificate"] = "valid", f.server.URL+"/cert"
+		}
+		return result
+	}
+	switch r.URL.Path {
+	case "/directory":
+		json.NewEncoder(w).Encode(map[string]string{"newNonce": f.server.URL + "/f.nonce", "newAccount": f.server.URL + "/account", "newOrder": f.server.URL + "/new-order"})
+	case "/f.nonce":
+		w.WriteHeader(204)
+	case "/account":
+		w.Header().Set("Location", f.server.URL+"/account/1")
+		w.WriteHeader(201)
+		io.WriteString(w, `{"status":"valid","orders":"/orders"}`)
+	case "/new-order":
+		w.Header().Set("Location", f.server.URL+"/order")
+		w.WriteHeader(201)
+		json.NewEncoder(w).Encode(order())
+	case "/auth":
+		state := "pending"
+		if f.authorized.Load() {
+			state = "valid"
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{"status": state, "identifier": map[string]string{"type": "dns", "value": "node.example"}, "challenges": []map[string]string{{"type": "http-01", "url": f.server.URL + "/challenge", "token": "fixture-token", "status": state}}})
+	case "/challenge":
+		if !proveACMEFixtureHTTP01(t, w, f.address) {
+			return
+		}
+		f.authorized.Store(true)
+		json.NewEncoder(w).Encode(map[string]string{"type": "http-01", "status": "valid", "url": f.server.URL + "/challenge", "token": "fixture-token"})
+	case "/order":
+		json.NewEncoder(w).Encode(order())
+	case "/finalize":
+		var complete bool
+		f.chain, complete = finalizeACMEFixture(t, w, f.now, f.root, f.rootKey, f.rootDER, decode)
+		if !complete {
+			return
+		}
+		json.NewEncoder(w).Encode(order())
+	case "/cert":
+		w.Header().Set("Content-Type", "application/pem-certificate-f.chain")
+		io.WriteString(w, f.chain)
+	default:
+		t.Error("unexpected ACME endpoint", r.URL.Path)
+		w.WriteHeader(404)
+	}
 }
