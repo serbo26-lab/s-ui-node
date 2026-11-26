@@ -157,7 +157,7 @@ func ensureCertificateFirewall(ctx context.Context, db *gorm.DB, node model.Node
 
 func confirmNodeFirewall(ctx context.Context, db *gorm.DB, node model.Node, status nodeagent.StatusV2) error {
 	if !status.Running {
-		return ensureNodeFirewall(ctx, db, node, Snapshot{Deployment: nodeagent.Deployment{Revision: status.SpecRevision}}, true)
+		return ensureNodeFirewall(ctx, db, node, Snapshot{Deployment: structureSnapshot{Revision: status.SpecRevision}}, true)
 	}
 	if status.SpecRevision == 0 {
 		return nil
@@ -178,18 +178,4 @@ func confirmNodeFirewall(ctx context.Context, db *gorm.DB, node model.Node, stat
 		return errors.New("structural_observation_digest_mismatch")
 	}
 	return ensureNodeFirewall(ctx, db, node, snapshot, true)
-}
-
-func confirmLegacyNodeFirewall(ctx context.Context, db *gorm.DB, node model.Node, status nodeagent.Status) error {
-	if status.NodeID != uint64(node.Id) || status.Protocol != nodeagent.ProtocolVersion {
-		return nil
-	}
-	if !status.Running {
-		return ensureNodeFirewall(ctx, db, node, Snapshot{Deployment: nodeagent.Deployment{Revision: status.Revision}}, true)
-	}
-	var applied Snapshot
-	if json.Unmarshal(node.AppliedSnapshot, &applied) != nil || status.Revision != applied.Deployment.Revision || status.Digest != applied.Deployment.Digest() {
-		return nil
-	}
-	return ensureNodeFirewall(ctx, db, node, applied, true)
 }

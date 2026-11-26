@@ -1,34 +1,12 @@
 package api
 
 import (
-	"encoding/json"
 	"errors"
 	"strconv"
 
 	"github.com/alireza0/s-ui/nodes"
 	"github.com/gin-gonic/gin"
 )
-
-func (a *ApiService) GetNodeMigration(c *gin.Context) {
-	id, err := strconv.ParseUint(c.Query("id"), 10, 32)
-	if err != nil || id == 0 {
-		jsonObj(c, nil, errors.New("invalid_node_id"))
-		return
-	}
-	report, err := nodes.ReportNodeMigration(uint(id))
-	jsonObj(c, report, err)
-}
-
-func (a *ApiService) PrepareNodeMigration(c *gin.Context, actor string) {
-	data := c.Request.FormValue("data")
-	var request nodes.PrepareMigrationRequest
-	if len(data) > 256<<10 || json.Unmarshal([]byte(data), &request) != nil || request.NodeId == 0 {
-		jsonObj(c, nil, errors.New("invalid_migration_request"))
-		return
-	}
-	migration, err := nodes.PrepareNodeMigration(request, actor)
-	jsonObj(c, migration, err)
-}
 
 func (a *ApiService) GetNodeTemplateHistory(c *gin.Context) {
 	id, err := strconv.ParseUint(c.Query("id"), 10, 32)
@@ -66,15 +44,4 @@ func (a *ApiService) GetNodeWorkspace(c *gin.Context) {
 	}
 	view, err := nodes.ReadWorkspace(uint(id))
 	jsonObj(c, view, err)
-}
-
-func (a *ApiService) ActivateNodeMigration(c *gin.Context, actor string) {
-	data := c.Request.FormValue("data")
-	var request nodes.PrepareMigrationRequest
-	if len(data) > 256<<10 || json.Unmarshal([]byte(data), &request) != nil || request.NodeId == 0 {
-		jsonObj(c, nil, errors.New("invalid_migration_request"))
-		return
-	}
-	migration, err := nodes.ActivateNodeMigration(c.Request.Context(), request, actor)
-	jsonObj(c, migration, err)
 }

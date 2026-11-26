@@ -36,7 +36,7 @@ the saved VPN configuration after installation.
 Renewal does not replace a changed SSH host key or recover a reinstalled OS.
 Use explicit node recovery with new SSH credentials for that case. Installation
 errors appear in the node's existing job history. Manual control deployments
-and legacy nodes require separate certificate maintenance.
+require separate certificate maintenance.
 
 ## HTTP-01 firewall permissions
 

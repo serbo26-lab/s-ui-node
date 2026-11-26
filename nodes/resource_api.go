@@ -134,7 +134,7 @@ func resourceNode(tx *gorm.DB, id uint) (model.Node, error) {
 	if err := tx.First(&n, id).Error; err != nil {
 		return n, err
 	}
-	if n.AgentProtocol != 2 || n.AssignmentMode != model.NodeAssignmentWhole {
+	if !managedNodeModel(n) {
 		return n, errors.New("node_resources_require_converted_v2")
 	}
 	return n, nil

@@ -1,9 +1,7 @@
 # Independent node agent
 
 The agent reuses S-UI's `core` in a separate process, without the panel database,
-web admin or global `corePtr`. The current CLI speaks protocol v2. The panel
-controller supports both old v1 agents and v2 agents. Assignment migration and
-upgrade boundaries are described in [nodes-model.md](nodes-model.md).
+web admin or global `corePtr`. The management protocol is v2.
 
 Build from this repository, using its pinned Go version:
 
@@ -39,14 +37,12 @@ system filesystem. S-UI's Linux core also needs AF_NETLINK to discover interface
   certificate metadata. This response contains no client credentials.
 - `PUT /v2/spec`: structural sing-box configuration without inbound `users`.
 - `PUT /v2/access`: complete client grants with absolute expiry, credentials and
-  either whole-node scope (`all: true`) or exact listener `tags` for legacy nodes.
+  whole-node scope (`all: true`).
 - Both payloads contain `node_id`, `epoch` and a positive `revision`. Revisions
   advance independently. A foreign identity/epoch, stale revision or changed
   payload at the same revision returns 409. Exact retries are idempotent.
 - Invalid JSON returns 400; an unapplied state returns 422 with a sanitized
   message. A successful response confirms the applied revision and digest.
-- `GET /v1/status` reports protocol 2. `PUT /v1/deployment` returns 409, so an old
-  controller cannot replace the independent access state.
 
 Example shape only; placeholders below are not working credentials:
 
@@ -69,9 +65,8 @@ Example shape only; placeholders below are not working credentials:
 
 `config` is server configuration; client users arrive separately through access.
 Panel clients use local `inbounds: [21]` and whole-node `nodes: [1]` independently.
-`nodeinbounds` remains the exact legacy field, or an applied read-only projection
-after conversion. The subscription contains client outbounds/URIs, rather than
-numeric server inbound IDs.
+`nodeinbounds` is a read-only list of applied remote listener IDs. Subscriptions
+contain client outbounds and connection URIs.
 
 ## Runtime and recovery
 
@@ -88,18 +83,14 @@ using a closed DNS/HTTP manager. Hot user changes keep the provider context.
 Certificate resources are separate from management TLS. HTTP-01 issuance and
 remote file validation run on the agent; managed DNS-01 issuance runs on the
 panel so the DNS credential stays there. See [node-resources.md](node-resources.md)
-for resource methods, path rules and subscription readiness. Legacy builtin
-providers remain a compatibility path.
+for resource methods, path rules and subscription readiness.
 
 `state-v2.json` contains last-good structure, latest durable access and applied
 access, with a checksum. Updates use a temporary 0600 file in a 0700 directory,
 file fsync, atomic rename and directory fsync. Application is acknowledged only
 after the applied checkpoint succeeds. Failure never restores an older ACL.
 
-On first v2 start only, the same state directory's `last-good.json` can be
-imported with exact v1 scope/credentials/expiry. An existing malformed v2 state
-is an error; the agent never falls back to obsolete v1 permissions. Back up the
-whole state directory and upgrade the panel before the agent. Managed agents
+Back up the whole state directory and upgrade the panel before the agent. Managed agents
 follow the panel's pinned sing-box version and update through the saved SSH
 identity. OS-reinstall recovery uses the explicit [installer](node-installer.md)
 workflow; automatic downgrade remains unsupported.

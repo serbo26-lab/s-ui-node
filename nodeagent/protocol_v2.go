@@ -25,10 +25,7 @@ type Grant struct {
 	TrafficID   string                     `json:"traffic_id,omitempty"`
 	Expires     int64                      `json:"expires"`
 	All         bool                       `json:"all"`
-	Tags        []string                   `json:"tags,omitempty"`
 	Credentials map[string]json.RawMessage `json:"credentials,omitempty"`
-	// Only the one-time v1 import needs exact per-listener user fields.
-	InboundCredentials map[string]json.RawMessage `json:"inbound_credentials,omitempty"`
 }
 
 type AccessSnapshot struct {
@@ -73,33 +70,15 @@ func (a AccessSnapshot) Validate() error {
 	}
 	seen, trafficNames := map[string]bool{}, map[string]string{}
 	for _, grant := range a.Clients {
-		if grant.Name == "" || seen[grant.Name] || grant.Expires < 0 || (grant.All && len(grant.Tags) > 0) || (!grant.All && len(grant.Tags) == 0) {
+		if grant.Name == "" || seen[grant.Name] || grant.Expires < 0 || !grant.All {
 			return errors.New("invalid access grant")
 		}
 		seen[grant.Name] = true
-		tags, err := validateGrantTags(grant.Tags)
-		if err != nil {
-			return err
-		}
 		if err := validateGrantCredentials(grant, trafficNames); err != nil {
-			return err
-		}
-		if err := validateImportedCredentials(grant.InboundCredentials, tags); err != nil {
 			return err
 		}
 	}
 	return nil
-}
-
-func validateGrantTags(values []string) (map[string]bool, error) {
-	tags := map[string]bool{}
-	for _, tag := range values {
-		if tag == "" || tags[tag] {
-			return nil, errors.New("duplicate access tag")
-		}
-		tags[tag] = true
-	}
-	return tags, nil
 }
 
 func validateGrantCredentials(grant Grant, trafficNames map[string]string) error {
@@ -118,16 +97,6 @@ func validateGrantCredentials(grant Grant, trafficNames map[string]string) error
 			return errors.New("ambiguous traffic username")
 		}
 		trafficNames[auth.Username] = grant.TrafficID
-	}
-	return nil
-}
-
-func validateImportedCredentials(credentials map[string]json.RawMessage, tags map[string]bool) error {
-	for tag, raw := range credentials {
-		var value map[string]interface{}
-		if !tags[tag] || json.Unmarshal(raw, &value) != nil || value == nil {
-			return errors.New("invalid imported credential")
-		}
 	}
 	return nil
 }
@@ -207,47 +176,6 @@ func deniedProxyUser(kind, credential string) map[string]interface{} {
 	return map[string]interface{}{"name": name, SecretField(kind): secret}
 }
 
-func ImportV1(d Deployment, epoch string) (Structure, AccessSnapshot, error) {
-	s := Structure{NodeID: d.NodeID, Epoch: epoch, Revision: d.Revision}
-	a := AccessSnapshot{NodeID: d.NodeID, Epoch: epoch, Clients: []Grant{}}
-	if err := d.Validate(); err != nil {
-		return s, a, err
-	}
-	expires := map[string]int64{}
-	for _, g := range d.Users {
-		expires[g.Name] = g.Expires
-	}
-	var config map[string]json.RawMessage
-	_ = json.Unmarshal(d.Config, &config)
-	var inbounds []map[string]json.RawMessage
-	_ = json.Unmarshal(config["inbounds"], &inbounds)
-	byName := map[string]int{}
-	for _, in := range inbounds {
-		var tag string
-		_ = json.Unmarshal(in["tag"], &tag)
-		var users []map[string]json.RawMessage
-		_ = json.Unmarshal(in["users"], &users)
-		for _, user := range users {
-			var name string
-			_ = json.Unmarshal(user["name"], &name)
-			delete(user, "name")
-			index, ok := byName[name]
-			if !ok {
-				index = len(a.Clients)
-				byName[name] = index
-				a.Clients = append(a.Clients, Grant{Name: name, Expires: expires[name], Tags: []string{}, InboundCredentials: map[string]json.RawMessage{}})
-			}
-			g := &a.Clients[index]
-			g.Tags = append(g.Tags, tag)
-			g.InboundCredentials[tag], _ = json.Marshal(user)
-		}
-		delete(in, "users")
-	}
-	config["inbounds"], _ = json.Marshal(inbounds)
-	s.Config, _ = json.Marshal(config)
-	return s, a, s.Validate()
-}
-
 func validateStructuralInbound(in map[string]json.RawMessage, seen map[string]bool) error {
 	if _, exists := in["users"]; exists {
 		return errors.New("structural spec must not contain users")
@@ -282,31 +210,17 @@ func validateSecretCredential(kind, password string) error {
 	return nil
 }
 
-func grantAllows(grant Grant, tag string, now int64) bool {
-	if grant.Expires > 0 && grant.Expires <= now {
-		return false
-	}
-	allowed := grant.All
-	for _, candidate := range grant.Tags {
-		if candidate == tag {
-			allowed = true
-		}
-	}
-	return allowed
-}
-
 func composeInboundUsers(in map[string]json.RawMessage, grants []Grant, now int64) ([]map[string]interface{}, error) {
-	var tag, kind, method string
-	_ = json.Unmarshal(in["tag"], &tag)
+	var kind, method string
 	_ = json.Unmarshal(in["type"], &kind)
 	_ = json.Unmarshal(in["method"], &method)
 	credential := CredentialKey(kind, method)
 	users := []map[string]interface{}{}
 	for _, grant := range grants {
-		if !grantAllows(grant, tag, now) {
+		if !grant.All || (grant.Expires > 0 && grant.Expires <= now) {
 			continue
 		}
-		user, err := composeGrantUser(in, grant, tag, kind, credential)
+		user, err := composeGrantUser(in, grant, kind, credential)
 		if err != nil {
 			return nil, err
 		}
@@ -321,12 +235,8 @@ func composeInboundUsers(in map[string]json.RawMessage, grants []Grant, now int6
 	return users, nil
 }
 
-func composeGrantUser(in map[string]json.RawMessage, grant Grant, tag, kind, credential string) (map[string]interface{}, error) {
-	raw := grant.InboundCredentials[tag]
-	imported := len(raw) > 0
-	if !imported {
-		raw = grant.Credentials[credential]
-	}
+func composeGrantUser(in map[string]json.RawMessage, grant Grant, kind, credential string) (map[string]interface{}, error) {
+	raw := grant.Credentials[credential]
 	if len(raw) == 0 && ExtendedInbound(kind) {
 		return nil, nil
 	}
@@ -339,7 +249,7 @@ func composeGrantUser(in map[string]json.RawMessage, grant Grant, tag, kind, cre
 	} else {
 		user["name"] = grant.Name
 	}
-	if kind == "vless" && !imported {
+	if kind == "vless" {
 		stripUnsupportedFlow(user, in)
 	}
 	return user, nil

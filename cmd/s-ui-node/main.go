@@ -41,7 +41,7 @@ func main() {
 	runtime := nodeagent.NewCoreRuntimeWithState(*state)
 	manager := nodeagent.NewManagerV2(*nodeID, nodeagent.FileStoreV2{Directory: *state}, runtime)
 	manager.RequireBootstrap(*bootstrap)
-	if err := manager.Restore(nodeagent.FileStore{Directory: *state}); err != nil {
+	if err := manager.Restore(); err != nil {
 		log.Fatal(err)
 	}
 	defer manager.Close()

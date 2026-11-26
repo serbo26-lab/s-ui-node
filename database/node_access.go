@@ -9,19 +9,9 @@ import (
 	"gorm.io/gorm/clause"
 )
 
-func LegacyNodeInboundIDs(tx *gorm.DB, clientID uint) ([]uint, error) {
-	ids := []uint{}
-	if !tx.Migrator().HasTable(&model.ClientNodeInbound{}) {
-		return ids, nil
-	}
-	err := tx.Model(&model.ClientNodeInbound{}).Joins("LEFT JOIN node_inbounds AS ni ON ni.id = client_node_inbounds.node_inbound_id").Joins("LEFT JOIN nodes AS n ON n.id = ni.node_id").Where("client_node_inbounds.client_id = ? AND (n.id IS NULL OR n.assignment_mode <> ?)", clientID, model.NodeAssignmentWhole).Order("node_inbound_id").Pluck("node_inbound_id", &ids).Error
-	return ids, err
-}
-
 type NodeAssignmentProjection struct {
 	Inbounds []uint
 	Nodes    []uint
-	Legacy   bool
 }
 
 // NodeProjections batches client DTO hydration; no per-client SQL in GetAll.
@@ -32,11 +22,6 @@ func NodeProjections(tx *gorm.DB, clientIDs []uint) (map[uint]NodeAssignmentProj
 	}
 	if len(clientIDs) == 0 {
 		return result, nil
-	}
-	if tx.Migrator().HasTable(&model.ClientNodeInbound{}) {
-		if err := legacyNodeProjections(tx, clientIDs, result); err != nil {
-			return nil, err
-		}
 	}
 	if tx.Migrator().HasTable(&model.ClientNode{}) {
 		if err := wholeNodeProjections(tx, clientIDs, result); err != nil {
@@ -49,16 +34,16 @@ func NodeProjections(tx *gorm.DB, clientIDs []uint) (map[uint]NodeAssignmentProj
 	return result, nil
 }
 
-func NodeProjection(tx *gorm.DB, clientID uint) ([]uint, []uint, bool, error) {
+func NodeProjection(tx *gorm.DB, clientID uint) ([]uint, []uint, error) {
 	if clientID == 0 {
-		return []uint{}, []uint{}, false, nil
+		return []uint{}, []uint{}, nil
 	}
 	all, err := NodeProjections(tx, []uint{clientID})
 	if err != nil {
-		return nil, nil, false, err
+		return nil, nil, err
 	}
 	p := all[clientID]
-	return p.Inbounds, p.Nodes, p.Legacy, nil
+	return p.Inbounds, p.Nodes, nil
 }
 
 func QueueNodeTasks(tx *gorm.DB, ids []uint, kind string) error {
@@ -89,13 +74,6 @@ func ClientNodeTargets(tx *gorm.DB, clients []uint) ([]uint, error) {
 			return nil, err
 		}
 	}
-	if tx.Migrator().HasTable(&model.ClientNodeInbound{}) && tx.Migrator().HasTable(&model.NodeInbound{}) {
-		var legacy []uint
-		if err := tx.Model(&model.NodeInbound{}).Joins("JOIN client_node_inbounds AS cni ON cni.node_inbound_id = node_inbounds.id").Where("cni.client_id IN ?", clients).Distinct().Pluck("node_inbounds.node_id", &legacy).Error; err != nil {
-			return nil, err
-		}
-		ids = append(ids, legacy...)
-	}
 	return ids, nil
 }
 
@@ -113,24 +91,6 @@ func RevokeClientNodes(tx *gorm.DB, clients []uint) error {
 	}
 	if tx.Migrator().HasTable(&model.ClientNode{}) {
 		return tx.Model(&model.ClientNode{}).Where("client_id IN ? AND active = ?", clients, true).Updates(map[string]interface{}{"active": false, "generation": gorm.Expr("generation + 1")}).Error
-	}
-	return nil
-}
-
-func legacyNodeProjections(tx *gorm.DB, clientIDs []uint, result map[uint]NodeAssignmentProjection) error {
-	var bindings []model.ClientNodeInbound
-	query := tx.Model(&model.ClientNodeInbound{}).Select("client_node_inbounds.*").Where("client_node_inbounds.client_id IN ?", clientIDs)
-	if tx.Migrator().HasTable(&model.Node{}) {
-		query = query.Joins("LEFT JOIN node_inbounds AS ni ON ni.id = client_node_inbounds.node_inbound_id").Joins("LEFT JOIN nodes AS n ON n.id = ni.node_id").Where("n.id IS NULL OR n.assignment_mode <> ?", model.NodeAssignmentWhole)
-	}
-	if err := query.Order("client_id, node_inbound_id").Find(&bindings).Error; err != nil {
-		return err
-	}
-	for _, binding := range bindings {
-		p := result[binding.ClientId]
-		p.Inbounds = append(p.Inbounds, binding.NodeInboundId)
-		p.Legacy = true
-		result[binding.ClientId] = p
 	}
 	return nil
 }
@@ -154,7 +114,7 @@ func appliedNodeInboundIDs(nodes []model.Node) map[uint][]uint {
 
 func wholeNodeProjections(tx *gorm.DB, clientIDs []uint, result map[uint]NodeAssignmentProjection) error {
 	var bindings []model.ClientNode
-	if err := tx.Model(&model.ClientNode{}).Select("client_nodes.*").Joins("JOIN nodes ON nodes.id = client_nodes.node_id").Where("client_nodes.client_id IN ? AND client_nodes.active = ? AND nodes.assignment_mode = ?", clientIDs, true, model.NodeAssignmentWhole).Order("client_id, node_id").Find(&bindings).Error; err != nil {
+	if err := tx.Model(&model.ClientNode{}).Select("client_nodes.*").Joins("JOIN nodes ON nodes.id = client_nodes.node_id").Where("client_nodes.client_id IN ? AND client_nodes.active = ? AND nodes.assignment_mode = ? AND nodes.agent_protocol = 2 AND nodes.template_target_version > 0", clientIDs, true, model.NodeAssignmentWhole).Order("client_id, node_id").Find(&bindings).Error; err != nil {
 		return err
 	}
 	nodeIDs := []uint{}

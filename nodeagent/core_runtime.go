@@ -128,19 +128,15 @@ func validateRuntimeUsers(config []byte) error {
 	return nil
 }
 
-func (r *CoreRuntime) Apply(config []byte) error {
-	return r.apply(config, true)
-}
-
 // ApplySafe never restores an older user list. The v2 manager owns recovery
 // and rebuilds the last-good structure with the latest durable access intent.
-func (r *CoreRuntime) ApplySafe(config []byte) error { return r.apply(config, false) }
+func (r *CoreRuntime) ApplySafe(config []byte) error { return r.apply(config) }
 
 func (r *CoreRuntime) ApplyWithAccess(config []byte, access AccessSnapshot) error {
-	return r.apply(config, false, trafficAliases(access))
+	return r.apply(config, trafficAliases(access))
 }
 
-func (r *CoreRuntime) apply(config []byte, rollback bool, aliases ...map[string]string) error {
+func (r *CoreRuntime) apply(config []byte, aliases ...map[string]string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	prepared, err := r.prepareCertificates(config, true)
@@ -160,14 +156,11 @@ func (r *CoreRuntime) apply(config []byte, rollback bool, aliases ...map[string]
 			r.setTrafficAliases(aliases)
 			return nil
 		} else if !errors.Is(err, errHotUsersUnsupported) {
-			// A multi-inbound update can fail after one success; rebuild the
-			// previous full config rather than leaving a partially applied ACL.
+			// A multi-inbound update can fail after one success. The manager
+			// rebuilds from the latest durable access after stopping this core.
 			_ = r.stopCore()
-			if !rollback {
-				r.config = nil
-				return err
-			}
-			return errors.Join(err, r.core.Start(previous))
+			r.config = nil
+			return err
 		}
 	}
 	if err := r.stopCore(); err != nil {
@@ -175,9 +168,6 @@ func (r *CoreRuntime) apply(config []byte, rollback bool, aliases ...map[string]
 	}
 	if err := r.core.Start(config); err != nil {
 		_ = r.stopCore()
-		if rollback && len(previous) != 0 {
-			return errors.Join(err, r.core.Start(previous))
-		}
 		return err
 	}
 	r.config = append([]byte(nil), config...)

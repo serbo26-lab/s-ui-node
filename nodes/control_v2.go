@@ -18,7 +18,6 @@ import (
 	"gorm.io/gorm"
 )
 
-var errAgentV1 = errors.New("agent_v1")
 var errV2Rejected = errors.New("v2_state_rejected")
 var errAgentProtocolsPending = errors.New("node_agent_protocols_pending")
 var errAgentBootstrapPending = errors.New("node_agent_bootstrap_pending")
@@ -92,9 +91,6 @@ func getStatusV2(ctx context.Context, client *http.Client, node model.Node) (nod
 		return status, err
 	}
 	defer response.Body.Close()
-	if response.StatusCode == http.StatusNotFound {
-		return status, errAgentV1
-	}
 	if response.StatusCode != 200 || json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&status) != nil {
 		return status, errors.New("invalid_v2_status")
 	}
@@ -122,37 +118,6 @@ func getStatusV2(ctx context.Context, client *http.Client, node model.Node) (nod
 		}
 	}
 	return status, nil
-}
-
-func pinV2(node *model.Node, status nodeagent.StatusV2) error {
-	err := database.GetDB().Transaction(func(tx *gorm.DB) error {
-		var current model.Node
-		if err := tx.First(&current, node.Id).Error; err != nil {
-			return err
-		}
-		if current.ManagementGeneration != node.ManagementGeneration || current.Address != node.Address || current.ControlCertificate != node.ControlCertificate || current.ControlCA != node.ControlCA || current.ControlKey != node.ControlKey {
-			return errors.New("control_settings_changed")
-		}
-		if current.ControlEpoch != "" && current.ControlEpoch != status.Epoch {
-			return errors.New("agent_epoch_changed_recovery_required")
-		}
-		return tx.Model(&current).Updates(map[string]interface{}{"agent_protocol": nodeagent.ProtocolV2, "control_epoch": status.Epoch, "last_seen": time.Now().Unix()}).Error
-	})
-	if err == nil {
-		node.AgentProtocol = nodeagent.ProtocolV2
-		node.ControlEpoch = status.Epoch
-	}
-	return err
-}
-
-func discoverV2(ctx context.Context, node *model.Node) bool {
-	client, closeClient, err := controlClient(ctx, *node)
-	if err != nil {
-		return false
-	}
-	defer closeClient()
-	status, err := getStatusV2(ctx, client, *node)
-	return err == nil && pinV2(node, status) == nil
 }
 
 func putV2(ctx context.Context, client *http.Client, node model.Node, path string, value interface{}) (nodeagent.StatusV2, error) {

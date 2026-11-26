@@ -31,7 +31,7 @@ func TestLiveAgentProcessesSurvivePanelReopenAndAgentCrash(t *testing.T) {
 	db, node, client := fixture(t)
 	t.Setenv("SUI_DB_FOLDER", t.TempDir())
 	requireNodeTestSuccess(t, db.Where("node_id = ?", node.Id).Delete(&model.NodeInbound{}).Error)
-	requireNodeTestSuccess(t, db.Where("client_id = ?", client.Id).Delete(&model.ClientNodeInbound{}).Error)
+	requireNodeTestSuccess(t, db.Where("client_id = ?", client.Id).Delete(&model.ClientNode{}).Error)
 	f := liveFixture{db: db, client: client}
 	restarts := []func(){}
 	for i := 0; i < 2; i++ {
@@ -144,7 +144,8 @@ func liveProcessNodeFixture(t *testing.T, db *gorm.DB, binary string, clientID u
 			stop()
 			t.Fatal("agent process not ready; inspect private test log")
 		}
-		requireNodeTestSuccess(t, pinV2(&n, status))
+		n.ControlEpoch = status.Epoch
+		requireNodeTestSuccess(t, db.Model(&n).Update("control_epoch", status.Epoch).Error)
 	}
 	start()
 	return n, func() { stop(); start() }

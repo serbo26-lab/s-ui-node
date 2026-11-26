@@ -6,8 +6,6 @@ type NodeTemplate struct {
 	Id               uint            `json:"id" gorm:"primaryKey;autoIncrement"`
 	Name             string          `json:"name"`
 	Config           json.RawMessage `json:"config"`
-	Blueprints       json.RawMessage `json:"blueprints"`
-	Protocols        json.RawMessage `json:"protocols"`
 	Version          uint64          `json:"version" gorm:"not null;default:0"`
 	SchemaVersion    int             `json:"schema_version" gorm:"not null;default:0"`
 	Scope            string          `json:"scope" gorm:"not null;default:shared"`
@@ -25,31 +23,29 @@ type NodeTemplateMember struct {
 }
 
 type Node struct {
-	Id                   uint            `json:"id" gorm:"primaryKey;autoIncrement"`
-	Name                 string          `json:"name"`
-	Enable               bool            `json:"enable"`
-	Address              string          `json:"address"`
-	LinkAddress          string          `json:"linkaddress"`
-	TemplateId           uint            `json:"template_id"`
-	Config               json.RawMessage `json:"config"`
-	TemplateBase         json.RawMessage `json:"-"`
-	DesiredRevision      uint64          `json:"desired_revision"`
-	AppliedRevision      uint64          `json:"applied_revision"`
-	RejectedRevision     uint64          `json:"-"`
-	LastSeen             int64           `json:"last_seen"`
-	LastError            string          `json:"last_error,omitempty"`
-	DesiredFingerprint   string          `json:"-"`
-	DesiredSnapshot      json.RawMessage `json:"-"`
-	AppliedSnapshot      json.RawMessage `json:"-"`
-	ControlCA            string          `json:"-"`
-	ControlCertificate   string          `json:"-"`
-	ControlKey           string          `json:"-"`
-	ControlTLSConfigured bool            `json:"control_tls_configured" gorm:"-"`
-	Pending              bool            `json:"pending" gorm:"-"`
-	DisableConfirmed     bool            `json:"disable_confirmed" gorm:"-"`
-	TLSStatus            json.RawMessage `json:"tls_status"`
-	// Adding this column must never convert existing exact grants to whole-node access.
-	AssignmentMode              string `json:"assignment_mode" gorm:"not null;default:legacy"`
+	Id                 uint            `json:"id" gorm:"primaryKey;autoIncrement"`
+	Name               string          `json:"name"`
+	Enable             bool            `json:"enable"`
+	Address            string          `json:"address"`
+	LinkAddress        string          `json:"linkaddress"`
+	TemplateId         uint            `json:"template_id"`
+	Config             json.RawMessage `json:"config"`
+	DesiredRevision    uint64          `json:"desired_revision"`
+	AppliedRevision    uint64          `json:"applied_revision"`
+	RejectedRevision   uint64          `json:"-"`
+	LastSeen           int64           `json:"last_seen"`
+	LastError          string          `json:"last_error,omitempty"`
+	DesiredFingerprint string          `json:"-"`
+	DesiredSnapshot    json.RawMessage `json:"-"`
+	AppliedSnapshot    json.RawMessage `json:"-"`
+	ControlCA          string          `json:"-"`
+	ControlCertificate string          `json:"-"`
+	ControlKey         string          `json:"-"`
+	Pending            bool            `json:"pending" gorm:"-"`
+	DisableConfirmed   bool            `json:"disable_confirmed" gorm:"-"`
+	TLSStatus          json.RawMessage `json:"tls_status"`
+	// The assignment mode fences agents registered before whole-node access.
+	AssignmentMode              string `json:"assignment_mode" gorm:"not null;default:''"`
 	AgentProtocol               int    `json:"agent_protocol"`
 	AgentExtendedInbounds       bool   `json:"agent_extended_inbounds,omitempty"`
 	AgentProxyInbounds          bool   `json:"agent_proxy_inbounds,omitempty"`
@@ -86,25 +82,13 @@ type NodeInbound struct {
 	ClientOptions      json.RawMessage `json:"client_options,omitempty"`
 	SourceTemplateId   uint            `json:"source_template_id"`
 	TemplateKey        string          `json:"template_key"`
-	TemplateBase       json.RawMessage `json:"-"`
 	ConnectionKey      string          `json:"connection_key,omitempty" gorm:"uniqueIndex:idx_node_connection,priority:2,where:connection_key <> ''"`
 	DisplayName        string          `json:"display_name,omitempty"`
 	Retired            bool            `json:"retired" gorm:"not null;default:false"`
 	ManagedCertificate bool            `json:"managed_certificate" gorm:"not null;default:false"`
 }
 
-// These IDs never refer to model.Inbound, even if the integer is identical.
-type ClientNodeInbound struct {
-	ClientId      uint `json:"client_id" gorm:"primaryKey;autoIncrement:false"`
-	NodeInboundId uint `json:"nodeinbound_id" gorm:"primaryKey;autoIncrement:false;index"`
-}
-
-const (
-	NodeAssignmentLegacy     = "legacy"
-	NodeAssignmentPrepared   = "prepared"
-	NodeAssignmentWhole      = "node"
-	NodeAssignmentActivating = "activating"
-)
+const NodeAssignmentWhole = "node"
 
 type ClientNode struct {
 	ClientId   uint   `json:"client_id" gorm:"primaryKey;autoIncrement:false"`
@@ -157,7 +141,7 @@ type NodeGeneratedMaterial struct {
 	EncryptedValue string `json:"-"`
 }
 
-// One coalescing durable intent per node/kind; workers are added in R2/R3.
+// One coalescing durable intent per node/kind.
 type NodeTask struct {
 	Id          uint   `json:"id" gorm:"primaryKey;autoIncrement"`
 	NodeId      uint   `json:"node_id" gorm:"uniqueIndex:idx_node_task_kind,priority:1"`
@@ -171,35 +155,24 @@ type NodeTask struct {
 	LastError   string `json:"last_error,omitempty"`
 }
 
-type NodeAssignmentMigration struct {
-	NodeId       uint            `json:"node_id" gorm:"primaryKey;autoIncrement:false"`
-	ReportDigest string          `json:"report_digest"`
-	State        string          `json:"state"`
-	Decisions    json.RawMessage `json:"-"`
-	Created      int64           `json:"created"`
-}
-
 // Credentials are write-only and encrypted with the panel state key. An SSH
 // password is never stored: bootstrap installs a dedicated key for this node.
 type NodeInstallation struct {
-	OwnerID           string          `json:"-"`
-	Architecture      string          `json:"-"`
-	BootstrapID       string          `json:"-"`
-	NodeId            uint            `json:"node_id" gorm:"primaryKey;autoIncrement:false"`
-	IP                string          `json:"ip"`
-	SSHPort           int             `json:"ssh_port"`
-	SSHUser           string          `json:"ssh_user"`
-	HostKey           string          `json:"-"`
-	HostFingerprint   string          `json:"host_fingerprint" gorm:"-"`
-	PrivateKey        string          `json:"-"`
-	ServerCertificate string          `json:"-"`
-	ServerKey         string          `json:"-"`
-	Domain            string          `json:"domain"`
-	Protocols         json.RawMessage `json:"protocols"`
-	ControlPort       int             `json:"control_port"`
-	DNSRecordId       string          `json:"-"`
-	Ready             bool            `json:"ready"`
-	PreviousTarget    json.RawMessage `json:"-"`
+	OwnerID           string `json:"-"`
+	Architecture      string `json:"-"`
+	BootstrapID       string `json:"-"`
+	NodeId            uint   `json:"node_id" gorm:"primaryKey;autoIncrement:false"`
+	IP                string `json:"ip"`
+	SSHPort           int    `json:"ssh_port"`
+	SSHUser           string `json:"ssh_user"`
+	HostKey           string `json:"-"`
+	HostFingerprint   string `json:"host_fingerprint" gorm:"-"`
+	PrivateKey        string `json:"-"`
+	ServerCertificate string `json:"-"`
+	ServerKey         string `json:"-"`
+	Domain            string `json:"domain"`
+	ControlPort       int    `json:"control_port"`
+	Ready             bool   `json:"ready"`
 }
 
 type NodeJob struct {
@@ -213,18 +186,9 @@ type NodeJob struct {
 	State         string          `json:"state"`
 	Stage         string          `json:"stage"`
 	Error         string          `json:"error"`
-	Warning       string          `json:"warning,omitempty"`
 	Created       int64           `json:"created"`
 	Updated       int64           `json:"updated"`
 	Events        json.RawMessage `json:"events"`
-}
-
-type NodeAutomation struct {
-	Id           uint   `json:"-" gorm:"primaryKey;autoIncrement:false"`
-	DomainSuffix string `json:"domain_suffix"`
-	ZoneId       string `json:"zone_id"`
-	Email        string `json:"email"`
-	DNSToken     string `json:"-"`
 }
 
 // Payloads contain client credentials and are never returned by the admin bundle.

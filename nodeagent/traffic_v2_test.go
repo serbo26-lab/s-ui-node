@@ -2,7 +2,6 @@ package nodeagent
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -28,11 +27,11 @@ func freeV2Port(t *testing.T) int {
 func TestV2ActualVLESSTrafficDeniedAfterRevokeAndRestart(t *testing.T) {
 	serverPort, clientPort := freeV2Port(t), freeV2Port(t)
 	state := t.TempDir()
-	d := Deployment{NodeID: 7, Revision: 1, Users: []Access{{Name: "client/1"}}, Config: json.RawMessage(fmt.Sprintf(`{"inbounds":[{"type":"vless","tag":"vpn","listen":"127.0.0.1","listen_port":%d,"users":[{"name":"client/1","uuid":"11111111-1111-4111-8111-111111111111"}]}],"outbounds":[{"type":"direct","tag":"direct"}]}`, serverPort))}
-	legacy := FileStore{Directory: state}
-	requireNodeTestSuccess(t, legacy.Save(d))
 	m := NewManagerV2(7, FileStoreV2{Directory: state}, NewCoreRuntimeWithState(state))
-	requireNodeTestSuccess(t, m.Restore(legacy))
+	requireNodeTestSuccess(t, m.Restore())
+	spec, grant := vlessState(m.Status().Epoch, serverPort)
+	requireNodeTestSuccess(t, m.ApplyAccess(grant))
+	requireNodeTestSuccess(t, m.ApplyStructure(spec))
 	defer m.Close()
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "authenticated-v2") }))
 	defer backend.Close()
@@ -87,7 +86,7 @@ func TestV2ActualVLESSTrafficDeniedAfterRevokeAndRestart(t *testing.T) {
 		return conn
 	}
 	oldSession := openSession()
-	deny := AccessSnapshot{NodeID: 7, Epoch: m.Status().Epoch, Revision: 1, Clients: []Grant{}}
+	deny := AccessSnapshot{NodeID: 7, Epoch: m.Status().Epoch, Revision: 2, Clients: []Grant{}}
 	requireNodeTestSuccess(t, m.ApplyAccess(deny))
 	if fetch() {
 		t.Fatal("old VLESS credential still authenticated after revoke")
@@ -96,20 +95,18 @@ func TestV2ActualVLESSTrafficDeniedAfterRevokeAndRestart(t *testing.T) {
 	requireNodeTestSuccess(t, m.Close())
 	next := NewManagerV2(7, FileStoreV2{Directory: state}, NewCoreRuntimeWithState(state))
 	defer next.Close()
-	requireNodeTestSuccess(t, next.Restore(legacy))
+	requireNodeTestSuccess(t, next.Restore())
 	if fetch() {
 		t.Fatal("restart re-enabled old VLESS credential")
 	}
-	_, grant, err := ImportV1(d, next.Status().Epoch)
-	requireNodeTestSuccess(t, err)
-	grant.Revision = 2
+	grant.Revision = 3
 	grant.Clients[0].Name = "client/1/g2"
 	requireNodeTestSuccess(t, next.ApplyAccess(grant))
 	if !fetch() {
 		t.Fatal("explicit re-enable did not restore valid traffic")
 	}
 	oldSession = openSession()
-	grant.Revision = 3
+	grant.Revision = 4
 	grant.Clients[0].Name = "client/1/g3"
 	requireNodeTestSuccess(t, next.ApplyAccess(grant))
 	assertRevokedVLESSSessionClosed(t, oldSession)

@@ -11,8 +11,12 @@ import (
 	"github.com/gofrs/uuid/v5"
 )
 
+var ErrConflict = errors.New("deployment revision or node identity conflict")
+
 type SafeRuntime interface {
-	Runtime
+	Validate([]byte) error
+	Close() error
+	Running() bool
 	ApplySafe([]byte) error
 	Interrupt()
 }
@@ -74,8 +78,7 @@ func cloneState(s StateV2) StateV2 {
 }
 
 // Restore never falls back to a v1 ACL if a v2 state file exists but is broken.
-// Legacy is imported only once and preserves exact listener credentials/scope.
-func (m *ManagerV2) Restore(legacy Store) error {
+func (m *ManagerV2) Restore() error {
 	m.gate.Lock()
 	defer m.gate.Unlock()
 	state, err := m.store.LoadV2()
@@ -83,7 +86,7 @@ func (m *ManagerV2) Restore(legacy Store) error {
 		return err
 	}
 	if state == nil {
-		state, err = m.createInitialState(legacy)
+		state, err = m.createInitialState()
 		if err != nil {
 			return err
 		}
@@ -315,41 +318,17 @@ func (m *ManagerV2) Close() error {
 	return err
 }
 
-func (m *ManagerV2) createInitialState(legacy Store) (*StateV2, error) {
+func (m *ManagerV2) createInitialState() (*StateV2, error) {
 	id, err := uuid.NewV4()
 	if err != nil {
 		return nil, err
 	}
 	created := StateV2{NodeID: m.nodeID, Epoch: id.String()}
 	created.Access = AccessSnapshot{NodeID: m.nodeID, Epoch: created.Epoch, Clients: []Grant{}}
-	if err := m.importLegacyState(legacy, &created); err != nil {
-		return nil, err
-	}
 	if err := m.store.SaveV2(created); err != nil {
 		return nil, err
 	}
 	return &created, nil
-}
-
-func (m *ManagerV2) importLegacyState(legacy Store, created *StateV2) error {
-	if legacy != nil {
-		d, err := legacy.Load()
-		if err != nil {
-			return err
-		}
-		if d != nil {
-			if d.NodeID != m.nodeID {
-				return ErrConflict
-			}
-			s, a, err := ImportV1(*d, created.Epoch)
-			if err != nil {
-				return err
-			}
-			created.Spec = &s
-			created.Access = a
-		}
-	}
-	return nil
 }
 
 func (m *ManagerV2) validateRestoredState(state *StateV2) error {

@@ -36,10 +36,9 @@ type Client struct {
 	// Wire projection of client_node_inbounds, deliberately outside clients.inbounds.
 	// Nil on input means omitted; an explicit [] clears only remote assignments.
 	NodeInbounds json.RawMessage `json:"nodeinbounds,omitempty" form:"nodeinbounds" gorm:"-"`
-	// Whole-node assignments are independent of local and legacy inbound IDs.
-	Nodes                 json.RawMessage `json:"nodes,omitempty" form:"nodes" gorm:"-"`
-	NodeMigrationRequired bool            `json:"node_migration_required,omitempty" gorm:"-"`
-	NodeAccessChanged     bool            `json:"-" gorm:"-"`
+	// Whole-node assignments are independent of local and remote inbound IDs.
+	Nodes             json.RawMessage `json:"nodes,omitempty" form:"nodes" gorm:"-"`
+	NodeAccessChanged bool            `json:"-" gorm:"-"`
 	// Persist access changes even if disable/re-enable or unassign/reassign
 	// happens between controller polls. A new epoch closes old node sessions.
 	NodeGeneration uint64          `json:"-" gorm:"default:0;not null"`

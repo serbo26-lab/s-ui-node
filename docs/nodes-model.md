@@ -1,12 +1,5 @@
 # Whole-node assignment and versioned templates
 
-R1 adds the data/API foundation. R2 adds agent protocol v2, independent access
-delivery and explicit activation of prepared migrations. R3 adds live schema 1
-templates and automatic rollout. R4 adds domain/certificate resources; R5 adds
-the [node interface](nodes-interface.md). Installer integration follows separately.
-Existing nodes stay in legacy assignment mode until a
-controlled transition.
-
 ## Client assignments
 
 `inbounds` still contains local inbound IDs. `nodes` contains logical Node IDs:
@@ -26,39 +19,9 @@ controlled transition.
 - Changes enqueue durable access intent. The v2 access worker runs independently
   of structural compilation and provisioning jobs.
 
-`nodeinbounds` remains the exact legacy assignment field for legacy nodes. On
-converted nodes it is a read-only applied projection, not a way to select
-protocols. A matching unchanged echo can be ignored; conflicting input is
-rejected. New editors should send editable `nodes` and omit `nodeinbounds`.
-
-Clients with unresolved legacy assignments return
-`node_migration_required: true`. Their local edits and ordinary disable still
-work; a `nodes` write requires preparation of the legacy transition first.
-
-## Migration API
-
-Cookie API and token APIv2 expose the same operations:
-
-- `GET node-migration?id=<node-id>`: read-only inventory and source digest.
-- `POST node-migration`, form field `data`: JSON with `node_id`,
-  `report_digest` and optional `decisions`.
-
-A decision has `client_id` and `action`, either `assign_node` or `remove`.
-Complete existing selections can be prepared automatically; partial selections,
-including unselected disabled connections, require an explicit decision.
-
-Preparation writes pending grants and a migration record, and sets the node to
-`prepared`. Existing exact bindings and live snapshots remain authoritative.
-A changed source digest rejects stale preparation, and retrying the same
-preparation is idempotent.
-
-R2 adds `POST node-migration-activate` with the same form field and `node_id` /
-`report_digest`. It requires a prepared migration, a pinned v2 agent and a fresh
-source report. Missing protocol credentials are generated without replacing
-existing values. The durable `activating` state becomes `node` only after the
-current access snapshot is acknowledged by a running agent. Network failures
-leave activation pending for the access worker to retry. Preparation by itself
-never activates grants, and a v1 agent cannot activate them.
+`nodeinbounds` reports applied remote listener IDs. A matching unchanged echo
+is accepted for reads followed by edits. Node selection is written through
+`nodes`; the panel's `inbounds` still identifies local listeners.
 
 ## Agent protocol v2
 
@@ -91,28 +54,11 @@ and current client permissions. Pending grants and credentials are withheld.
 A confirmed stopped core is hidden until running is confirmed again; a control
 timeout does not undo the last known stop.
 
-### Upgrade boundary
-
-Upgrade the panel controller before an agent. The new controller still handles
-v1 nodes; the new agent rejects old `/v1/deployment` writers. At first start,
-v2 imports `last-good.json` from the same state directory with exact listener
-scope, credentials and expiry. It writes `state-v2.json`; once that file exists,
-corruption is an error and never triggers fallback to the old v1 ACL.
-
-Back up the complete agent state directory, including `state-v2.json` and
-certificate files. Replacing the OS without the v2 state changes the epoch and
-requires explicit [installer recovery](node-installer.md). Recovery and IP
-handover use pinned SSH and a fresh bootstrap receipt; automatic downgrade
-to a prior agent remains unsupported.
-Do not downgrade to the old agent against an obsolete `last-good.json`.
-
 ## Template versions
 
-`api/save` with object `nodetemplates` retains its legacy format. Saves now keep
-append-only snapshots, including the original state before the first edit.
-
-For schema 1, submit `name` and a `spec` object; edits also require `id` and
-`expected_version`. A spec contains:
+`api/save` with object `nodetemplates` expects `kind: "inbound"`, `name`, and
+a `spec` with one listener. An edit requires `id` and `expected_version`.
+Each saved configuration has an immutable version. A spec contains:
 
 - `schema_version: 1`, `config: {}` and an `entries` array;
 - each entry's persistent `connection_key`, `name`, `protocol`, `enable`,
@@ -137,7 +83,6 @@ runtime resources. Unknown sources and overlapping overrides are errors.
 - `GET node-template-history?id=<template-id>` returns version metadata.
 - `GET node-template-version?id=<template-id>&version=<version>` returns the
   schema 1 spec. Omit `version` for the latest version.
-- Legacy snapshot payloads are not returned by these endpoints.
 
 ## Live template delivery
 
@@ -146,22 +91,17 @@ Schema 1 templates are shared by default. A private template has `scope:
 retain lineage and connection keys, while runtime material belongs to each node.
 An origin template cannot be deleted while copies reference it.
 
-Use `api/save` (or token APIv2) with object `nodes`, action `applytemplate`, and
-`data` containing `id` and `template_id`. Live binding requires an agent v2 node
-already converted to whole-node assignment. Replacing existing connections also
-requires `confirm_replace: true`. Unrelated templates with colliding connection
-keys require explicit mapping and are rejected by this API; matching names,
-protocols or positions never establish identity. Legacy schema 0 remains a copy
-workflow and does not acquire automatic rollout implicitly.
+Use object `nodes`, action `selectinbounds`, and data containing `id`,
+`expected_version` (the node settings version) and `inbound_template_ids`.
+An empty list removes every listener after the agent acknowledges the change.
 
 Saving a schema 1 version transactionally updates each linked node's target and
 queues durable structural work. Binding a node reads the latest version inside
 its transaction. Per-node `template_target_version`,
 `materialized_template_version` and `applied_template_version` distinguish saved,
 resolved and acknowledged state. Runtime revisions remain independent from
-template versions. The model 2 [installer](node-installer.md) supports live
-nodes; the old installer rejects them instead of overwriting their selection
-with protocol presets.
+template versions. The [installer](node-installer.md) uses the same template
+catalog.
 
 Materialization resolves node parameters and explicit overrides, allocates
 stable REALITY material and optional ports, and persists it before delivery.
@@ -195,23 +135,19 @@ Additional `api/save` actions (same cookie/token authorization as ordinary save)
   `operation: "set" | "remove"`, and `source` for set. Explicit equal values
   remain overrides. Arrays are replaced as a whole. Removed-key overrides are
   archived; reactivating one requires an explicit new override write.
-- Object `nodes`, action `privatecopy` or `sharedcopy`: `id`, `name`,
-  `expected_version` equal to `settings_version`. Copies source references and
-  connections, then binds this node to the copy. It does not export resolved
-  domains, server keys, credentials or node overrides into shared content.
 - Object `nodetemplates`, action `restoreversion`: `id`, historical `version`
   and current template `expected_version`. Creates a new current version from
   schema 1 history and automatically queues linked nodes.
 
-Direct config/inbound writes and detaching to template ID zero are rejected for
-live nodes; use overrides or a private copy. Changes to node name/address/enable
-still work through ordinary save and queue structural work.
+Use template selection and overrides to change a node deployment. The ordinary
+node edit can change its name or enabled state. Use the installer to replace its
+address or restore SSH access.
 
 ## Persistence
 
 The shared database backup registry includes whole-node grants, template
 versions, explicit overrides, encrypted generated-material storage, durable
-tasks, immutable deployments, port reservations, access snapshots and migration records. Access payloads contain client
+tasks, immutable deployments, port reservations, and access snapshots. Access payloads contain client
 credentials and are excluded from ordinary bundle JSON. Installation secrets
 still require the external panel state key; a database download alone is not a
 full recovery. Deleting a disabled, confirmed-revoked node removes its grants

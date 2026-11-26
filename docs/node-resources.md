@@ -1,6 +1,6 @@
-# Node domains and certificates (R4)
+# Node domains and certificates
 
-Resources apply to explicitly converted protocol-v2 nodes with whole-node assignments. They are independent of structural and access revisions. The legacy installer is not the writer for live templates; onboarding and OS/IP recovery integration remain separate work.
+Domain and certificate resources have their own revisions. SSH onboarding and recovery use the same resource settings as template application.
 
 ## API
 

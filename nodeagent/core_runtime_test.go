@@ -1,7 +1,6 @@
 package nodeagent
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"net"
@@ -25,31 +24,22 @@ func TestCoreHotUsersAndFailedReplacementKeepWorkingListener(t *testing.T) {
 	}
 	port := l.Addr().(*net.TCPAddr).Port
 	l.Close()
-	d := deployment(1, 0)
-	var config map[string]interface{}
-	if err := json.Unmarshal(d.Config, &config); err != nil {
-		t.Fatal(err)
-	}
-	inbound := config["inbounds"].([]interface{})[0].(map[string]interface{})
-	inbound["listen_port"] = port
-	d.Config, _ = json.Marshal(config)
 	r := NewCoreRuntime()
-	m := NewManager(7, FileStore{Directory: t.TempDir()}, r)
+	m := NewManagerV2(7, FileStoreV2{Directory: t.TempDir()}, r)
 	defer m.Close()
-	if err := m.Apply(d); err != nil {
-		t.Fatal(err)
-	}
+	requireNodeTestSuccess(t, m.Restore())
+	spec, grant := vlessState(m.Status().Epoch, port)
+	requireNodeTestSuccess(t, m.ApplyAccess(grant))
+	requireNodeTestSuccess(t, m.ApplyStructure(spec))
 	box := r.core.GetInstance()
 	providerContext := r.core.GetCtx()
 	oldSession, peer := net.Pipe()
 	defer peer.Close()
-	tracked := box.SessionTracker().RoutedConnection(context.Background(), oldSession, adapter.InboundContext{Inbound: "vpn", User: "client/4"}, nil, nil)
+	tracked := box.SessionTracker().RoutedConnection(context.Background(), oldSession, adapter.InboundContext{Inbound: "vpn", User: "client/1"}, nil, nil)
 	defer tracked.Close()
-	d.Revision = 2
-	d.Config = bytes.Replace(d.Config, []byte("11111111-1111-4111-8111-111111111111"), []byte("22222222-2222-4222-8222-222222222222"), 1)
-	if err := m.Apply(d); err != nil {
-		t.Fatal(err)
-	}
+	grant.Revision++
+	grant.Clients[0].Credentials["vless"] = json.RawMessage(`{"uuid":"22222222-2222-4222-8222-222222222222"}`)
+	requireNodeTestSuccess(t, m.ApplyAccess(grant))
 	if r.core.GetInstance() != box {
 		t.Fatal("user update restarted whole core")
 	}
@@ -64,13 +54,12 @@ func TestCoreHotUsersAndFailedReplacementKeepWorkingListener(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer busy.Close()
-	inbound["listen_port"] = busy.Addr().(*net.TCPAddr).Port
-	d.Revision = 3
-	d.Config, _ = json.Marshal(config)
-	if err := m.Apply(d); err == nil {
+	rejected, _ := vlessState(m.Status().Epoch, busy.Addr().(*net.TCPAddr).Port)
+	rejected.Revision++
+	if err := m.ApplyStructure(rejected); err == nil {
 		t.Fatal("occupied listener was accepted")
 	}
-	if !m.Status().Running || m.Status().Revision != 2 {
+	if !m.Status().Running || m.Status().SpecRevision != 1 {
 		t.Fatalf("rollback lost running state: %+v", m.Status())
 	}
 	if providerContext.Err() == nil {

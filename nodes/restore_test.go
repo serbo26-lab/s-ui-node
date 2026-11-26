@@ -17,11 +17,9 @@ func TestExplicitRestoreResumesAccessAboveAgentCheckpoint(t *testing.T) {
 	db, node, client := fixture(t)
 	runtime := &panelSafeRuntime{}
 	manager := nodeagent.NewManagerV2(uint64(node.Id), nodeagent.FileStoreV2{Directory: t.TempDir()}, runtime)
-	requireNodeTestSuccess(t, manager.Restore(nil))
+	requireNodeTestSuccess(t, manager.Restore())
 	defer manager.Close()
-	server, identity := controlHandlerServer(t, nodeagent.HandlerV2(manager))
-	node.Address, node.ControlCA, node.ControlCertificate, node.ControlKey = server.URL, identity.CA, identity.Certificate, identity.Key
-	requireNodeTestSuccess(t, db.Save(&node).Error)
+	attachFixtureAgent(t, db, &node, manager)
 	requireNodeTestSuccess(t, Reconcile(context.Background(), node.Id))
 	var archived model.NodeAccessState
 	requireNodeTestSuccess(t, db.First(&archived, whereNodeID, node.Id).Error)

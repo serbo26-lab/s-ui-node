@@ -88,8 +88,7 @@ func renewControlIdentities(ctx context.Context, now time.Time) {
 			return
 		}
 		var node model.Node
-		if db.First(&node, install.NodeId).Error != nil || node.AgentProtocol != 2 || node.ControlEpoch == "" || node.TemplateTargetVersion == 0 ||
-			node.AssignmentMode != model.NodeAssignmentWhole || jobRunning(node.Id) || controlIdentityValid(node, install, now) {
+		if db.First(&node, install.NodeId).Error != nil || !managedNodeModel(node) || node.ControlEpoch == "" || jobRunning(node.Id) || controlIdentityValid(node, install, now) {
 			continue
 		}
 		job, created, err := queueControlRenewal(node, install, now)

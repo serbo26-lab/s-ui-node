@@ -57,9 +57,6 @@ func (a *APP) Init() error {
 }
 
 func (a *APP) Start() error {
-	if err := nodes.UpgradeInboundCatalog(database.GetDB()); err != nil {
-		return err
-	}
 	loc, err := a.SettingService.GetTimeLocation()
 	if err != nil {
 		return err

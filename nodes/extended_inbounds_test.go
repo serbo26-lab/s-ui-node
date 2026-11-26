@@ -10,7 +10,7 @@ import (
 	"github.com/alireza0/s-ui/nodeagent"
 )
 
-func TestExtendedNodeProtocolsKeepLegacyAccessAndCredentials(t *testing.T) {
+func TestExtendedNodeProtocolsKeepExistingAccessAndCredentials(t *testing.T) {
 	f := liveSetup(t, 1)
 	node := f.nodes[0]
 	status := f.managers[0].Status()
@@ -23,7 +23,7 @@ func TestExtendedNodeProtocolsKeepLegacyAccessAndCredentials(t *testing.T) {
 	}
 	oldAccess, err := compileAccess(f.db, node, false, false)
 	if err != nil || len(oldAccess.Clients) != 1 {
-		t.Fatalf("legacy access unavailable: %v", err)
+		t.Fatalf("baseline access unavailable: %v", err)
 	}
 	node.AgentExtendedInbounds = true
 	if !extendedInboundsAvailable(f.db, node, status) {

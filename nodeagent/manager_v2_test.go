@@ -4,8 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
-	"os"
-	"path/filepath"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -29,7 +28,6 @@ func (r *safeFake) Validate(b []byte) error {
 	}
 	return nil
 }
-func (r *safeFake) Apply(b []byte) error { return r.ApplySafe(b) }
 func (r *safeFake) ApplySafe(b []byte) error {
 	if bytes.Contains(b, []byte(`"slow"`)) && r.entered != nil {
 		r.once.Do(func() { close(r.entered) })
@@ -65,13 +63,10 @@ func v2Fixture(t *testing.T) (*ManagerV2, *safeFake, FileStoreV2, Structure, Acc
 	runtime := &safeFake{}
 	m := NewManagerV2(7, store, runtime)
 	m.clock = func() time.Time { return time.Unix(100, 0) }
-	if err := m.Restore(nil); err != nil {
+	if err := m.Restore(); err != nil {
 		t.Fatal(err)
 	}
-	s, a, err := ImportV1(deployment(1, 0), m.Status().Epoch)
-	if err != nil {
-		t.Fatal(err)
-	}
+	s, a := vlessState(m.Status().Epoch, 14443)
 	a.Revision = 1
 	if err := m.ApplyStructure(s); err != nil {
 		t.Fatal(err)
@@ -118,7 +113,7 @@ func TestV2RevokeIgnoresRejectedSpecAndSurvivesRestart(t *testing.T) {
 	_ = m.Close()
 	nextRuntime := &safeFake{}
 	next := NewManagerV2(7, store, nextRuntime)
-	if err := next.Restore(nil); err != nil {
+	if err := next.Restore(); err != nil {
 		t.Fatal(err)
 	}
 	if nextRuntime.hasUser() || !next.Status().Running {
@@ -144,7 +139,7 @@ func TestV2AbsoluteExpiryWhileOfflineAndAfterReboot(t *testing.T) {
 	next := NewManagerV2(7, store, nextRuntime)
 	next.clock = func() time.Time { return time.Unix(now, 0) }
 	defer next.Close()
-	if err := next.Restore(nil); err != nil || nextRuntime.hasUser() || !next.Status().Running {
+	if err := next.Restore(); err != nil || nextRuntime.hasUser() || !next.Status().Running {
 		t.Fatal("offline reboot resurrected an expired client", err)
 	}
 }
@@ -169,7 +164,7 @@ func TestV2PersistsDenyBeforeRuntimeAndFailsClosed(t *testing.T) {
 	}
 	nextRuntime := &safeFake{}
 	next := NewManagerV2(7, store, nextRuntime)
-	if err := next.Restore(nil); err != nil || nextRuntime.hasUser() {
+	if err := next.Restore(); err != nil || nextRuntime.hasUser() {
 		t.Fatal("crash recovery lost deny", err)
 	}
 }
@@ -219,44 +214,6 @@ func TestV2AccessPreemptsBlockedStructuralStartup(t *testing.T) {
 	}
 }
 
-func TestV2ImportExpiryCorruptionAndReplay(t *testing.T) {
-	directory := t.TempDir()
-	legacy := FileStore{Directory: directory}
-	if err := legacy.Save(deployment(8, 110)); err != nil {
-		t.Fatal(err)
-	}
-	r := &safeFake{}
-	store := FileStoreV2{Directory: directory}
-	m := NewManagerV2(7, store, r)
-	m.clock = func() time.Time { return time.Unix(120, 0) }
-	if err := m.Restore(legacy); err != nil {
-		t.Fatal(err)
-	}
-	if r.hasUser() || m.Status().SpecRevision != 8 {
-		t.Fatal("legacy import revived expired client or changed revision")
-	}
-	a := AccessSnapshot{NodeID: 7, Epoch: m.Status().Epoch, Revision: 1, Clients: []Grant{}}
-	if err := m.ApplyAccess(a); err != nil {
-		t.Fatal(err)
-	}
-	wrong := a
-	wrong.Epoch = "different-epoch"
-	if !errors.Is(m.ApplyAccess(wrong), ErrConflict) {
-		t.Fatal("wrong epoch accepted")
-	}
-	if err := m.ApplyAccess(a); err != nil {
-		t.Fatal("retry failed", err)
-	}
-	if err := os.WriteFile(filepath.Join(directory, "state-v2.json"), []byte("corrupt"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	nextRuntime := &safeFake{}
-	next := NewManagerV2(7, store, nextRuntime)
-	if err := next.Restore(legacy); err == nil || nextRuntime.Running() {
-		t.Fatal("corrupt v2 state fell back to legacy permissions")
-	}
-}
-
 type failingV2Checkpoint struct {
 	FileStoreV2
 	fail bool
@@ -273,13 +230,10 @@ func TestV2CheckpointFailureDoesNotRollBackDurableDeny(t *testing.T) {
 	store := &failingV2Checkpoint{FileStoreV2: FileStoreV2{Directory: t.TempDir()}}
 	runtime := &safeFake{}
 	m := NewManagerV2(7, store, runtime)
-	if err := m.Restore(nil); err != nil {
+	if err := m.Restore(); err != nil {
 		t.Fatal(err)
 	}
-	s, a, err := ImportV1(deployment(1, 0), m.Status().Epoch)
-	if err != nil {
-		t.Fatal(err)
-	}
+	s, a := vlessState(m.Status().Epoch, 14443)
 	a.Revision = 1
 	if err := m.ApplyStructure(s); err != nil {
 		t.Fatal(err)
@@ -303,10 +257,16 @@ func TestV2CheckpointFailureDoesNotRollBackDurableDeny(t *testing.T) {
 	nextRuntime := &safeFake{}
 	next := NewManagerV2(7, store.FileStoreV2, nextRuntime)
 	defer next.Close()
-	if err := next.Restore(nil); err != nil {
+	if err := next.Restore(); err != nil {
 		t.Fatal(err)
 	}
 	if nextRuntime.hasUser() {
 		t.Fatal("restart restored pre-revoke permission")
 	}
+}
+
+func vlessState(epoch string, port int) (Structure, AccessSnapshot) {
+	s := Structure{NodeID: 7, Epoch: epoch, Revision: 1, Config: json.RawMessage(fmt.Sprintf(`{"inbounds":[{"type":"vless","tag":"vpn","listen":"127.0.0.1","listen_port":%d}],"outbounds":[{"type":"direct","tag":"direct"}]}`, port))}
+	a := AccessSnapshot{NodeID: 7, Epoch: epoch, Revision: 1, Clients: []Grant{{Name: "client/1", All: true, Credentials: map[string]json.RawMessage{"vless": json.RawMessage(`{"uuid":"11111111-1111-4111-8111-111111111111"}`)}}}}
+	return s, a
 }

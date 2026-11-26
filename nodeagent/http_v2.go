@@ -12,12 +12,6 @@ func HandlerV2(manager *ManagerV2) http.Handler {
 	status := func(w http.ResponseWriter, r *http.Request) { statusV2(manager, w, r) }
 	mux.HandleFunc("/v2/status", status)
 	mux.HandleFunc("/v2/certificate", func(w http.ResponseWriter, r *http.Request) { certificateV2(manager, w, r) })
-	// Old controllers see protocol=2 and cannot overwrite the independent ACL.
-	mux.HandleFunc("/v1/status", status)
-	mux.HandleFunc("/v1/deployment", func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "protocol v2 required", http.StatusConflict)
-	})
-
 	mux.HandleFunc("/v2/access", func(w http.ResponseWriter, r *http.Request) { writeStateV2(manager, w, r, true) })
 	mux.HandleFunc("/v2/spec", func(w http.ResponseWriter, r *http.Request) { writeStateV2(manager, w, r, false) })
 	return mux

@@ -18,29 +18,24 @@ func TestStructureWaitsForBootstrapAccessAfterRestart(t *testing.T) {
 	db, node, _ := fixture(t)
 	directory := filepath.Join(t.TempDir(), "agent")
 	manager := nodeagent.NewManagerV2(uint64(node.Id), nodeagent.FileStoreV2{Directory: directory}, &panelSafeRuntime{})
-	if err := manager.Restore(nil); err != nil {
+	if err := manager.Restore(); err != nil {
 		t.Fatal(err)
 	}
-	server, identity := controlHandlerServer(t, nodeagent.HandlerV2(manager))
-	node.Address, node.ControlCA, node.ControlCertificate, node.ControlKey = server.URL, identity.CA, identity.Certificate, identity.Key
-	if err := db.Save(&node).Error; err != nil {
-		t.Fatal(err)
-	}
+	attachFixtureAgent(t, db, &node, manager)
 	if err := Reconcile(t.Context(), node.Id); err != nil {
 		t.Fatal(err)
 	}
-	server.Close()
 	if err := manager.Close(); err != nil {
 		t.Fatal(err)
 	}
 
 	manager = nodeagent.NewManagerV2(uint64(node.Id), nodeagent.FileStoreV2{Directory: directory}, &panelSafeRuntime{})
 	manager.RequireBootstrap("new-installation-operation")
-	if err := manager.Restore(nil); err != nil {
+	if err := manager.Restore(); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = manager.Close() })
-	server, identity = controlHandlerServer(t, nodeagent.HandlerV2(manager))
+	server, identity := controlHandlerServer(t, nodeagent.HandlerV2(manager))
 	if err := db.First(&node, node.Id).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -81,10 +76,11 @@ func TestBootstrapRejectionBetweenStatusAndPutIsRetryable(t *testing.T) {
 	db, node, _ := fixture(t)
 	manager := nodeagent.NewManagerV2(uint64(node.Id), nodeagent.FileStoreV2{Directory: t.TempDir()}, &panelSafeRuntime{})
 	manager.RequireBootstrap("new-installation-operation")
-	if err := manager.Restore(nil); err != nil {
+	if err := manager.Restore(); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = manager.Close() })
+	attachFixtureAgent(t, db, &node, manager)
 	var reads, writes atomic.Int32
 	handler := nodeagent.HandlerV2(manager)
 	server, identity := controlHandlerServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -22,7 +22,7 @@ func TestCanonicalSystemdStateRootAllowsPrivateCertificateCheckpoint(t *testing.
 		t.Fatal("not canonical", directory, err)
 	}
 	manager := NewManagerV2(7, FileStoreV2{Directory: directory}, &safeFake{})
-	if err = manager.Restore(nil); err != nil {
+	if err = manager.Restore(); err != nil {
 		t.Fatal(err)
 	}
 	defer manager.Close()

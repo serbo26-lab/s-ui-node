@@ -14,38 +14,6 @@ const (
 	deploymentTemplate = "deployment"
 )
 
-// The catalog edits one inbound at a time. Each deployment still uses the
-// existing immutable template version, so agents and subscriptions have one
-// atomic configuration to acknowledge.
-func UpgradeInboundCatalog(db *gorm.DB) error {
-	return db.Transaction(func(tx *gorm.DB) error {
-		var templates []model.NodeTemplate
-		if err := tx.Where("schema_version = 1 AND kind = ''").Order("id").Find(&templates).Error; err != nil {
-			return err
-		}
-		for _, template := range templates {
-			if template.Scope == "private" {
-				var used int64
-				if err := tx.Model(&model.Node{}).Where(whereTemplateID, template.Id).Count(&used).Error; err != nil {
-					return err
-				}
-				if used == 0 {
-					// Preserve the old private deployment history without making
-					// catalog entries that its owner cannot currently use.
-					if err := tx.Model(&template).Update("kind", deploymentTemplate).Error; err != nil {
-						return err
-					}
-					continue
-				}
-			}
-			if err := splitDeploymentTemplate(tx, template); err != nil {
-				return err
-			}
-		}
-		return detachOrphanedPrivateDeployments(tx)
-	})
-}
-
 // A private deployment with neither an owner nor a node using it is historical.
 // Keep its saved versions and lineage, but release its current catalog links.
 func detachOrphanedPrivateDeployments(tx *gorm.DB) error {
@@ -60,36 +28,6 @@ func detachOrphanedPrivateDeployments(tx *gorm.DB) error {
 
 func templateSpec(tx *gorm.DB, template model.NodeTemplate) (TemplateSpec, error) {
 	return liveVersion(tx, model.Node{TemplateId: template.Id, TemplateTargetVersion: template.Version})
-}
-
-func splitDeploymentTemplate(tx *gorm.DB, template model.NodeTemplate) error {
-	spec, err := templateSpec(tx, template)
-	if err != nil {
-		return err
-	}
-	for position, entry := range spec.Entries {
-		inbound := model.NodeTemplate{
-			Name: entry.Name, Kind: inboundTemplate, Protocol: entry.Protocol,
-			Scope: template.Scope, OwnerNodeId: template.OwnerNodeId, SchemaVersion: 1,
-			Config: json.RawMessage("{}"), Blueprints: json.RawMessage("[]"), Protocols: json.RawMessage("[]"),
-		}
-		if err := tx.Create(&inbound).Error; err != nil {
-			return err
-		}
-		payload, err := json.Marshal(TemplateSpec{SchemaVersion: 1, Config: json.RawMessage("{}"), Entries: []SpecEntry{entry}})
-		if err != nil {
-			return err
-		}
-		if err := appendTemplateVersion(tx, &inbound, model.NodeTemplate{}, payload); err != nil {
-			return err
-		}
-		if err := tx.Create(&model.NodeTemplateMember{TemplateId: template.Id, InboundId: inbound.Id, Position: position}).Error; err != nil {
-			return err
-		}
-	}
-	// Keep the template identity, versions and connection keys from the
-	// installed database. Migration alone need not queue a deployment.
-	return tx.Model(&template).Update("kind", deploymentTemplate).Error
 }
 
 func catalogMembers(tx *gorm.DB, templateID uint) ([]uint, error) {
@@ -154,6 +92,42 @@ func createDeploymentTemplate(tx *gorm.DB, node model.Node) (model.NodeTemplate,
 	return template, err
 }
 
+func createProvisionTemplate(tx *gorm.DB, node model.Node, ids []uint, protocols []string) (model.NodeTemplate, error) {
+	entries, err := selectedInboundEntries(tx, ids, 0)
+	if err != nil {
+		return model.NodeTemplate{}, err
+	}
+	if len(ids) == 0 {
+		for _, kind := range protocols {
+			entry, err := defaultLiveProvisionEntry(kind)
+			if err != nil {
+				return model.NodeTemplate{}, err
+			}
+			preset := model.NodeTemplate{Name: entry.Name, Kind: inboundTemplate, Scope: "private", OwnerNodeId: node.Id}
+			body, err := json.Marshal(map[string]any{"spec": TemplateSpec{SchemaVersion: 1, Config: json.RawMessage(`{}`), Entries: []SpecEntry{entry}}})
+			if err != nil {
+				return model.NodeTemplate{}, err
+			}
+			if err := saveVersionedTemplate(tx, &preset, model.NodeTemplate{}, body); err != nil {
+				return model.NodeTemplate{}, err
+			}
+			ids = append(ids, preset.Id)
+			entries = append(entries, entry)
+		}
+	}
+	template, err := createDeploymentTemplate(tx, node)
+	if err != nil {
+		return template, err
+	}
+	spec := TemplateSpec{
+		SchemaVersion: 1,
+		Config:        json.RawMessage(`{"outbounds":[{"type":"direct","tag":"direct"}],"route":{"final":"direct"}}`),
+		Entries:       entries,
+	}
+	err = writeCatalogSelection(tx, &template, ids, spec)
+	return template, err
+}
+
 func writeCatalogSelection(tx *gorm.DB, template *model.NodeTemplate, ids []uint, spec TemplateSpec) error {
 	if err := tx.Where(whereTemplateID, template.Id).Delete(&model.NodeTemplateMember{}).Error; err != nil {
 		return err
@@ -167,8 +141,8 @@ func writeCatalogSelection(tx *gorm.DB, template *model.NodeTemplate, ids []uint
 }
 
 func selectNodeInbounds(tx *gorm.DB, node *model.Node, ids []uint, expected *uint64) error {
-	if node.TemplateTargetVersion == 0 || node.AgentProtocol != 2 || node.AssignmentMode != model.NodeAssignmentWhole {
-		return errors.New("live_template_requires_converted_v2_node")
+	if !managedNodeModel(*node) {
+		return errors.New("unsupported_node_model")
 	}
 	if expected == nil || node.SettingsVersion != *expected {
 		return errors.New("node_settings_version_conflict")

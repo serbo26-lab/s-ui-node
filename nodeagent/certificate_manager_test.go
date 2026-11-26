@@ -75,7 +75,7 @@ func TestResourceOfflineHTTPRenewalKeepsAccessIndependentAndSurvivesRestart(t *t
 	state := t.TempDir()
 	runtime := NewCoreRuntimeWithState(state)
 	manager := NewManagerV2(7, FileStoreV2{Directory: state}, runtime)
-	if err := manager.Restore(nil); err != nil {
+	if err := manager.Restore(); err != nil {
 		t.Fatal(err)
 	}
 	defer manager.Close()
@@ -171,7 +171,7 @@ func TestResourceOfflineHTTPRenewalKeepsAccessIndependentAndSurvivesRestart(t *t
 	}
 	next := NewManagerV2(7, FileStoreV2{Directory: state}, NewCoreRuntimeWithState(state))
 	defer next.Close()
-	if err := next.Restore(nil); err != nil {
+	if err := next.Restore(); err != nil {
 		t.Fatal(err)
 	}
 	assertResourceTLS(t, port, 2, roots)

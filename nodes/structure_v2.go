@@ -31,7 +31,7 @@ func prepareStructure(db *gorm.DB, node model.Node, status nodeagent.StatusV2, o
 		if err := materializeTemplate(tx, &current, occupied); err != nil {
 			return err
 		}
-		fresh, err := compileNode(tx, current, false)
+		fresh, err := Compile(tx, current)
 		if err != nil {
 			return err
 		}
@@ -192,8 +192,7 @@ func observeStructureTransaction(tx *gorm.DB, node model.Node, status nodeagent.
 	if spec.Digest() != status.SpecDigest {
 		return errors.New("structural_observation_digest_mismatch")
 	}
-	legacy := nodeagent.Status{NodeID: status.NodeID, Protocol: 2, Revision: status.SpecRevision, Running: true, Certificates: status.Certificates}
-	updates := map[string]interface{}{"applied_revision": status.SpecRevision, "applied_snapshot": deployment.Snapshot, "applied_template_version": snapshot.TemplateVersion, "last_seen": time.Now().Unix(), "tls_status": certificateReport(legacy)}
+	updates := map[string]interface{}{"applied_revision": status.SpecRevision, "applied_snapshot": deployment.Snapshot, "applied_template_version": snapshot.TemplateVersion, "last_seen": time.Now().Unix(), "tls_status": certificateReport(status.SpecRevision, status.Certificates)}
 	var current model.Node
 	if err := tx.First(&current, node.Id).Error; err != nil {
 		return err

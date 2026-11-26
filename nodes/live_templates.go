@@ -3,7 +3,6 @@ package nodes
 import (
 	"encoding/json"
 	"errors"
-	"strings"
 	"time"
 
 	"github.com/alireza0/s-ui/database"
@@ -54,7 +53,7 @@ func templateRoot(tx *gorm.DB, id uint) (uint, error) {
 
 func bindLiveTemplate(tx *gorm.DB, node *model.Node, template model.NodeTemplate, replace bool) error {
 	if node.AgentProtocol != 2 || node.AssignmentMode != model.NodeAssignmentWhole {
-		return errors.New("live_template_requires_converted_v2_node")
+		return errors.New("unsupported_node_model")
 	}
 	if template.Scope == "private" && template.OwnerNodeId != node.Id {
 		return errors.New("private_template_belongs_to_another_node")
@@ -98,7 +97,6 @@ func liveVersion(tx *gorm.DB, node model.Node) (TemplateSpec, error) {
 
 type liveActionRequest struct {
 	Id              uint           `json:"id"`
-	Name            string         `json:"name"`
 	Version         uint64         `json:"version"`
 	ExpectedVersion uint64         `json:"expected_version"`
 	Overrides       []SpecOverride `json:"overrides"`
@@ -116,8 +114,8 @@ func saveLiveAction(tx *gorm.DB, object, action string, data json.RawMessage, ac
 		if err := restoreLiveTemplateVersion(tx, request); err != nil {
 			return err
 		}
-	} else if object == "nodes" {
-		if err := saveLiveNodeAction(tx, action, request); err != nil {
+	} else if action == "setoverrides" && object == "nodes" {
+		if err := saveLiveNodeAction(tx, request); err != nil {
 			return err
 		}
 	} else {
@@ -171,7 +169,7 @@ func restoreLiveTemplateVersion(tx *gorm.DB, request liveActionRequest) error {
 		return err
 	}
 	if version.SchemaVersion != 1 {
-		return errors.New("legacy_version_cannot_be_live_restored")
+		return errors.New("unsupported_template_version")
 	}
 	body, _ := json.Marshal(map[string]interface{}{"spec": version.Payload, "expected_version": request.ExpectedVersion})
 	if _, err := saveVersionedTemplate(tx, &template, template, body); err != nil {
@@ -180,13 +178,13 @@ func restoreLiveTemplateVersion(tx *gorm.DB, request liveActionRequest) error {
 	return nil
 }
 
-func saveLiveNodeAction(tx *gorm.DB, action string, request liveActionRequest) error {
+func saveLiveNodeAction(tx *gorm.DB, request liveActionRequest) error {
 	var node model.Node
 	if err := tx.First(&node, request.Id).Error; err != nil {
 		return err
 	}
-	if node.TemplateTargetVersion == 0 {
-		return errors.New("node_has_no_live_template")
+	if !managedNodeModel(node) {
+		return errors.New("unsupported_node_model")
 	}
 	if node.SettingsVersion != request.ExpectedVersion {
 		return errors.New("node_settings_version_conflict")
@@ -195,22 +193,10 @@ func saveLiveNodeAction(tx *gorm.DB, action string, request liveActionRequest) e
 	if err != nil {
 		return err
 	}
-	switch action {
-	case "setoverrides":
-		if err := replaceLiveOverrides(tx, node.Id, spec, request.Overrides); err != nil {
-			return err
-		}
-	case "privatecopy", "sharedcopy":
-		if err := copyLiveNodeTemplate(tx, &node, spec, action, request.Name); err != nil {
-			return err
-		}
-	default:
-		return errors.New("invalid_live_template_action")
-	}
-	if err := queueNodeStructure(tx, &node); err != nil {
+	if err := replaceLiveOverrides(tx, node.Id, spec, request.Overrides); err != nil {
 		return err
 	}
-	return nil
+	return queueNodeStructure(tx, &node)
 }
 
 func replaceLiveOverrides(tx *gorm.DB, id uint, spec TemplateSpec, overrides []SpecOverride) error {
@@ -227,33 +213,6 @@ func replaceLiveOverrides(tx *gorm.DB, id uint, spec TemplateSpec, overrides []S
 		if err := tx.Save(&row).Error; err != nil {
 			return err
 		}
-	}
-	return nil
-}
-
-func copyLiveNodeTemplate(tx *gorm.DB, node *model.Node, spec TemplateSpec, action, name string) error {
-	var current model.NodeTemplate
-	if err := tx.First(&current, node.TemplateId).Error; err != nil {
-		return err
-	}
-	if current.Kind == deploymentTemplate {
-		return errors.New("edit_node_inbound_selection")
-	}
-	if strings.TrimSpace(name) == "" {
-		return errors.New("private_template_needs_name")
-	}
-	draft := model.NodeTemplate{Name: name, Scope: "private", OwnerNodeId: node.Id, ParentTemplateId: node.TemplateId}
-	if action == "sharedcopy" {
-		draft.Scope = "shared"
-		draft.OwnerNodeId = 0
-	}
-	body, _ := json.Marshal(map[string]interface{}{"spec": spec})
-	if _, err := saveVersionedTemplate(tx, &draft, model.NodeTemplate{}, body); err != nil {
-		return err
-	}
-	node.TemplateId, node.TemplateTargetVersion = draft.Id, draft.Version
-	if err := tx.Save(node).Error; err != nil {
-		return err
 	}
 	return nil
 }

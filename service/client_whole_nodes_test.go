@@ -12,7 +12,7 @@ import (
 func wholeNodeDB(t *testing.T) *gorm.DB {
 	t.Helper()
 	db := nodeAssignmentDB(t)
-	for _, node := range []model.Node{{Id: 1, Name: "whole", Enable: true, AssignmentMode: model.NodeAssignmentWhole}, {Id: 2, Name: "legacy", Enable: true, AssignmentMode: model.NodeAssignmentLegacy}} {
+	for _, node := range []model.Node{{Id: 1, Name: "whole", Enable: true, AssignmentMode: model.NodeAssignmentWhole, AgentProtocol: 2, TemplateTargetVersion: 1}, {Id: 2, Name: "legacy", Enable: true, AssignmentMode: "prototype"}} {
 		requireNodeTestSuccess(t, db.Create(&node).Error)
 	}
 	return db
@@ -50,11 +50,6 @@ func TestWholeNodesCredentialsOmissionAndGeneration(t *testing.T) {
 	client = (*loaded)[0]
 	if string(client.Config) != original {
 		t.Fatal("old-client edit changed the new protocol credentials")
-	}
-	var oldBindings int64
-	db.Model(&model.ClientNodeInbound{}).Count(&oldBindings)
-	if oldBindings != 0 {
-		t.Fatal("whole-node grant duplicated into per-inbound grants")
 	}
 	var task model.NodeTask
 	db.First(&task)
@@ -107,21 +102,7 @@ func TestWholeNodesInvalidAndLegacyInputsAreAtomic(t *testing.T) {
 	if count != 0 {
 		t.Fatal("invalid input committed client")
 	}
-	requireNodeTestSuccess(t, db.Model(&model.NodeInbound{}).Where("id = 1").Update("node_id", 2).Error)
-	requireNodeTestSuccess(t, saveWholeClient(t, db, "new", map[string]interface{}{"name": "legacy-client", "enable": true, "config": map[string]interface{}{}, "inbounds": []uint{21}, "nodeinbounds": []uint{1}, "links": []interface{}{}}))
-	loaded, _ := (&ClientService{}).Get("1")
-	client := (*loaded)[0]
-	if !client.NodeMigrationRequired || client.Nodes != nil {
-		t.Fatal("legacy migration state missing")
-	}
-	client.Nodes = json.RawMessage(`[1]`)
-	if err := saveWholeClient(t, db, "edit", client); err == nil || !strings.Contains(err.Error(), "migration_required") {
-		t.Fatal("partial legacy client silently converted", err)
-	}
-	db.Model(&model.ClientNode{}).Count(&count)
-	if count != 0 {
-		t.Fatal("failed conversion created node grants")
-	}
+
 }
 
 func TestWholeNodesBulkFailureAndDeletionQueue(t *testing.T) {

@@ -11,7 +11,7 @@ func TestInstallationBootstrapHoldsOldAccessUntilFreshRevoke(t *testing.T) {
 	runtime := &safeFake{}
 	next := NewManagerV2(7, store, runtime)
 	next.RequireBootstrap("operation-two")
-	if err := next.Restore(nil); err != nil {
+	if err := next.Restore(); err != nil {
 		t.Fatal(err)
 	}
 	defer next.Close()
@@ -35,7 +35,7 @@ func TestInstallationBootstrapHoldsOldAccessUntilFreshRevoke(t *testing.T) {
 	next.Close()
 	restarted := NewManagerV2(7, store, &safeFake{})
 	restarted.RequireBootstrap("operation-two")
-	if err := restarted.Restore(nil); err != nil {
+	if err := restarted.Restore(); err != nil {
 		t.Fatal(err)
 	}
 	defer restarted.Close()
@@ -49,7 +49,7 @@ func TestNewRegistrationBootstrapDoesNotInventOrResetAccess(t *testing.T) {
 	runtime := &safeFake{}
 	m := NewManagerV2(7, store, runtime)
 	m.RequireBootstrap("operation-new")
-	if err := m.Restore(nil); err != nil {
+	if err := m.Restore(); err != nil {
 		t.Fatal(err)
 	}
 	defer m.Close()
@@ -57,17 +57,14 @@ func TestNewRegistrationBootstrapDoesNotInventOrResetAccess(t *testing.T) {
 	if status.Epoch == "" || status.AccessRevision != 0 || status.Running || !status.BootstrapPending {
 		t.Fatal("invalid initial bootstrap")
 	}
-	_, a, err := ImportV1(deployment(1, 0), status.Epoch)
-	if err != nil {
-		t.Fatal(err)
-	}
+	_, a := vlessState(status.Epoch, 14443)
 	a.Revision = 100
 	a.Clients = []Grant{}
-	if err = m.ApplyAccess(a); err != nil {
+	if err := m.ApplyAccess(a); err != nil {
 		t.Fatal(err)
 	}
 	a.Revision = 99
-	if err = m.ApplyAccess(a); err == nil {
+	if err := m.ApplyAccess(a); err == nil {
 		t.Fatal("rollback accepted")
 	}
 }

@@ -22,11 +22,9 @@ var accessLocks sync.Map
 
 func effectiveUserName(tx *gorm.DB, node model.Node, client model.Client) string {
 	name := userName(client)
-	if node.AgentProtocol == 2 && (node.AssignmentMode == model.NodeAssignmentWhole || node.AssignmentMode == model.NodeAssignmentActivating) {
-		var grant model.ClientNode
-		if tx.First(&grant, "client_id = ? AND node_id = ? AND active = ?", client.Id, node.Id, true).Error == nil {
-			name += fmt.Sprintf("/n%d", grant.Generation)
-		}
+	var grant model.ClientNode
+	if tx.First(&grant, "client_id = ? AND node_id = ? AND active = ?", client.Id, node.Id, true).Error == nil {
+		name += fmt.Sprintf("/n%d", grant.Generation)
 	}
 	return name
 }
@@ -39,25 +37,12 @@ func compileAccess(tx *gorm.DB, node model.Node, extended, proxies bool) (nodeag
 		return a, nil
 	}
 	var clients []model.Client
-	tags := map[uint][]string{}
-	query := tx.Model(&model.Client{})
-	if node.AssignmentMode == model.NodeAssignmentWhole || node.AssignmentMode == model.NodeAssignmentActivating {
-		query = query.Joins("JOIN client_nodes AS binding ON binding.client_id = clients.id").Where("binding.node_id = ? AND binding.active = ?", node.Id, true)
-	} else {
-		query = query.Joins("JOIN client_node_inbounds AS binding ON binding.client_id = clients.id").Joins("JOIN node_inbounds AS ni ON ni.id = binding.node_inbound_id").Where("ni.node_id = ?", node.Id).Distinct("clients.*")
-		var bindings []model.ClientNodeInbound
-		if err := tx.Model(&model.ClientNodeInbound{}).Select("client_node_inbounds.*").Joins("JOIN node_inbounds AS ni ON ni.id = client_node_inbounds.node_inbound_id").Where("ni.node_id = ?", node.Id).Order("client_id, node_inbound_id").Find(&bindings).Error; err != nil {
-			return a, err
-		}
-		for _, binding := range bindings {
-			tags[binding.ClientId] = append(tags[binding.ClientId], serverTag(node.Id, binding.NodeInboundId))
-		}
-	}
+	query := tx.Model(&model.Client{}).Joins("JOIN client_nodes AS binding ON binding.client_id = clients.id").Where("binding.node_id = ? AND binding.active = ?", node.Id, true)
 	if err := query.Where("clients.enable = ?", true).Order("clients.id").Find(&clients).Error; err != nil {
 		return a, err
 	}
 	for _, client := range clients {
-		grant, include, err := compileClientGrant(tx, node, client, tags[client.Id], extended, proxies)
+		grant, include, err := compileClientGrant(tx, node, client, extended, proxies)
 		if err != nil {
 			return a, err
 		}
@@ -112,7 +97,7 @@ func ReconcileAccess(ctx context.Context, id uint) (failure error) {
 	if err := db.First(&node, id).Error; err != nil {
 		return err
 	}
-	if node.AgentProtocol != 2 {
+	if !managedNodeModel(node) {
 		return nil
 	}
 	if err := ensureAccessTask(db, id); err != nil {
@@ -218,7 +203,7 @@ func compileGrantCredentials(g *nodeagent.Grant, config map[string]json.RawMessa
 	return changed, nil
 }
 
-func compileClientGrant(tx *gorm.DB, node model.Node, client model.Client, tags []string, extended, proxies bool) (nodeagent.Grant, bool, error) {
+func compileClientGrant(tx *gorm.DB, node model.Node, client model.Client, extended, proxies bool) (nodeagent.Grant, bool, error) {
 	if client.Expiry > 0 && client.Expiry <= time.Now().Unix() {
 		return nodeagent.Grant{}, false, nil
 	}
@@ -226,7 +211,7 @@ func compileClientGrant(tx *gorm.DB, node model.Node, client model.Client, tags 
 	if json.Unmarshal(client.Config, &config) != nil {
 		return nodeagent.Grant{}, false, nil
 	} // corrupt clients fail closed individually
-	g := nodeagent.Grant{Name: effectiveUserName(tx, node, client), TrafficID: clientTrafficID(client), Expires: client.Expiry, All: (node.AssignmentMode == model.NodeAssignmentWhole || node.AssignmentMode == model.NodeAssignmentActivating), Tags: tags, Credentials: map[string]json.RawMessage{}}
+	g := nodeagent.Grant{Name: effectiveUserName(tx, node, client), TrafficID: clientTrafficID(client), Expires: client.Expiry, All: true, Credentials: map[string]json.RawMessage{}}
 	if config == nil {
 		config = map[string]json.RawMessage{}
 	}

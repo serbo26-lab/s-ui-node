@@ -31,18 +31,11 @@ func TestV2PanelRevokesWithInvalidDraftAndProvisionJob(t *testing.T) {
 	db, node, client := fixture(t)
 	runtime := &panelSafeRuntime{}
 	manager := nodeagent.NewManagerV2(uint64(node.Id), nodeagent.FileStoreV2{Directory: filepath.Join(t.TempDir(), "agent")}, runtime)
-	if err := manager.Restore(nil); err != nil {
+	if err := manager.Restore(); err != nil {
 		t.Fatal(err)
 	}
 	defer manager.Close()
-	server, identity := controlHandlerServer(t, nodeagent.HandlerV2(manager))
-	node.Address = server.URL
-	node.ControlCA = identity.CA
-	node.ControlCertificate = identity.Certificate
-	node.ControlKey = identity.Key
-	if err := db.Save(&node).Error; err != nil {
-		t.Fatal(err)
-	}
+	attachFixtureAgent(t, db, &node, manager)
 	if err := Reconcile(context.Background(), node.Id); err != nil {
 		t.Fatal(err)
 	}
@@ -53,7 +46,7 @@ func TestV2PanelRevokesWithInvalidDraftAndProvisionJob(t *testing.T) {
 		t.Fatal("confirmed v2 access not published", err)
 	}
 	before := manager.Status().SpecRevision
-	if err := db.Model(&model.Node{}).Where("id = ?", node.Id).Update("config", json.RawMessage(`{"log":`)).Error; err != nil {
+	if err := db.Model(&model.Node{}).Where("id = ?", node.Id).Update("template_target_version", 999).Error; err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Model(&model.Client{}).Where("id = ?", client.Id).Updates(map[string]interface{}{"enable": false, "node_generation": 1}).Error; err != nil {
@@ -87,16 +80,11 @@ func TestV2PanelRefusesOlderRestoredAccessState(t *testing.T) {
 	db, node, client := fixture(t)
 	runtime := &panelSafeRuntime{}
 	manager := nodeagent.NewManagerV2(uint64(node.Id), nodeagent.FileStoreV2{Directory: t.TempDir()}, runtime)
-	if err := manager.Restore(nil); err != nil {
+	if err := manager.Restore(); err != nil {
 		t.Fatal(err)
 	}
 	defer manager.Close()
-	server, identity := controlHandlerServer(t, nodeagent.HandlerV2(manager))
-	node.Address = server.URL
-	node.ControlCA = identity.CA
-	node.ControlCertificate = identity.Certificate
-	node.ControlKey = identity.Key
-	db.Save(&node)
+	attachFixtureAgent(t, db, &node, manager)
 	if err := Reconcile(context.Background(), node.Id); err != nil {
 		t.Fatal(err)
 	}
@@ -120,16 +108,11 @@ func TestV2PanelRefusesEqualRevisionWithDifferentIntentDigest(t *testing.T) {
 	db, node, _ := fixture(t)
 	runtime := &panelSafeRuntime{}
 	manager := nodeagent.NewManagerV2(uint64(node.Id), nodeagent.FileStoreV2{Directory: t.TempDir()}, runtime)
-	if err := manager.Restore(nil); err != nil {
+	if err := manager.Restore(); err != nil {
 		t.Fatal(err)
 	}
 	defer manager.Close()
-	server, identity := controlHandlerServer(t, nodeagent.HandlerV2(manager))
-	node.Address = server.URL
-	node.ControlCA = identity.CA
-	node.ControlCertificate = identity.Certificate
-	node.ControlKey = identity.Key
-	db.Save(&node)
+	attachFixtureAgent(t, db, &node, manager)
 	if err := Reconcile(context.Background(), node.Id); err != nil {
 		t.Fatal(err)
 	}
@@ -153,16 +136,11 @@ func TestV2PublicationHidesConfirmedStopAndReturnsAfterRecovery(t *testing.T) {
 	db, node, client := fixture(t)
 	runtime := &panelSafeRuntime{}
 	manager := nodeagent.NewManagerV2(uint64(node.Id), nodeagent.FileStoreV2{Directory: t.TempDir()}, runtime)
-	if err := manager.Restore(nil); err != nil {
+	if err := manager.Restore(); err != nil {
 		t.Fatal(err)
 	}
 	defer manager.Close()
-	server, identity := controlHandlerServer(t, nodeagent.HandlerV2(manager))
-	node.Address = server.URL
-	node.ControlCA = identity.CA
-	node.ControlCertificate = identity.Certificate
-	node.ControlKey = identity.Key
-	db.Save(&node)
+	attachFixtureAgent(t, db, &node, manager)
 	if err := Reconcile(context.Background(), node.Id); err != nil {
 		t.Fatal(err)
 	}

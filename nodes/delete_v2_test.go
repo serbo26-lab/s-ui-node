@@ -13,19 +13,17 @@ import (
 )
 
 func TestV2NodeDeletionRemovesGrantsAndControlState(t *testing.T) {
-	db, node, client := fixture(t)
+	db, node, _ := fixture(t)
 	node.Enable = false
 	node.DesiredRevision, node.AppliedRevision = 3, 3
 	node.AppliedSnapshot, _ = json.Marshal(Snapshot{Node: Publication{Enable: false}})
 	requireNodeTestSuccess(t, db.Save(&node).Error)
 	rows := []interface{}{
-		&model.ClientNode{NodeId: node.Id, ClientId: client.Id, Active: true},
 		&model.NodeAccessState{NodeId: node.Id, DesiredRevision: 2},
 		&model.NodeClientTraffic{NodeId: node.Id, ClientId: client.Id, Ledger: "11111111-1111-4111-8111-111111111111", Up: 10, Down: 20},
 		&model.NodeTask{NodeId: node.Id, Kind: "access"},
 		&model.NodeOverride{NodeId: node.Id, ConnectionKey: "one", Path: "/listen_port"},
 		&model.NodeGeneratedMaterial{NodeId: node.Id, ConnectionKey: "one", Purpose: "key"},
-		&model.NodeAssignmentMigration{NodeId: node.Id, State: "complete"},
 		&model.NodeInstallation{NodeId: node.Id},
 		&model.NodeJob{Id: "done", NodeId: node.Id, State: "done"},
 	}
@@ -33,16 +31,13 @@ func TestV2NodeDeletionRemovesGrantsAndControlState(t *testing.T) {
 		requireNodeTestSuccess(t, db.Create(row).Error)
 	}
 	requireNodeTestSuccess(t, Save("nodes", "del", json.RawMessage(`1`), "test"))
-	for _, row := range append(rows, &model.NodeInbound{}) {
+	for _, row := range append(rows, &model.NodeInbound{}, &model.ClientNode{}) {
 		var count int64
 		if err := db.Model(row).Where("node_id = ?", node.Id).Count(&count).Error; err != nil || count != 0 {
 			t.Fatalf("orphaned %T: %d, %v", row, count, err)
 		}
 	}
 	var count int64
-	if err := db.Model(&model.ClientNodeInbound{}).Where("node_inbound_id = ?", 1).Count(&count).Error; err != nil || count != 0 {
-		t.Fatal("legacy grant survived deletion", count, err)
-	}
 	if err := ReconcileAccess(context.Background(), node.Id); err == nil {
 		t.Fatal("deleted node reconciled")
 	}
@@ -80,7 +75,7 @@ func TestNodeDeletionAfterReinstallRequiresDisabledNodeAndExplicitConfirmation(t
 	}
 }
 
-func TestV2NodeDeletionWaitsForOldHostAndProvisioning(t *testing.T) {
+func TestV2NodeDeletionWaitsForProvisioning(t *testing.T) {
 	db, node, _ := fixture(t)
 	node.Enable = false
 	node.DesiredRevision, node.AppliedRevision = 3, 3
@@ -91,11 +86,7 @@ func TestV2NodeDeletionWaitsForOldHostAndProvisioning(t *testing.T) {
 	if err := Save("nodes", "del", json.RawMessage(`1`), "test"); err == nil {
 		t.Fatal("node deleted during provisioning")
 	}
-	provisionJobs.Delete(node.Id)
-	requireNodeTestSuccess(t, db.Create(&model.NodeInstallation{NodeId: node.Id, PreviousTarget: json.RawMessage(`[{"IP":"192.0.2.1"}]`)}).Error)
-	if err := Save("nodes", "del", json.RawMessage(`1`), "test"); err == nil {
-		t.Fatal("pending old host forgotten")
-	}
+
 }
 
 func TestV2NodeRecreatedAtSameAddressStartsWithFreshSSHIdentity(t *testing.T) {

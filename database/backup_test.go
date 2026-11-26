@@ -37,10 +37,8 @@ func seedEveryTable(t *testing.T) {
 		&model.NodeTemplateMember{TemplateId: 1, InboundId: 2, Position: 0},
 		&model.Node{Name: "node", Enable: true, TemplateId: 1, Address: "https://node.example:16443", LinkAddress: "node.example", ControlKey: "backup-only-secret"},
 		&model.NodeInbound{NodeId: 1, Tag: "node-in", Type: "vless", Enable: true, Options: json.RawMessage(`{}`)},
-		&model.ClientNodeInbound{ClientId: 1, NodeInboundId: 1},
 		&model.NodeInstallation{NodeId: 1, PrivateKey: "fixture-encrypted-key", Domain: "node.example.com"},
 		&model.NodeJob{Id: "fixture-job", NodeId: 1, State: "complete", Events: json.RawMessage(`[]`)},
-		&model.NodeAutomation{Id: 1, DomainSuffix: "nodes.example.com", DNSToken: "fixture-encrypted-token"},
 		&model.ClientNode{ClientId: 1, NodeId: 1, Active: true, Generation: 3},
 		&model.NodeClientTraffic{NodeId: 1, ClientId: 1, Ledger: "11111111-1111-4111-8111-111111111111", Up: 10, Down: 20},
 		&model.NodeTemplateVersion{TemplateId: 1, Version: 1, SchemaVersion: 1, Digest: "fixture-digest", Payload: json.RawMessage(`{"schema_version":1,"config":{},"entries":[]}`)},
@@ -54,7 +52,6 @@ func seedEveryTable(t *testing.T) {
 		&model.NodeDNSRecord{NodeId: 1, ProfileId: 1, ZoneId: "fixture", Name: "node.example", Type: "A", Content: "192.0.2.1", Owner: "fixture-owner"},
 		&model.NodeCertificateBinding{NodeId: 1, Mode: "provided", Generation: 1, Material: "fixture-encrypted-certificate", Metadata: json.RawMessage(`{}`)},
 		&model.NodeCertificateVersion{NodeId: 1, Version: 1, DomainGeneration: 1, Bundle: "fixture-encrypted-bundle", Metadata: json.RawMessage(`{}`)},
-		&model.NodeAssignmentMigration{NodeId: 1, ReportDigest: "fixture-digest", State: "prepared", Decisions: json.RawMessage(`[]`)},
 		&model.NodeAccessState{NodeId: 1, DesiredRevision: 2, AppliedRevision: 1, DesiredSnapshot: json.RawMessage(`{"fixture":"latest-access"}`), AppliedSnapshot: json.RawMessage(`{"fixture":"applied-access"}`)},
 	}
 	for _, row := range rows {

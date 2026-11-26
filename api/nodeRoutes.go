@@ -21,22 +21,17 @@ func (a *ApiService) registerNodeRoutes(g *gin.RouterGroup, actor func(*gin.Cont
 		}
 	}
 	g.GET("/nodes", a.GetNodes)
-	g.GET("/node-migration", a.GetNodeMigration)
 	g.GET("/node-template-history", a.GetNodeTemplateHistory)
 	g.GET("/node-resources", a.GetNodeResources)
 	g.GET("/node-template-version", a.GetNodeTemplateVersion)
 	g.GET("/node-workspace", a.GetNodeWorkspace)
-	g.GET("/node-provision-settings", a.GetNodeProvisionSettings)
 	g.GET("/node-links", a.GetNodeLinks)
 
 	g.POST("/node-provision", withActor(a.ProvisionNode))
-	g.POST("/node-migration", withActor(a.PrepareNodeMigration))
-	g.POST("/node-migration-activate", withActor(a.ActivateNodeMigration))
 	g.POST("/node-resource", withActor(a.SaveNodeResources))
 	g.POST("/node-dns-zones", a.DiscoverNodeDNSZones)
 	g.POST("/node-resource-retry", withActor(a.RetryNodeResources))
 	g.POST("/node-dns-cleanup", withActor(a.CleanupNodeDNS))
-	g.POST("/node-provision-settings", a.SetNodeProvisionSettings)
 }
 
 // The shared save endpoint retains the same request and response contract.

@@ -46,7 +46,7 @@ func liveSetup(t *testing.T, count int, realCore ...bool) liveFixture {
 	db, node, client := fixture(t)
 	t.Setenv("SUI_DB_FOLDER", t.TempDir())
 	requireNodeTestSuccess(t, db.Where("node_id = ?", node.Id).Delete(&model.NodeInbound{}).Error)
-	requireNodeTestSuccess(t, db.Where("client_id = ?", client.Id).Delete(&model.ClientNodeInbound{}).Error)
+	requireNodeTestSuccess(t, db.Where("client_id = ?", client.Id).Delete(&model.ClientNode{}).Error)
 	f := liveFixture{db: db, client: client}
 	for index := 0; index < count; index++ {
 		n := model.Node{Id: uint(index + 1), Name: []string{"First", "Second"}[index], Enable: true, LinkAddress: []string{"first.example", "second.example"}[index], AgentProtocol: 2, AssignmentMode: model.NodeAssignmentWhole}
@@ -57,7 +57,7 @@ func liveSetup(t *testing.T, count int, realCore ...bool) liveFixture {
 			safe = nodeagent.NewCoreRuntimeWithState(state)
 		}
 		manager := nodeagent.NewManagerV2(uint64(n.Id), nodeagent.FileStoreV2{Directory: state}, safe)
-		requireNodeTestSuccess(t, manager.Restore(nil))
+		requireNodeTestSuccess(t, manager.Restore())
 		t.Cleanup(func() { manager.Close() })
 		server, identity := controlHandlerServer(t, nodeagent.HandlerV2(manager))
 		n.Address, n.ControlCA, n.ControlCertificate, n.ControlKey, n.ControlEpoch = server.URL, identity.CA, identity.Certificate, identity.Key, manager.Status().Epoch
@@ -76,22 +76,29 @@ func liveSetup(t *testing.T, count int, realCore ...bool) liveFixture {
 
 func (f *liveFixture) save(t *testing.T, spec TemplateSpec) {
 	t.Helper()
-	action := "new"
-	request := map[string]interface{}{"name": "shared", "spec": spec}
-	if f.template.Id != 0 {
-		action = "edit"
-		request["id"], request["expected_version"] = f.template.Id, f.template.Version
+	if f.template.Id == 0 {
+		f.template = model.NodeTemplate{Name: "deployment", Kind: deploymentTemplate, Scope: "shared", SchemaVersion: 1}
+		requireNodeTestSuccess(t, f.db.Create(&f.template).Error)
+		for pos, entry := range spec.Entries {
+			member := model.NodeTemplate{Name: entry.Name, Kind: inboundTemplate}
+			body, err := json.Marshal(map[string]any{"spec": TemplateSpec{SchemaVersion: 1, Config: json.RawMessage(`{}`), Entries: []SpecEntry{entry}}})
+			requireNodeTestSuccess(t, err)
+			requireNodeTestSuccess(t, saveVersionedTemplate(f.db, &member, model.NodeTemplate{}, body))
+			requireNodeTestSuccess(t, f.db.Create(&model.NodeTemplateMember{TemplateId: f.template.Id, InboundId: member.Id, Position: pos}).Error)
+		}
 	}
-	body, _ := json.Marshal(request)
-	requireNodeTestSuccess(t, Save("nodetemplates", action, body, "test"))
-	requireNodeTestSuccess(t, f.db.Where("name = ?", "shared").First(&f.template).Error)
+	body, _ := json.Marshal(map[string]any{"spec": spec, "expected_version": f.template.Version})
+	requireNodeTestSuccess(t, saveVersionedTemplate(f.db, &f.template, f.template, body))
 }
-func (f *liveFixture) bind(t *testing.T, index int, template uint, replace bool) {
+
+func (f *liveFixture) bind(t *testing.T, index int, templateID uint, replace bool) {
 	t.Helper()
-	body, _ := json.Marshal(map[string]interface{}{"id": f.nodes[index].Id, "template_id": template, "confirm_replace": replace})
-	requireNodeTestSuccess(t, Save("nodes", "applytemplate", body, "test"))
+	var template model.NodeTemplate
+	requireNodeTestSuccess(t, f.db.First(&template, templateID).Error)
 	requireNodeTestSuccess(t, f.db.First(&f.nodes[index], f.nodes[index].Id).Error)
+	requireNodeTestSuccess(t, bindLiveTemplate(f.db, &f.nodes[index], template, replace))
 }
+
 func (f *liveFixture) run(t *testing.T, index int) {
 	t.Helper()
 	requireNodeTestSuccess(t, Reconcile(context.Background(), f.nodes[index].Id))
@@ -191,7 +198,7 @@ func TestLiveRetireArchivesOverridesAndRestoreKeepsIdentity(t *testing.T) {
 	}
 }
 
-func TestLiveOverrideEqualityResetCloneAndUnrelatedTemplateGuard(t *testing.T) {
+func TestLiveOverrideEqualityAndReset(t *testing.T) {
 	f := liveSetup(t, 2)
 	f.run(t, 0)
 	f.run(t, 1)
@@ -211,28 +218,7 @@ func TestLiveOverrideEqualityResetCloneAndUnrelatedTemplateGuard(t *testing.T) {
 	if !bytes.Contains(in.Options, []byte("changed.example")) {
 		t.Fatal("reset did not inherit current template")
 	}
-	f.db.First(&f.nodes[0], 1)
-	body, _ := json.Marshal(map[string]interface{}{"id": 1, "name": "private", "expected_version": f.nodes[0].SettingsVersion})
-	requireNodeTestSuccess(t, Save("nodes", "privatecopy", body, "test"))
-	f.run(t, 0)
-	var clone model.NodeTemplate
-	f.db.Where("name = ?", "private").First(&clone)
-	if clone.Scope != "private" || clone.OwnerNodeId != 1 {
-		t.Fatal("private owner not recorded")
-	}
-	var after model.NodeInbound
-	f.db.First(&after, in.Id)
-	if after.Id != in.Id || after.SourceTemplateId != clone.Id || string(after.Options) != string(in.Options) {
-		t.Fatal("clone changed node identity")
-	}
-	body, _ = json.Marshal(map[string]interface{}{"id": 2, "template_id": clone.Id, "confirm_replace": true})
-	if err := Save("nodes", "applytemplate", body, "test"); err == nil {
-		t.Fatal("private template attached to other node")
-	}
-	body, _ = json.Marshal(map[string]interface{}{"id": 1, "template_id": f.template.Id})
-	if err := Save("nodes", "applytemplate", body, "test"); err == nil {
-		t.Fatal("unconfirmed replacement accepted")
-	}
+
 }
 
 func TestLiveFailureIsolationRejectionAndAccessPriority(t *testing.T) {
@@ -544,38 +530,6 @@ func assertLiveTraffic(t *testing.T, links []*model.Inbound) {
 	}
 }
 
-func TestLiveConcurrentAttachAndSaveAreTransactional(t *testing.T) {
-	f := liveSetup(t, 2)
-	requireNodeTestSuccess(t, f.db.Model(&model.Node{}).Where("id = ?", 2).Updates(map[string]interface{}{"template_id": 0, "template_target_version": 0}).Error)
-	spec := liveSpec()
-	spec.Entries[0].Name = "B"
-	edit, _ := json.Marshal(map[string]interface{}{"id": f.template.Id, "name": "shared", "expected_version": 1, "spec": spec})
-	bind, _ := json.Marshal(map[string]interface{}{"id": 2, "template_id": f.template.Id})
-	start := make(chan struct{})
-	done := make(chan error, 2)
-	go func() { <-start; done <- Save("nodetemplates", "edit", edit, "test") }()
-	go func() { <-start; done <- Save("nodes", "applytemplate", bind, "test") }()
-	close(start)
-	for i := 0; i < 2; i++ {
-		requireNodeTestSuccess(t, <-done)
-	}
-	var second model.Node
-	f.db.First(&second, 2)
-	if second.TemplateTargetVersion != 2 {
-		t.Fatal("concurrent attachment missed latest version")
-	}
-	var before model.NodeTask
-	f.db.Where("node_id = ? AND kind = ?", 2, "structure").First(&before)
-	if err := Save("nodetemplates", "edit", edit, "test"); err == nil {
-		t.Fatal("stale CAS accepted")
-	}
-	var after model.NodeTask
-	f.db.First(&after, before.Id)
-	if before.Generation != after.Generation {
-		t.Fatal("failed template save partially queued targets")
-	}
-}
-
 func TestLiveDisableAndOverrideRemovalPreserveIntent(t *testing.T) {
 	f := liveSetup(t, 1)
 	f.run(t, 0)
@@ -637,7 +591,7 @@ func TestLiveLegacyWritersCannotOverwriteManagedStructure(t *testing.T) {
 			t.Fatal("legacy writer overwrote live structure", request.action)
 		}
 	}
-	if _, err := StartProvision(ProvisionRequest{NodeId: 1}, "test"); err == nil || err.Error() != "live_template_installer_not_ready" {
+	if _, err := StartProvision(ProvisionRequest{NodeId: 1, ModelVersion: 1}, "test"); err == nil || err.Error() != "unsupported_node_model" {
 		t.Fatal("old installer accepted live node", err)
 	}
 	var n model.Node
@@ -647,36 +601,7 @@ func TestLiveLegacyWritersCannotOverwriteManagedStructure(t *testing.T) {
 	}
 }
 
-func TestLiveSharedCopyExportsSourcesAndUnrelatedKeysNeedMapping(t *testing.T) {
-	f := liveSetup(t, 2)
-	ReconcileAll(context.Background())
-	f.db.First(&f.nodes[0], 1)
-	body, _ := json.Marshal(map[string]interface{}{"id": 1, "name": "exported", "expected_version": f.nodes[0].SettingsVersion})
-	requireNodeTestSuccess(t, Save("nodes", "sharedcopy", body, "test"))
-	var draft model.NodeTemplate
-	f.db.Where("name = ?", "exported").First(&draft)
-	var version model.NodeTemplateVersion
-	f.db.Where("template_id = ? AND version = ?", draft.Id, draft.Version).First(&version)
-	if draft.Scope != "shared" || draft.OwnerNodeId != 0 || bytes.Contains(version.Payload, []byte("first.example")) || bytes.Contains(version.Payload, []byte("private_key")) {
-		t.Fatal("shared draft exported node-specific values")
-	}
-	f.bind(t, 1, draft.Id, true)
-	ReconcileAll(context.Background())
-	if f.links(t) != 2 {
-		t.Fatal("related template did not retain identities")
-	}
-	unrelated := map[string]interface{}{"name": "unrelated", "spec": liveSpec()}
-	body, _ = json.Marshal(unrelated)
-	requireNodeTestSuccess(t, Save("nodetemplates", "new", body, "test"))
-	var target model.NodeTemplate
-	f.db.Where("name = ?", "unrelated").First(&target)
-	body, _ = json.Marshal(map[string]interface{}{"id": 1, "template_id": target.Id, "confirm_replace": true})
-	if err := Save("nodes", "applytemplate", body, "test"); err == nil || err.Error() != "unrelated_template_connection_mapping_required" {
-		t.Fatal("unrelated keys were silently identified", err)
-	}
-}
-
-func TestLiveSchemaUpgradeKeepsExistingLegacyConnections(t *testing.T) {
+func TestLiveSchemaUpgradeKeepsExistingConnections(t *testing.T) {
 	db, node, client := fixture(t)
 	requireNodeTestSuccess(t, db.Create(&model.NodeOverride{NodeId: node.Id, ConnectionKey: "primary", Path: "/tls/server_name", Operation: "set", Source: json.RawMessage(`{"kind":"literal","value":"old.example"}`)}).Error)
 	requireNodeTestSuccess(t, db.Migrator().DropColumn(&model.NodeInbound{}, "retired"))
@@ -697,7 +622,7 @@ func TestLiveSchemaUpgradeKeepsExistingLegacyConnections(t *testing.T) {
 	t.Cleanup(func() { connection.Close() })
 	snapshot, err := Compile(reopened, node)
 	if err != nil || len(snapshot.Inbounds) != 1 {
-		t.Fatal("schema upgrade hid a legacy inbound", err)
+		t.Fatal("schema upgrade hid a configured inbound", err)
 	}
 	var count int64
 	reopened.Model(&model.NodeOverride{}).Where("archived = ?", false).Count(&count)
@@ -707,7 +632,7 @@ func TestLiveSchemaUpgradeKeepsExistingLegacyConnections(t *testing.T) {
 	confirm(t, reopened, node)
 	links, err := ClientInbounds(reopened, client)
 	if err != nil || len(links) != 1 {
-		t.Fatal("legacy assignment lost after migration", err)
+		t.Fatal("assignment lost after migration", err)
 	}
 }
 

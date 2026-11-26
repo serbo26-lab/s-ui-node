@@ -80,7 +80,7 @@ func upgradeAgents(ctx context.Context, bundle agentBundle) {
 			return
 		}
 		var node model.Node
-		if db.First(&node, installation.NodeId).Error != nil || node.AgentProtocol != 2 || node.ControlEpoch == "" ||
+		if db.First(&node, installation.NodeId).Error != nil || !managedNodeModel(node) || node.ControlEpoch == "" ||
 			node.AgentUpgradeRetryAt > time.Now().Unix() {
 			continue
 		}
@@ -110,7 +110,7 @@ func upgradeManagedAgent(parent context.Context, id uint, bundle agentBundle) {
 	defer activeAgentUpgrades.Delete(id)
 	db := database.GetDB()
 	var node model.Node
-	if db.First(&node, id).Error != nil || node.AgentProtocol != 2 || node.ControlEpoch == "" {
+	if db.First(&node, id).Error != nil || !managedNodeModel(node) || node.ControlEpoch == "" {
 		return
 	}
 	ctx, cancel := context.WithTimeout(parent, 3*time.Minute)

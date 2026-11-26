@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
-	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -71,34 +70,6 @@ func parseProvisionSSHKey(key string) (string, error) {
 	return strings.TrimSpace(string(ssh.MarshalAuthorizedKey(s.PublicKey()))), nil
 }
 
-func uploadAgent(ctx context.Context, client *ssh.Client, user string, id uint, path, digest string) error {
-	file, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-	script := fmt.Sprintf(`import hashlib,json,os,sys
-from pathlib import Path
-folder=Path('/opt/s-ui-nodes/%d')
-if folder.is_symlink():raise SystemExit('invalid install directory')
-folder.parent.mkdir(exist_ok=True,mode=0o755)
-folder.mkdir(exist_ok=True,mode=0o755)
-target=folder/'agent.next'
-fd=os.open(target,os.O_WRONLY|os.O_CREAT|os.O_TRUNC|os.O_NOFOLLOW,0o600)
-h=hashlib.sha256()
-with os.fdopen(fd,'wb') as output:
- while True:
-  data=sys.stdin.buffer.read(1<<20)
-  if not data:break
-  output.write(data);h.update(data)
- output.flush();os.fsync(output.fileno())
-if h.hexdigest()!='%s':target.unlink();raise SystemExit('checksum mismatch')
-print(json.dumps({'verified':True}))
-`, id, digest)
-	_, err = remoteStream(ctx, client, user, script, file)
-	return err
-}
-
 func installRemoteAgent(parent context.Context, client *ssh.Client, user, script string, input interface{}) error {
 	ctx, cancel := context.WithTimeout(parent, 4*time.Minute)
 	defer cancel()
@@ -114,13 +85,14 @@ func installRemoteAgent(parent context.Context, client *ssh.Client, user, script
 	return nil
 }
 
-var installAgentScript = `import hashlib,json,os,pwd,shutil,subprocess,sys
+var liveInstallScript = `import fcntl,hashlib,json,os,pwd,re,shutil,subprocess,sys
 from pathlib import Path
 ` + provisionFirewallPython + `
-p=json.load(sys.stdin);ident=int(p['id']);name='s-ui-node-'+str(ident)
+p=json.load(sys.stdin);ident=int(p['id']);owner=p['owner'];assert re.fullmatch('[a-f0-9]{32}',owner);slot=str(ident)+'-'+owner[:12];name='s-ui-node-'+slot
+assert re.fullmatch('[a-zA-Z0-9_-]{16,96}',p['bootstrap_id'])
 assert ident>0 and 1024<=int(p['control_port'])<=65535
-base=Path('/opt/s-ui-nodes')/str(ident);creds=Path('/etc/s-ui-nodes')/str(ident)
-unit=Path('/etc/systemd/system')/(name+'.service');marker='# S-UI managed node '+str(ident)
+base=Path('/opt/s-ui-nodes')/slot;creds=Path('/etc/s-ui-nodes')/slot
+unit=Path('/etc/systemd/system')/(name+'.service');marker='# S-UI managed node '+str(ident)+' owner='+owner
 if unit.exists() and marker not in unit.read_text():raise SystemExit('service name occupied')
 if creds.is_symlink() or base.is_symlink():raise SystemExit('unsafe path')
 creds.mkdir(parents=True,mode=0o700,exist_ok=True);os.chmod(creds,0o700)
@@ -128,8 +100,9 @@ incoming=base/'agent.next';binary=base/'agent'
 if hashlib.sha256(incoming.read_bytes()).hexdigest()!=p['sha256']:raise SystemExit('checksum mismatch')
 account=pwd.getpwnam(p['ssh_user']);sshdir=Path(account.pw_dir)/'.ssh'
 sshdir.mkdir(mode=0o700,exist_ok=True);authorized=sshdir/'authorized_keys'
+keylock=os.open(sshdir/'.s-ui-node-key.lock',os.O_RDWR|os.O_CREAT|os.O_NOFOLLOW,0o600);fcntl.flock(keylock,fcntl.LOCK_EX)
 prior=authorized.read_text() if authorized.exists() else ''
-key=p['authorized_key'].strip();keymarker='s-ui-managed-node-'+str(ident)
+key=p['authorized_key'].strip();keymarker='s-ui-managed-node-'+slot
 lines=[line for line in prior.splitlines() if not line.endswith(' '+keymarker)]
 lines.append('restrict,port-forwarding,permitopen="127.0.0.1:'+str(p['control_port'])+'" '+key+' '+keymarker)
 authorized.write_text('\n'.join(lines)+'\n');os.chmod(authorized,0o600);os.chown(sshdir,account.pw_uid,account.pw_gid);os.chown(authorized,account.pw_uid,account.pw_gid)
@@ -161,7 +134,7 @@ WorkingDirectory=/var/lib/'''+name+'''
 LoadCredential=ca.pem:'''+str(creds/'ca.pem')+'''
 LoadCredential=cert.pem:'''+str(creds/'cert.pem')+'''
 LoadCredential=key.pem:'''+str(creds/'key.pem')+'''
-ExecStart='''+str(binary)+''' --node-id '''+str(ident)+''' --state /var/lib/'''+name+''' --listen 127.0.0.1:'''+str(p['control_port'])+''' --client-ca %d/ca.pem --tls-cert %d/cert.pem --tls-key %d/key.pem
+ExecStart='''+str(binary)+''' --node-id '''+str(ident)+''' --state /var/lib/'''+name+''' --listen 127.0.0.1:'''+str(p['control_port'])+''' --bootstrap-id '''+p['bootstrap_id']+''' --client-ca %d/ca.pem --tls-cert %d/cert.pem --tls-key %d/key.pem
 Restart=on-failure
 RestartSec=3
 TimeoutStartSec=60
@@ -190,6 +163,8 @@ except BaseException:
  if oldbinary:shutil.copy2(base/'agent.previous',binary)
  for n,body in oldcreds.items():write_private(creds/n,body)
  if oldunit is not None:
-  unit.write_bytes(oldunit);systemctl('daemon-reload',check=False);systemctl('restart',name,wait=90,check=False)
+  unit.write_bytes(oldunit);systemctl('daemon-reload',check=False)
+  # A failed installation stays fenced.
+  systemctl('stop',name,wait=90,check=False)
  raise
 `

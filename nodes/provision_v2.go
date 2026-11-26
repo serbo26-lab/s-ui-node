@@ -77,7 +77,11 @@ func loadLivePlan(job model.NodeJob) (liveProvisionPlan, error) {
 	return plan, nil
 }
 
-func startLiveProvision(r ProvisionRequest, actor string) (model.NodeJob, error) {
+func StartProvision(r ProvisionRequest, actor string) (model.NodeJob, error) {
+	if r.ModelVersion != 0 && r.ModelVersion != 2 {
+		return model.NodeJob{}, errors.New("unsupported_node_model")
+	}
+	r.ModelVersion = 2
 	job, created, err := createLiveProvision(r, actor)
 	if err != nil || !created {
 		return job, err
@@ -146,11 +150,20 @@ func prepareLiveProvisionSelection(db *gorm.DB, r *ProvisionRequest) error {
 	if r.NodeId != 0 {
 		return prepareExistingLiveSelection(db, r)
 	}
-	if len(r.InboundTemplateIds) > 0 {
-		return prepareSelectedLiveProtocols(db, r)
-	}
 	if r.TemplateId != 0 {
-		return prepareTemplateLiveProtocols(r)
+		return errors.New("edit_node_inbound_selection")
+	}
+	if len(r.InboundTemplateIds) > 0 {
+		entries, err := selectedInboundEntries(db, r.InboundTemplateIds, 0)
+		if err != nil {
+			return err
+		}
+		for _, entry := range entries {
+			if entry.Enable {
+				return nil
+			}
+		}
+		return errors.New("choose_node_inbound_templates")
 	}
 	return nil
 }
@@ -180,7 +193,7 @@ func (c *liveProvisionCreation) create(tx *gorm.DB) error {
 		return err
 	}
 	if installation.OwnerID == "" {
-		return errors.New("legacy_installation_requires_migration")
+		return errors.New("node_not_ssh_managed")
 	}
 	id, err := uuid.NewV4()
 	if err != nil {
@@ -200,57 +213,6 @@ func (c *liveProvisionCreation) create(tx *gorm.DB) error {
 	c.created = true
 	return nil
 }
-func provisionLiveTemplate(tx *gorm.DB, node model.Node, r ProvisionRequest) (model.NodeTemplate, error) {
-	var template model.NodeTemplate
-	if r.TemplateId != 0 {
-		err := tx.First(&template, r.TemplateId).Error
-		if err != nil {
-			return template, err
-		}
-		if template.SchemaVersion != 1 || template.Kind == inboundTemplate {
-			return template, errors.New("live_template_required")
-		}
-		return template, nil
-	}
-	spec := TemplateSpec{SchemaVersion: 1, Config: json.RawMessage(`{"outbounds":[{"type":"direct","tag":"direct"}],"route":{"final":"direct"}}`)}
-	if len(r.InboundTemplateIds) > 0 {
-		entries, err := selectedInboundEntries(tx, r.InboundTemplateIds, 0)
-		if err != nil {
-			return template, err
-		}
-		spec.Entries = entries
-		template, err = createDeploymentTemplate(tx, node)
-		if err != nil {
-			return template, err
-		}
-		err = writeCatalogSelection(tx, &template, r.InboundTemplateIds, spec)
-		return template, err
-	}
-	for _, kind := range r.Protocols {
-		entry, err := defaultLiveProvisionEntry(kind)
-		if err != nil {
-			return template, err
-		}
-		spec.Entries = append(spec.Entries, entry)
-	}
-	body, _ := json.Marshal(spec)
-	normalized, err := NormalizeSpec(body, nil)
-	if err != nil {
-		return template, err
-	}
-	body, _ = json.Marshal(normalized)
-	template = model.NodeTemplate{Name: node.Name, SchemaVersion: 1, Scope: "private", OwnerNodeId: node.Id, Config: normalized.Config, Blueprints: json.RawMessage(`[]`)}
-	if err = tx.Create(&template).Error; err != nil {
-		return template, err
-	}
-	err = appendTemplateVersion(tx, &template, model.NodeTemplate{}, body)
-	if err == nil {
-		err = splitDeploymentTemplate(tx, template)
-		template.Kind = deploymentTemplate
-	}
-	return template, err
-}
-
 func provisionLiveResources(tx *gorm.DB, node model.Node, r ProvisionRequest) error {
 	certificate, primaryDomain, err := liveResourceNeeds(tx, node)
 	if err != nil {
@@ -385,27 +347,15 @@ func prepareExistingLiveSelection(db *gorm.DB, r *ProvisionRequest) error {
 	if err := db.First(&node, r.NodeId).Error; err != nil {
 		return err
 	}
-	if node.AssignmentMode != model.NodeAssignmentWhole || node.AgentProtocol != 2 || node.TemplateTargetVersion == 0 {
-		return errors.New("live_node_required")
+	if !managedNodeModel(node) {
+		return errors.New("unsupported_node_model")
+	}
+	if r.TemplateId != 0 && r.TemplateId != node.TemplateId {
+		return errors.New("installer_cannot_replace_live_template")
 	}
 	if r.ExpectedVersion == nil || *r.ExpectedVersion != node.SettingsVersion {
 		return errors.New("node_settings_version_conflict")
 	}
-	spec, err := liveVersion(db, node)
-	if err != nil {
-		return err
-	}
-	r.Protocols = nil
-	for _, e := range spec.Entries {
-		if e.Enable {
-			r.Protocols = append(r.Protocols, e.Protocol)
-		}
-	}
-	// Recovery preserves the bound template. Template replacement has its own CAS API.
-	if r.TemplateId != 0 && r.TemplateId != node.TemplateId {
-		return errors.New("installer_cannot_replace_live_template")
-	}
-	r.TemplateId = node.TemplateId
 	return nil
 }
 
@@ -427,9 +377,6 @@ func existingLiveProvisionTarget(tx *gorm.DB, r ProvisionRequest) (model.Node, m
 	}
 	if active > 0 || jobRunning(node.Id) {
 		return node, installation, errors.New("node_job_running")
-	}
-	if len(installation.PreviousTarget) > 0 {
-		return node, installation, errors.New("old_server_retirement_pending")
 	}
 	return node, installation, nil
 }
@@ -456,7 +403,7 @@ func newLiveProvisionTarget(tx *gorm.DB, r ProvisionRequest) (model.Node, model.
 	if err = tx.Create(&installation).Error; err != nil {
 		return node, installation, err
 	}
-	template, err := provisionLiveTemplate(tx, node, r)
+	template, err := createProvisionTemplate(tx, node, r.InboundTemplateIds, r.Protocols)
 	if err != nil {
 		return node, installation, err
 	}
@@ -491,44 +438,6 @@ func persistLiveProvisionPlan(tx *gorm.DB, node model.Node, installation model.N
 	}
 	if err = tx.Model(job).Update("plan", job.Plan).Error; err != nil {
 		return err
-	}
-	return nil
-}
-
-func prepareSelectedLiveProtocols(db *gorm.DB, r *ProvisionRequest) error {
-	if r.TemplateId != 0 {
-		return errors.New("edit_node_inbound_selection")
-	}
-	entries, err := selectedInboundEntries(db, r.InboundTemplateIds, 0)
-	if err != nil {
-		return err
-	}
-	r.Protocols = nil
-	for _, entry := range entries {
-		if entry.Enable {
-			r.Protocols = append(r.Protocols, entry.Protocol)
-		}
-	}
-	if len(r.Protocols) == 0 {
-		return errors.New("choose_node_inbound_templates")
-	}
-	return nil
-}
-
-func prepareTemplateLiveProtocols(r *ProvisionRequest) error {
-	view, err := ReadTemplateVersion(r.TemplateId, 0)
-	if err != nil {
-		return err
-	}
-	spec, err := NormalizeSpec(view.Spec, nil)
-	if err != nil {
-		return err
-	}
-	r.Protocols = nil
-	for _, e := range spec.Entries {
-		if e.Enable {
-			r.Protocols = append(r.Protocols, e.Protocol)
-		}
 	}
 	return nil
 }

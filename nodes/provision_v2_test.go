@@ -56,11 +56,7 @@ func TestLiveProvisionCreateIsIdempotentAndDoesNotStorePassword(t *testing.T) {
 	if node.AssignmentMode != model.NodeAssignmentWhole || node.AgentProtocol != 2 || node.TemplateTargetVersion != 1 {
 		t.Fatal("not live model")
 	}
-	var automation int64
-	db.Model(&model.NodeAutomation{}).Count(&automation)
-	if automation != 0 {
-		t.Fatal("legacy DNS automation created")
-	}
+
 }
 
 func TestLiveProvisionPreflightIncludesEveryConnectionAndRejectsHostReservation(t *testing.T) {
@@ -167,7 +163,7 @@ func TestLiveHostScriptsAreValidPythonAndRequireOwnerAndBootstrap(t *testing.T) 
 	if err != nil {
 		t.Skip("Python syntax check requires python3")
 	}
-	for name, body := range map[string]string{"inspect": liveInspectionScript, "key": liveAuthorizeKeyScript, "cache": liveCachedAgentScript, "fence": liveFenceScript, "install": liveInstallScript()} {
+	for name, body := range map[string]string{"inspect": liveInspectionScript, "key": liveAuthorizeKeyScript, "cache": liveCachedAgentScript, "fence": liveFenceScript, "install": liveInstallScript} {
 		path := filepath.Join(t.TempDir(), name+".py")
 		if err = os.WriteFile(path, []byte(body), 0600); err != nil {
 			t.Fatal(err)
@@ -176,7 +172,7 @@ func TestLiveHostScriptsAreValidPythonAndRequireOwnerAndBootstrap(t *testing.T) 
 			t.Fatalf("%s: %s", name, output)
 		}
 	}
-	script := liveInstallScript()
+	script := liveInstallScript
 	if !strings.Contains(script, "--bootstrap-id") || !strings.Contains(script, "owner='+owner") || strings.Contains(script, "p['ports']") {
 		t.Fatal("legacy ownership/protocol writer in live installer")
 	}

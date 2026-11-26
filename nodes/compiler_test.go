@@ -1,7 +1,6 @@
 package nodes
 
 import (
-	"context"
 	"crypto/ecdh"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -38,14 +37,14 @@ func fixture(t *testing.T) (*gorm.DB, model.Node, model.Client) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = sqlDB.Close() })
-	node := model.Node{Id: 1, Name: "one", Enable: true, LinkAddress: "first.example"}
+	node := model.Node{Id: 1, Name: "one", Enable: true, LinkAddress: "first.example", AgentProtocol: 2, AssignmentMode: model.NodeAssignmentWhole}
 	client := model.Client{Id: 1, Name: "one", Enable: true, Inbounds: json.RawMessage(`[1]`), Links: json.RawMessage(`[]`), Config: json.RawMessage(`{"vless":{"name":"one","uuid":"11111111-1111-4111-8111-111111111111","flow":"xtls-rprx-vision"}}`)}
 	private, err := ecdh.X25519().GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
 	options, _ := json.Marshal(map[string]interface{}{"listen": "::", "listen_port": 14443, "tls": map[string]interface{}{"enabled": true, "server_name": "www.example.com", "reality": map[string]interface{}{"enabled": true, "private_key": base64.RawURLEncoding.EncodeToString(private.Bytes()), "short_id": []string{"01234567"}, "handshake": map[string]interface{}{"server": "www.example.com", "server_port": 443}}}})
-	for _, value := range []interface{}{&node, &client, &model.Inbound{Id: 1, Tag: "same", Type: "vless", Enable: true, Options: json.RawMessage(`{}`)}, &model.NodeInbound{Id: 1, NodeId: 1, Tag: "same", Type: "vless", Enable: true, Options: options}, &model.ClientNodeInbound{ClientId: 1, NodeInboundId: 1}} {
+	for _, value := range []interface{}{&node, &client, &model.Inbound{Id: 1, Tag: "same", Type: "vless", Enable: true, Options: json.RawMessage(`{}`)}, &model.NodeInbound{Id: 1, NodeId: 1, Tag: "same", Type: "vless", Enable: true, Options: options, ConnectionKey: "fixture"}, &model.ClientNode{ClientId: 1, NodeId: 1, Active: true, Generation: 1}} {
 		if err := db.Create(value).Error; err != nil {
 			t.Fatal(err)
 		}
@@ -55,18 +54,21 @@ func fixture(t *testing.T) (*gorm.DB, model.Node, model.Client) {
 
 func confirm(t *testing.T, db *gorm.DB, node model.Node) Snapshot {
 	t.Helper()
+	node.ControlEpoch, node.TemplateTargetVersion = "test-epoch", 1
 	s, err := Compile(db, node)
 	if err != nil {
 		t.Fatal(err)
 	}
 	s.Deployment.Revision = 5
-	if err := s.Deployment.Validate(); err != nil {
-		t.Fatal(err)
-	}
 	body, _ := json.Marshal(s)
-	if err := db.Model(&model.Node{}).Where("id = ?", node.Id).Updates(map[string]interface{}{"applied_revision": 5, "applied_snapshot": json.RawMessage(body)}).Error; err != nil {
+	if err := db.Model(&model.Node{}).Where("id = ?", node.Id).Updates(map[string]interface{}{"applied_revision": 5, "applied_snapshot": json.RawMessage(body), "agent_running": true, "control_epoch": node.ControlEpoch, "template_target_version": node.TemplateTargetVersion}).Error; err != nil {
 		t.Fatal(err)
 	}
+	acl, err := compileAccess(db, node, false, false)
+	requireNodeTestSuccess(t, err)
+	acl.Revision = 1
+	body, _ = json.Marshal(acl)
+	requireNodeTestSuccess(t, db.Save(&model.NodeAccessState{NodeId: node.Id, AppliedRevision: acl.Revision, AppliedSnapshot: body}).Error)
 	return s
 }
 
@@ -77,8 +79,8 @@ func TestPublicationUsesConfirmedSnapshotAndSeparateIDs(t *testing.T) {
 		t.Fatal("unconfirmed configuration was published", err)
 	}
 	s := confirm(t, db, node)
-	if !strings.Contains(string(s.Deployment.Config), `"tag":"node-1-inbound-1"`) || !strings.Contains(string(s.Deployment.Config), `"name":"client/1"`) {
-		t.Fatal("unstable node/user identity")
+	if !strings.Contains(string(s.Deployment.Config), `"tag":"node-1-inbound-1"`) || strings.Contains(string(s.Deployment.Config), `"users"`) {
+		t.Fatal("unexpected structural snapshot")
 	}
 	endpoints, err = ClientInbounds(db, client)
 	if err != nil || len(endpoints) != 1 {
@@ -135,7 +137,7 @@ func TestCurrentRevocationHidesPreviouslyAppliedEndpoint(t *testing.T) {
 		t.Fatal("expired client retained endpoint", err)
 	}
 	client.Expiry = 0
-	if err := db.Where("client_id = 1").Delete(&model.ClientNodeInbound{}).Error; err != nil {
+	if err := db.Where("client_id = 1").Delete(&model.ClientNode{}).Error; err != nil {
 		t.Fatal(err)
 	}
 	endpoints, err = ClientInbounds(db, client)
@@ -155,14 +157,12 @@ func TestAccessEpochRequiresNewConfirmationWithoutChangingCustomerKeys(t *testin
 	if err := db.Save(&client).Error; err != nil {
 		t.Fatal(err)
 	}
-	s, err := Compile(db, node)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(s.Deployment.Users) != 1 || s.Deployment.Users[0].Name != "client/1/g2" {
+	acl, err := compileAccess(db, node, false, false)
+	requireNodeTestSuccess(t, err)
+	if len(acl.Clients) != 1 || acl.Clients[0].Name != "client/1/g2/n1" {
 		t.Fatal("new node session identity missing")
 	}
-	if !strings.Contains(string(s.Deployment.Config), "11111111-1111-4111-8111-111111111111") {
+	if !strings.Contains(string(acl.Clients[0].Credentials["vless"]), "11111111-1111-4111-8111-111111111111") {
 		t.Fatal("access epoch rotated customer UUID")
 	}
 }
@@ -196,10 +196,6 @@ func (r *testRuntime) Apply([]byte) error {
 }
 func (r *testRuntime) Close() error  { r.running = false; return nil }
 func (r *testRuntime) Running() bool { return r.running }
-
-func controlServer(t *testing.T, manager *nodeagent.Manager) (*httptest.Server, ControlTLS) {
-	return controlHandlerServer(t, nodeagent.Handler(manager))
-}
 
 func controlHandlerServer(t *testing.T, handler http.Handler) (*httptest.Server, ControlTLS) {
 	t.Helper()
@@ -241,89 +237,17 @@ func controlHandlerServer(t *testing.T, handler http.Handler) (*httptest.Server,
 	return server, ControlTLS{CA: string(caPEM), Certificate: string(certPEM), Key: string(keyPEM)}
 }
 
-func TestReconcileAdvancesExistingAgentAndPreservesAppliedOnFailure(t *testing.T) {
-	db, node, client := fixture(t)
-	runtime := &testRuntime{}
-	manager := nodeagent.NewManager(1, nodeagent.FileStore{Directory: t.TempDir()}, runtime)
-	t.Cleanup(func() { _ = manager.Close() })
-	initial := nodeagent.Deployment{NodeID: 1, Revision: 4, Config: json.RawMessage(`{"inbounds":[],"outbounds":[{"type":"direct"}]}`), Users: []nodeagent.Access{}}
-	if err := manager.Apply(initial); err != nil {
-		t.Fatal(err)
-	}
-	server, identity := controlServer(t, manager)
-	node.Address = server.URL
-	node.ControlCA = identity.CA
-	node.ControlCertificate = identity.Certificate
-	node.ControlKey = identity.Key
-	if err := db.Save(&node).Error; err != nil {
-		t.Fatal(err)
-	}
-	if err := Reconcile(context.Background(), 1); err != nil {
-		t.Fatal(err)
-	}
-	db.First(&node, 1)
-	if node.DesiredRevision != 5 || node.AppliedRevision != 5 || manager.Status().Revision != 5 {
-		t.Fatal("controller did not continue existing agent revision")
-	}
-	if err := Reconcile(context.Background(), 1); err != nil {
-		t.Fatal(err)
-	}
-	if runtime.applies != 2 {
-		t.Fatal("unchanged reconciliation unnecessarily reapplied deployment")
-	}
-	runtime.reject = true
-	db.Model(&model.Node{}).Where("id = 1").Update("link_address", "changed.example")
-	if err := Reconcile(context.Background(), 1); err == nil {
-		t.Fatal("agent failure was reported as success")
-	}
-	db.First(&node, 1)
-	if node.DesiredRevision != 6 || node.AppliedRevision != 5 || node.LastError == "" {
-		t.Fatal("failed revision overwrote applied status")
-	}
-	attempts := runtime.attempts
-	if err := Reconcile(context.Background(), 1); err == nil {
-		t.Fatal("rejected revision was reported as applied")
-	}
-	if runtime.attempts != attempts {
-		t.Fatal("rejected configuration repeatedly disrupted the last-good runtime")
-	}
-	endpoints, err := ClientInbounds(db, client)
-	if err != nil || len(endpoints) != 1 || !strings.Contains(string(endpoints[0].Addrs), "first.example") {
-		t.Fatal("failed apply broke existing publication", err)
-	}
-	runtime.reject = false
-	if err := Save("nodes", "retry", json.RawMessage(`{"id":1}`), "test"); err != nil {
-		t.Fatal(err)
-	}
-	if err := Reconcile(context.Background(), 1); err != nil {
-		t.Fatal(err)
-	}
-	if runtime.attempts != attempts+1 {
-		t.Fatal("explicit retry did not attempt a new deployment")
-	}
-	db.Model(&model.Client{}).Where("id = 1").Update("enable", false)
-	if err := Reconcile(context.Background(), 1); err != nil {
-		t.Fatal(err)
-	}
-	var saved model.Node
-	db.First(&saved, 1)
-	var s Snapshot
-	_ = json.Unmarshal(saved.AppliedSnapshot, &s)
-	if len(s.Deployment.Users) != 0 {
-		t.Fatal("global client disable did not revoke node user")
-	}
-	public, _ := json.Marshal(saved)
-	if strings.Contains(string(public), "PRIVATE KEY") || strings.Contains(string(public), "deployment") {
-		t.Fatal("node API model exposed private state")
-	}
-	server.Close()
-	previousApplied := saved.AppliedRevision
-	db.Model(&model.Node{}).Where("id = 1").Update("link_address", "offline-edit.example")
-	if err := Reconcile(context.Background(), 1); err == nil {
-		t.Fatal("closed agent connection unexpectedly succeeded")
-	}
-	db.First(&saved, 1)
-	if saved.DesiredRevision <= previousApplied || saved.AppliedRevision != previousApplied || saved.LastError != "control_unreachable" {
-		t.Fatal("offline intent was not persisted separately from applied state")
-	}
+func attachFixtureAgent(t *testing.T, db *gorm.DB, node *model.Node, manager *nodeagent.ManagerV2) {
+	t.Helper()
+	server, identity := controlHandlerServer(t, nodeagent.HandlerV2(manager))
+	node.Address, node.ControlCA, node.ControlCertificate, node.ControlKey = server.URL, identity.CA, identity.Certificate, identity.Key
+	node.ControlEpoch = manager.Status().Epoch
+	var inbound model.NodeInbound
+	requireNodeTestSuccess(t, db.First(&inbound, whereNodeID, node.Id).Error)
+	template := model.NodeTemplate{Name: "fixture", Kind: deploymentTemplate, SchemaVersion: 1, Scope: "private", OwnerNodeId: node.Id}
+	spec := liveSpec()
+	spec.Entries[0] = SpecEntry{Key: inbound.ConnectionKey, Name: inbound.Tag, Protocol: inbound.Type, Enable: true, Options: json.RawMessage(`{"listen":"127.0.0.1","listen_port":14443,"tls":{"enabled":false}}`)}
+	requireNodeTestSuccess(t, db.Create(&template).Error)
+	requireNodeTestSuccess(t, appendDeploymentSpec(db, &template, spec))
+	requireNodeTestSuccess(t, bindLiveTemplate(db, node, template, true))
 }

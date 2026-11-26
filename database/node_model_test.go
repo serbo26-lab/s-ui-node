@@ -16,7 +16,7 @@ func TestR1AdditiveSchemaAndPrivateStateBackup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := old.AutoMigrate(&model.Node{}, &model.Client{}, &model.ClientNodeInbound{}); err != nil {
+	if err := old.AutoMigrate(&model.Node{}, &model.Client{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := old.Create(&model.Node{Id: 1, Name: "legacy", Enable: true}).Error; err != nil {
@@ -34,7 +34,7 @@ func TestR1AdditiveSchemaAndPrivateStateBackup(t *testing.T) {
 	t.Cleanup(func() { liveSQL.Close() })
 	var node model.Node
 	db.First(&node, 1)
-	if node.AssignmentMode != model.NodeAssignmentLegacy {
+	if node.AssignmentMode == model.NodeAssignmentWhole {
 		t.Fatal("schema migration activated whole-node access")
 	}
 	var count int64
@@ -48,7 +48,6 @@ func TestR1AdditiveSchemaAndPrivateStateBackup(t *testing.T) {
 		&model.NodeGeneratedMaterial{NodeId: 1, ConnectionKey: "stable", Purpose: "reality_private_key", EncryptedValue: "synthetic-encrypted-material"},
 		&model.NodeOverride{NodeId: 1, ConnectionKey: "stable", Path: "/tls/server_name", Operation: "set", Source: json.RawMessage(`{"kind":"node_parameter","name":"primary_domain"}`)},
 		&model.NodeTask{NodeId: 1, Kind: "access", Generation: 5, State: "queued"},
-		&model.NodeAssignmentMigration{NodeId: 1, State: "prepared", ReportDigest: "fixture", Decisions: json.RawMessage(`[]`)},
 	} {
 		if err := db.Create(row).Error; err != nil {
 			t.Fatal(err)

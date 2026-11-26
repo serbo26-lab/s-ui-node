@@ -26,9 +26,11 @@ POST form field `data` contains JSON:
 }
 ```
 
-The UI selects reusable inbound templates by `inbound_template_ids`; an empty
-selection creates a node without VPN listeners. The optional `protocols` and
-`template_id` fields remain API compatibility paths.
+The UI selects reusable inbound templates by `inbound_template_ids`. An empty
+selection creates a node without VPN listeners. Cloning a node with only
+private templates uses `protocols` to create new private presets and listener
+credentials. For an existing node, `template_id` can identify its current
+deployment and does not change the selection.
 
 The request key contains 16–96 letters, digits, underscores or hyphens. The same
 key and intent return the original job; a different intent conflicts. An explicit
@@ -56,9 +58,8 @@ ACKs are fenced by management generation and registration. New bootstrap holds
 VPN until fresh authenticated access; an ordinary later offline restart resumes
 the last good configuration.
 
-Assign a converted node using the client's independent `nodes` array.
-`inbounds` remains local; `nodeinbounds` is legacy exact remote selection
-and a read-only projection for whole-node clients. Read `clients?id=<ID>`
+Assign a node using the client's independent `nodes` array.
+`inbounds` remains local. The read-only `nodeinbounds` reports applied remote listener IDs. Read `clients?id=<ID>`
 before editing: the unfiltered list omits protocol configuration.
 
 For control-certificate renewal, HTTP-01 firewall permissions and interrupted

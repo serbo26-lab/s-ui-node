@@ -22,7 +22,7 @@ type ControlTLS struct {
 }
 
 func IsObject(name string) bool {
-	return name == "nodes" || name == "nodetemplates" || name == "nodeinbounds"
+	return name == "nodes" || name == "nodetemplates"
 }
 
 func Bundle() (map[string]interface{}, error) {
@@ -45,7 +45,10 @@ func Bundle() (map[string]interface{}, error) {
 		nodes[i].InboundTemplateIds = selections[nodes[i].TemplateId]
 		nodes[i].AgentTrafficAvailable = nodes[i].TrafficProcess != ""
 		nodes[i].DisableConfirmed = disableConfirmed(nodes[i])
-		nodes[i].ControlTLSConfigured = nodes[i].ControlCA != "" && nodes[i].ControlCertificate != "" && nodes[i].ControlKey != ""
+		if !managedNodeModel(nodes[i]) {
+			nodes[i].LastError = "unsupported_node_model"
+			continue
+		}
 		fresh, err := Compile(db, nodes[i])
 		if err != nil {
 			nodes[i].Pending = true
@@ -84,18 +87,14 @@ func Bundle() (map[string]interface{}, error) {
 		return nil, err
 	}
 	accessStates := []model.NodeAccessState{}
-	migrations := []model.NodeAssignmentMigration{}
 	if err := db.Find(&accessStates).Error; err != nil {
-		return nil, err
-	}
-	if err := db.Find(&migrations).Error; err != nil {
 		return nil, err
 	}
 	tlsProfiles, err := listTLSProfiles(db)
 	if err != nil {
 		return nil, err
 	}
-	return map[string]interface{}{"nodeaccess": accessStates, "nodemigrations": migrations, "nodes": nodes, "nodetemplates": templates, "nodeinbounds": inbounds, "installations": installations, "nodejobs": jobs, "tls_profiles": tlsProfiles}, nil
+	return map[string]interface{}{"nodeaccess": accessStates, "nodes": nodes, "nodetemplates": templates, "nodeinbounds": inbounds, "installations": installations, "nodejobs": jobs, "tls_profiles": tlsProfiles}, nil
 }
 
 func validPublishedAddress(value string) bool {
@@ -138,22 +137,12 @@ func validateManagementControl(node model.Node) error {
 	return nil
 }
 
-func validateControl(node model.Node) error {
-	if err := validateManagementControl(node); err != nil {
-		return err
-	}
-	if !validPublishedAddress(node.LinkAddress) {
-		return errors.New("invalid published node address")
-	}
-	return nil
-}
-
 func Save(object, action string, data json.RawMessage, actor string) error {
 	if !IsObject(object) {
 		return errors.New("unknown Nodes object")
 	}
 	return database.GetDB().Transaction(func(tx *gorm.DB) error {
-		if action == "setoverrides" || action == "privatecopy" || action == "sharedcopy" || action == "restoreversion" {
+		if action == "setoverrides" || action == "restoreversion" {
 			return saveLiveAction(tx, object, action, data, actor)
 		}
 		id, deleteRequest, err := parseSaveIdentity(object, action, data)
@@ -165,8 +154,6 @@ func Save(object, action string, data json.RawMessage, actor string) error {
 			id, err = saveTemplateObject(tx, action, data, id)
 		case "nodes":
 			id, err = saveServerObject(tx, action, data, id, deleteRequest)
-		case "nodeinbounds":
-			id, err = saveInboundObject(tx, action, data, id)
 		}
 		if err != nil {
 			return err

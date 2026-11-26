@@ -2,8 +2,7 @@
 
 The Nodes page uses the versioned whole-node model. Use **Add node** to connect
 a VPS through the [SSH installer](nodes-quickstart.md). Open the node from its
-card to manage its server access, recovery, and configuration. Existing legacy
-records keep their working assignments and appear with a migration notice.
+card to manage its server access, recovery, and configuration.
 
 1. In **Inbound templates**, create one of the supported client proxy inbounds
    listed in [nodes-model.md](nodes-model.md), using its protocol, Listen,
@@ -23,7 +22,6 @@ records keep their working assignments and appear with a migration notice.
 4. Assign **Nodes** in the client editor or bulk editor. Local inbound selection
    is separate. All enabled confirmed connections of each assigned node appear
    automatically; changing a template does not require reassigning clients.
-   Unresolved legacy assignments remain preserved and require explicit migration.
 5. Open the client's QR dialog and use **Copy Clash URL** or **Open Clash
    subscription**. This is the generated subscription, not a static link list.
 

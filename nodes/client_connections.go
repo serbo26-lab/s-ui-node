@@ -32,18 +32,19 @@ func clientConnections(tx *gorm.DB, client model.Client) ([]clientConnection, er
 	if !client.Enable || (client.Expiry > 0 && client.Expiry <= time.Now().Unix()) {
 		return result, nil
 	}
-	if !tx.Migrator().HasTable(&model.ClientNodeInbound{}) {
+	if !tx.Migrator().HasTable(&model.ClientNode{}) {
 		return result, nil
 	}
-	wanted, whole, err := publicationAssignments(tx, client.Id)
+	var assigned []uint
+	err := tx.Model(&model.ClientNode{}).Where("client_id = ? AND active = ?", client.Id, true).Pluck("node_id", &assigned).Error
 	if err != nil {
 		return nil, err
 	}
-	if len(wanted) == 0 && len(whole) == 0 {
+	if len(assigned) == 0 {
 		return result, nil
 	}
 	var nodes []model.Node
-	if err := tx.Where("enable = ? AND applied_revision > 0", true).Order("id").Find(&nodes).Error; err != nil {
+	if err := tx.Where("id IN ? AND enable = ? AND applied_revision > 0", assigned, true).Order("id").Find(&nodes).Error; err != nil {
 		return nil, err
 	}
 	var credentials map[string]map[string]interface{}
@@ -51,7 +52,7 @@ func clientConnections(tx *gorm.DB, client model.Client) ([]clientConnection, er
 		return nil, err
 	}
 	for _, node := range nodes {
-		connections, err := publishNodeConnections(tx, client, node, wanted, whole, credentials)
+		connections, err := publishNodeConnections(tx, client, node, credentials)
 		if err != nil {
 			return nil, err
 		}
@@ -60,36 +61,9 @@ func clientConnections(tx *gorm.DB, client model.Client) ([]clientConnection, er
 	return result, nil
 }
 
-func publicationAssignments(tx *gorm.DB, id uint) (map[uint]bool, map[uint]bool, error) {
-	var selected []model.ClientNodeInbound
-	if err := tx.Where("client_id = ?", id).Find(&selected).Error; err != nil {
-		return nil, nil, err
-	}
-	wanted, whole := map[uint]bool{}, map[uint]bool{}
-	for _, row := range selected {
-		wanted[row.NodeInboundId] = true
-	}
-	if tx.Migrator().HasTable(&model.ClientNode{}) {
-		var bindings []model.ClientNode
-		if err := tx.Where("client_id = ? AND active = ?", id, true).Find(&bindings).Error; err != nil {
-			return nil, nil, err
-		}
-		for _, binding := range bindings {
-			whole[binding.NodeId] = true
-		}
-	}
-	return wanted, whole, nil
-}
-
 func publicationSnapshot(tx *gorm.DB, node model.Node) (Snapshot, bool) {
 	var snapshot Snapshot
-	if json.Unmarshal(node.AppliedSnapshot, &snapshot) != nil || !snapshot.Node.Enable {
-		return snapshot, false
-	}
-	if node.AgentProtocol != 2 {
-		return snapshot, true
-	}
-	if !node.AgentRunning {
+	if !managedNodeModel(node) || !node.AgentRunning || json.Unmarshal(node.AppliedSnapshot, &snapshot) != nil || !snapshot.Node.Enable {
 		return snapshot, false
 	}
 	var acl model.NodeAccessState
@@ -109,7 +83,7 @@ func publicationSnapshot(tx *gorm.DB, node model.Node) (Snapshot, bool) {
 	return snapshot, true
 }
 
-func publishNodeConnections(tx *gorm.DB, client model.Client, node model.Node, wanted, whole map[uint]bool, credentials map[string]map[string]interface{}) ([]clientConnection, error) {
+func publishNodeConnections(tx *gorm.DB, client model.Client, node model.Node, credentials map[string]map[string]interface{}) ([]clientConnection, error) {
 	result := []clientConnection{}
 	snapshot, ok := publicationSnapshot(tx, node)
 	if !ok {
@@ -125,11 +99,7 @@ func publishNodeConnections(tx *gorm.DB, client model.Client, node model.Node, w
 	for _, inbound := range snapshot.Inbounds {
 		publisher.inboundIDs[inbound.ConnectionKey] = inbound.Id
 	}
-	wholeSelected := node.AssignmentMode == model.NodeAssignmentWhole && whole[node.Id]
 	for _, inbound := range snapshot.Inbounds {
-		if !(wholeSelected || (node.AssignmentMode != model.NodeAssignmentWhole && wanted[inbound.Id])) {
-			continue
-		}
 		if !certificatePublished(node, snapshot, inbound) {
 			continue
 		}

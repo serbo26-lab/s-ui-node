@@ -11,7 +11,7 @@ import (
 
 func TestAgentUpgradeWaitsForActiveReconciliation(t *testing.T) {
 	db, node, _ := fixture(t)
-	node.AgentProtocol, node.ControlEpoch = 2, "fixture-epoch"
+	node.AgentProtocol, node.ControlEpoch, node.TemplateTargetVersion = 2, "fixture-epoch", 1
 	requireNodeTestSuccess(t, db.Save(&node).Error)
 	value, _ := nodeLocks.LoadOrStore(node.Id, &sync.Mutex{})
 	lock := value.(*sync.Mutex)

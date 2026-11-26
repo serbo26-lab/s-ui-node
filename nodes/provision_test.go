@@ -6,9 +6,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
@@ -91,47 +89,6 @@ func TestProvisionIdentityIsMutuallyAuthenticatedAndSSHKeyUsable(t *testing.T) {
 	}
 }
 
-func TestManagedRecoveryPreservesInboundIDsBindingsAndCustomerKeys(t *testing.T) {
-	db, node, client := fixture(t)
-	var original model.NodeInbound
-	db.First(&original, 1)
-	install := model.NodeInstallation{NodeId: node.Id, IP: "203.0.113.20", Domain: "n-1.nodes.example", Ready: true, ControlPort: 16500}
-	if err := db.Create(&install).Error; err != nil {
-		t.Fatal(err)
-	}
-	request := ProvisionRequest{NodeId: node.Id, Name: "Amsterdam", Protocols: []string{"vless"}}
-	if err := configureManagedNode(db, &node, &install, request, map[string]int{"vless": 34443}); err != nil {
-		t.Fatal(err)
-	}
-	var after model.NodeInbound
-	db.First(&after, original.Id)
-	if after.Id != original.Id || after.NodeId != node.Id {
-		t.Fatal("ID changed")
-	}
-	var a, b map[string]interface{}
-	_ = json.Unmarshal(original.Options, &a)
-	_ = json.Unmarshal(after.Options, &b)
-	left, _ := json.Marshal(a["tls"])
-	right, _ := json.Marshal(b["tls"])
-	if string(left) != string(right) {
-		t.Fatal("recovery replaced protocol identity")
-	}
-	var count int64
-	db.Model(&model.ClientNodeInbound{}).Where("client_id = ? AND node_inbound_id = ?", client.Id, original.Id).Count(&count)
-	if count != 1 {
-		t.Fatal("assignment lost")
-	}
-	var current model.Client
-	db.First(&current, client.Id)
-	if string(current.Config) != string(client.Config) {
-		t.Fatal("customer keys changed")
-	}
-	snapshot := confirm(t, db, node)
-	if !snapshot.Node.Managed || snapshot.Node.Name != "Amsterdam" {
-		t.Fatal("managed publication name missing")
-	}
-}
-
 func TestProvisionInputValidationAndSecretRedaction(t *testing.T) {
 	good := ProvisionRequest{Name: "Amsterdam", IP: "203.0.113.20", Protocols: []string{"vless", "vless"}}
 	if err := normalizeProvision(&good); err != nil || good.SSHPort != 22 || good.SSHUser != "root" || len(good.Protocols) != 1 {
@@ -155,18 +112,5 @@ func TestProvisionInputValidationAndSecretRedaction(t *testing.T) {
 	data, _ := json.Marshal(model.NodeInstallation{PrivateKey: "SECRET-SSH", ServerKey: "SECRET-TLS", HostKey: "HOST-KEY"})
 	if strings.Contains(string(data), "SECRET") || strings.Contains(string(data), "HOST-KEY") {
 		t.Fatal("private installation fields exposed")
-	}
-}
-
-func TestProvisionRemotePythonParsesBeforeDeployment(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("Linux deployment scripts are checked on the VPS")
-	}
-	for _, script := range []string{inspectScript(2), installAgentScript} {
-		cmd := exec.Command("python3", "-c", "import sys;compile(sys.stdin.read(),'node-installer','exec')")
-		cmd.Stdin = strings.NewReader(script)
-		if output, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("invalid remote script: %s %v", output, err)
-		}
 	}
 }

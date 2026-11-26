@@ -12,7 +12,6 @@ import (
 	"net/http"
 	"os"
 	"regexp"
-	"strings"
 	"time"
 
 	"github.com/alireza0/s-ui/database"
@@ -185,7 +184,7 @@ func executeLiveProvision(ctx context.Context, job *model.NodeJob, plan *livePro
 		return err
 	}
 	input := map[string]interface{}{"id": job.NodeId, "owner": plan.Target.OwnerID, "bootstrap_id": plan.Target.BootstrapID, "ssh_user": plan.Target.SSHUser, "control_port": plan.Target.ControlPort, "sha256": digest, "ca": plan.Control.CA, "certificate": cert, "key": serverKey, "authorized_key": authorized, "listeners": plan.Listeners, "generation": plan.ExpectedGeneration + 1}
-	if err = installRemoteAgent(ctx, client, plan.Target.SSHUser, liveInstallScript(), input); err != nil {
+	if err = installRemoteAgent(ctx, client, plan.Target.SSHUser, liveInstallScript, input); err != nil {
 		return err
 	}
 	if err = stageLiveJob(job, *plan, "register"); err != nil {
@@ -430,20 +429,6 @@ func compressedAgentStream(input io.Reader, send func(io.Reader) error) error {
 	err := send(reader)
 	_ = reader.CloseWithError(err)
 	return errors.Join(err, <-done)
-}
-
-func liveInstallScript() string {
-	script := installAgentScript
-	script = strings.Replace(script, "ident=int(p['id']);name='s-ui-node-'+str(ident)", "ident=int(p['id']);owner=p['owner'];assert __import__('re').fullmatch('[a-f0-9]{32}',owner);slot=str(ident)+'-'+owner[:12];name='s-ui-node-'+slot", 1)
-	script = strings.ReplaceAll(script, "/str(ident)", "/slot")
-	script = strings.Replace(script, "marker='# S-UI managed node '+str(ident)", "marker='# S-UI managed node '+str(ident)+' owner='+owner", 1)
-	script = strings.Replace(script, "keymarker='s-ui-managed-node-'+str(ident)", "keymarker='s-ui-managed-node-'+slot", 1)
-	script = strings.Replace(script, "prior=authorized.read_text() if authorized.exists() else ''", "import fcntl\nkeylock=os.open(sshdir/'.s-ui-node-key.lock',os.O_RDWR|os.O_CREAT|os.O_NOFOLLOW,0o600);fcntl.flock(keylock,fcntl.LOCK_EX)\nprior=authorized.read_text() if authorized.exists() else ''", 1)
-	script = strings.Replace(script, " --client-ca %d/ca.pem", " --bootstrap-id '''+p['bootstrap_id']+''' --client-ca %d/ca.pem", 1)
-	script = strings.Replace(script, "assert ident>0", "assert __import__('re').fullmatch('[a-zA-Z0-9_-]{16,96}',p['bootstrap_id'])\nassert ident>0", 1)
-	// A failed new installation stays fenced; never restart an old cached ACL.
-	script = strings.Replace(script, "systemctl('restart',name,wait=90,check=False)", "systemctl('stop',name,wait=90,check=False)", 1)
-	return script
 }
 
 const liveHostHeader = `import json,os,platform,re,socket,subprocess,sys

@@ -10,7 +10,7 @@ import (
 
 func TestTemplateVersionsAreAppendOnlyAndCompareExpectedVersion(t *testing.T) {
 	db, _, _ := fixture(t)
-	request := map[string]interface{}{"name": "versioned", "spec": specExample()}
+	request := map[string]interface{}{"name": "versioned", "kind": inboundTemplate, "spec": specExample()}
 	body, _ := json.Marshal(request)
 	if err := Save("nodetemplates", "new", body, "test"); err != nil {
 		t.Fatal(err)
@@ -51,25 +51,5 @@ func TestTemplateVersionsAreAppendOnlyAndCompareExpectedVersion(t *testing.T) {
 	}
 	if err := Save("nodetemplates", "edit", json.RawMessage(`{"id":1,"name":"old editor","config":{},"blueprints":[]}`), "test"); err == nil {
 		t.Fatal("legacy editor overwrote versioned template")
-	}
-}
-
-func TestLegacyTemplateVersionBaselinePreservesWorkingNode(t *testing.T) {
-	db, template, node := templateFixture(t)
-	node.TemplateId = template.Id
-	node.Config = nil
-	db.Save(&node)
-	before := string(template.Config)
-	if err := Save("nodetemplates", "edit", json.RawMessage(`{"id":1,"name":"changed","config":{"log":{"level":"debug"}},"blueprints":[]}`), "test"); err != nil {
-		t.Fatal(err)
-	}
-	var versions []model.NodeTemplateVersion
-	db.Order("version").Find(&versions)
-	if len(versions) != 2 || versions[0].Version != 1 || !strings.Contains(string(versions[0].Payload), "warn") {
-		t.Fatal("old template baseline not preserved")
-	}
-	db.First(&node, node.Id)
-	if string(node.Config) != before {
-		t.Fatal("history creation modified legacy node base")
 	}
 }

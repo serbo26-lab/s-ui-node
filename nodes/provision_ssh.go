@@ -117,42 +117,6 @@ func remoteStream(ctx context.Context, client *ssh.Client, user, script string, 
 	return output.Bytes(), nil
 }
 
-func inspectScript(id uint) string {
-	prefix := fmt.Sprintf("import json,os,platform,shutil,subprocess,socket\nfrom pathlib import Path\nif os.geteuid()!=0 or not Path('/run/systemd/system').exists():raise SystemExit('root/systemd required')\npayload=json.load(__import__('sys').stdin)\nunit=Path('/etc/systemd/system/s-ui-node-%d.service')\nowned=unit.exists() and '# S-UI managed node %d' in unit.read_text()\npayload['recover']=payload.get('recover') and owned\n", id, id)
-	// The inspection code consumes only the locally generated structured payload.
-	script := strings.Replace(remoteInspection, "p=json.load(__import__('sys').stdin)", "p=payload", 1)
-	return prefix + script
-}
-
-const remoteInspection = `import json,socket,platform,subprocess
-p=json.load(__import__('sys').stdin)
-ports={}
-for proto in p['protocols']:
- kind=socket.SOCK_DGRAM if proto in ('tuic','hysteria2') else socket.SOCK_STREAM
- old=p.get('ports',{}).get(proto)
- candidates=[old] if old else [443,8443,2053,2083,2087,2096]+list(range(20000,20100))
- for candidate in candidates:
-  if not candidate or candidate in ports.values():continue
-  with socket.socket(socket.AF_INET,socket.SOCK_STREAM) as test_tcp:
-   pass
-  with socket.socket(socket.AF_INET,kind) as s:
-   try:s.bind(('0.0.0.0',candidate))
-   except OSError:
-    if old and p.get('recover'):ports[proto]=candidate;break
-    continue
-  ports[proto]=candidate;break
- if proto not in ports:raise SystemExit('VPN port occupied')
-control=p.get('control_port',0)
-if not control:
- for candidate in range(16500,16600):
-  with socket.socket() as s:
-   try:s.bind(('127.0.0.1',candidate));control=candidate;break
-   except OSError:pass
- if not control:raise SystemExit('no control port')
-arch={'x86_64':'amd64','aarch64':'arm64'}.get(platform.machine(),'unsupported')
-print(json.dumps({'arch':arch,'ports':ports,'control_port':control}))
-`
-
 type limitedBuffer struct{ bytes.Buffer }
 
 func (b *limitedBuffer) Write(p []byte) (int, error) {

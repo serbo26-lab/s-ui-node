@@ -82,21 +82,24 @@ func TestControlRequiresClientCertificateAndReturnsNoCredentials(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := NewManager(7, FileStore{Directory: t.TempDir()}, &fakeRuntime{})
-	server := httptest.NewUnstartedServer(Handler(m))
+	m := NewManagerV2(7, FileStoreV2{Directory: t.TempDir()}, &safeFake{})
+	requireNodeTestSuccess(t, m.Restore())
+	defer m.Close()
+	_, grant := vlessState(m.Status().Epoch, 14443)
+	server := httptest.NewUnstartedServer(HandlerV2(m))
 	server.TLS = tlsConfig
 	server.StartTLS()
 	defer server.Close()
 	unauthorized := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS13}}, Timeout: 3 * time.Second}
-	if response, err := unauthorized.Get(server.URL + "/v1/status"); err == nil {
+	if response, err := unauthorized.Get(server.URL + "/v2/status"); err == nil {
 		response.Body.Close()
 		t.Fatal("control accepted a connection without client certificate")
 	}
 	transport := &http.Transport{TLSClientConfig: &tls.Config{RootCAs: roots, Certificates: []tls.Certificate{identity}, MinVersion: tls.VersionTLS13}}
 	defer transport.CloseIdleConnections()
 	client := &http.Client{Transport: transport, Timeout: 3 * time.Second}
-	body, _ := json.Marshal(deployment(1, 0))
-	request, _ := http.NewRequest(http.MethodPut, server.URL+"/v1/deployment", bytes.NewReader(body))
+	body, _ := json.Marshal(grant)
+	request, _ := http.NewRequest(http.MethodPut, server.URL+"/v2/access", bytes.NewReader(body))
 	response, err := client.Do(request)
 	if err != nil {
 		t.Fatal(err)
@@ -109,7 +112,7 @@ func TestControlRequiresClientCertificateAndReturnsNoCredentials(t *testing.T) {
 	if bytes.Contains(result, []byte("11111111")) || bytes.Contains(result, []byte(`"config"`)) {
 		t.Fatal("status exposed credentials")
 	}
-	request, _ = http.NewRequest(http.MethodPut, server.URL+"/v1/deployment", bytes.NewBufferString(string(body)+` {}`))
+	request, _ = http.NewRequest(http.MethodPut, server.URL+"/v2/access", bytes.NewBufferString(string(body)+` {}`))
 	response, err = client.Do(request)
 	if err != nil {
 		t.Fatal(err)
@@ -118,10 +121,10 @@ func TestControlRequiresClientCertificateAndReturnsNoCredentials(t *testing.T) {
 	if response.StatusCode != 400 {
 		t.Fatal("trailing body accepted")
 	}
-	d := deployment(2, 0)
-	d.NodeID = 8
-	body, _ = json.Marshal(d)
-	request, _ = http.NewRequest(http.MethodPut, server.URL+"/v1/deployment", bytes.NewReader(body))
+	grant.NodeID = 8
+	grant.Revision++
+	body, _ = json.Marshal(grant)
+	request, _ = http.NewRequest(http.MethodPut, server.URL+"/v2/access", bytes.NewReader(body))
 	response, err = client.Do(request)
 	if err != nil {
 		t.Fatal(err)

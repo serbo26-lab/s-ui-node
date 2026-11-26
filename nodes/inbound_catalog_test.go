@@ -12,25 +12,15 @@ import (
 	"gorm.io/gorm"
 )
 
-func TestInboundCatalogUpgradeAndSharedEditPreserveConnections(t *testing.T) {
+func TestInboundCatalogSharedEditPreservesConnections(t *testing.T) {
 	f := liveSetup(t, 2)
 	f.run(t, 0)
 	f.run(t, 1)
-	orphan := model.NodeTemplate{Name: "Earlier private deployment", SchemaVersion: 1, Scope: "private", OwnerNodeId: f.nodes[0].Id}
-	requireNodeTestSuccess(t, f.db.Create(&orphan).Error)
-	requireNodeTestSuccess(t, appendDeploymentSpec(f.db, &orphan, liveSpec()))
 	var before []model.NodeInbound
 	requireNodeTestSuccess(t, f.db.Order("node_id").Find(&before).Error)
-	for range 2 {
-		requireNodeTestSuccess(t, UpgradeInboundCatalog(f.db))
-	}
 	ids, err := catalogMembers(f.db, f.template.Id)
 	if err != nil || len(ids) != 1 {
 		t.Fatalf("expected one stable catalog member, got %v: %v", ids, err)
-	}
-	archived, err := catalogMembers(f.db, orphan.Id)
-	if err != nil || len(archived) != 0 {
-		t.Fatalf("detached private deployment crowded the catalog: %v %v", archived, err)
 	}
 	var inbound model.NodeTemplate
 	requireNodeTestSuccess(t, f.db.First(&inbound, ids[0]).Error)
@@ -62,7 +52,6 @@ func TestInboundCatalogUpgradeAndSharedEditPreserveConnections(t *testing.T) {
 
 func TestNodeSelectionAddsOneInboundWithoutChangingOtherNode(t *testing.T) {
 	f := liveSetup(t, 2)
-	requireNodeTestSuccess(t, UpgradeInboundCatalog(f.db))
 	ids, err := catalogMembers(f.db, f.template.Id)
 	requireNodeTestSuccess(t, err)
 	spec := liveSpec()
@@ -85,7 +74,6 @@ func TestNodeSelectionAddsOneInboundWithoutChangingOtherNode(t *testing.T) {
 
 func TestNodeSelectionCanClearAllInbounds(t *testing.T) {
 	f := liveSetup(t, 2)
-	requireNodeTestSuccess(t, UpgradeInboundCatalog(f.db))
 	f.run(t, 0)
 	f.run(t, 1)
 	selectInbounds := func(ids []uint) error {
@@ -143,7 +131,7 @@ func TestAccessFailureDoesNotReportStructuralFailure(t *testing.T) {
 }
 
 func TestPrivateInboundDeletionAfterNodeRemoval(t *testing.T) {
-	for _, name := range []string{"delete node", "upgrade old database"} {
+	for _, name := range []string{"delete node", "orphan from backup"} {
 		t.Run(name, func(t *testing.T) {
 			checkPrivateInboundDeletion(t, name)
 		})
@@ -210,9 +198,6 @@ func checkPrivateInboundDeletion(t *testing.T, name string) {
 		requireNodeTestSuccess(t, Save("nodes", "del", body, "test"))
 	} else {
 		requireNodeTestSuccess(t, db.Delete(&node).Error)
-		for range 2 {
-			requireNodeTestSuccess(t, UpgradeInboundCatalog(db))
-		}
 	}
 	if err := deleteTemplate(inbound.Id); err != nil {
 		t.Fatalf("deleted node still blocks the inbound template: %v", err)

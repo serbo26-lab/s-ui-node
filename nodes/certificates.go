@@ -13,8 +13,8 @@ type CertificateReport struct {
 	Certificates []nodeagent.CertificateStatus `json:"certificates"`
 }
 
-func certificateReport(status nodeagent.Status) json.RawMessage {
-	body, _ := json.Marshal(CertificateReport{status.Revision, time.Now().Unix(), status.Certificates})
+func certificateReport(revision uint64, certificates []nodeagent.CertificateStatus) json.RawMessage {
+	body, _ := json.Marshal(CertificateReport{revision, time.Now().Unix(), certificates})
 	return body
 }
 
