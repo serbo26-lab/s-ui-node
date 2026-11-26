@@ -11,7 +11,7 @@ import (
 
 // Activity is independent from traffic charts and never increments client quota.
 func recordClientActivity(db *gorm.DB, node model.Node, sample *nodeagent.TrafficSample, observed time.Time) error {
-	if sample == nil || len(sample.Activity) == 0 {
+	if sample == nil || len(sample.Activity) == 0 || len(sample.Users) > 0 {
 		return nil
 	}
 	return db.Transaction(func(tx *gorm.DB) error {

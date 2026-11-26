@@ -26,7 +26,7 @@ func TestActivityIsSampledWithoutControllerAndSamplesAreIndependent(t *testing.T
 		}},
 		"outbounds": []any{map[string]string{"type": "direct", "tag": "direct"}},
 	})
-	if err := runtime.ApplySafe(body); err != nil {
+	if err := runtime.ApplyWithAccess(body, AccessSnapshot{Clients: []Grant{{Name: "client/1", TrafficID: "1:0"}}}); err != nil {
 		t.Fatal(err)
 	}
 	conn, peer := net.Pipe()
@@ -46,6 +46,9 @@ func TestActivityIsSampledWithoutControllerAndSamplesAreIndependent(t *testing.T
 		t.Fatal("offline traffic did not retain user activity")
 	}
 	recorded := first.Activity["client/1"]
+	if usage := first.Users["1:0"]; usage.Up+usage.Down != 4 {
+		t.Fatal("routed bytes did not reach the client's quota counter", usage)
+	}
 	first.Activity["client/1"] = 0
 	second := runtime.Traffic()
 	if second.Activity["client/1"] != recorded {

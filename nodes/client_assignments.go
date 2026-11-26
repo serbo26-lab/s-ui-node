@@ -129,6 +129,9 @@ func saveWholeNodeAssignments(tx *gorm.DB, client *model.Client) error {
 // DeleteClientAssignments queues access removal before deleting legacy links.
 // The caller deletes the client in the same transaction.
 func DeleteClientAssignments(tx *gorm.DB, ids []uint) error {
+	if err := tx.Where("client_id IN ?", ids).Delete(&model.NodeClientTraffic{}).Error; err != nil {
+		return err
+	}
 	if err := database.RevokeClientNodes(tx, ids); err != nil {
 		return err
 	}

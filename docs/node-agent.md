@@ -102,8 +102,8 @@ downgrade and OS-reinstall recovery for the new epoch model remain later work.
 
 There is no heartbeat deadline that shuts down the VPN. Known absolute user
 expiries are checked locally once per second. A new central revocation while the
-controller is unreachable can only arrive after reconnection. Traffic accounting
-is not connected to the panel's client quota in this prototype.
+controller is unreachable can only arrive after reconnection. Per-client traffic
+is counted towards the shared panel quota after the controller receives it.
 
 The v2 Linux checks include real VLESS traffic, existing-session closure,
 explicit re-enable and agent-manager restart, plus injected structural/runtime/

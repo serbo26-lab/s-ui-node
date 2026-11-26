@@ -359,6 +359,9 @@ func Save(object, action string, data json.RawMessage, actor string) error {
 				if err := tx.Delete(&model.Node{}, id).Error; err != nil {
 					return err
 				}
+				if err := tx.Where("node_id = ?", id).Delete(&model.NodeClientTraffic{}).Error; err != nil {
+					return err
+				}
 				if err := detachOrphanedPrivateDeployments(tx); err != nil {
 					return err
 				}

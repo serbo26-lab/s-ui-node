@@ -5,17 +5,22 @@ import (
 	"maps"
 	"math"
 	"time"
-
-	"github.com/gofrs/uuid/v5"
 )
 
 // A cumulative sample can be read by multiple controllers without draining
 // their data. The process ID distinguishes natural resets after a restart.
 type TrafficSample struct {
-	Process  string           `json:"process"`
-	Up       int64            `json:"up"`
-	Down     int64            `json:"down"`
-	Activity map[string]int64 `json:"activity,omitempty"`
+	Process  string                 `json:"process"`
+	Up       int64                  `json:"up"`
+	Down     int64                  `json:"down"`
+	Activity map[string]int64       `json:"activity,omitempty"`
+	Users    map[string]UserTraffic `json:"users,omitempty"`
+}
+
+type UserTraffic struct {
+	Up   int64 `json:"up"`
+	Down int64 `json:"down"`
+	At   int64 `json:"at"`
 }
 
 func (r *CoreRuntime) collectTraffic() {
@@ -24,11 +29,25 @@ func (r *CoreRuntime) collectTraffic() {
 		return
 	}
 	for _, row := range *box.SessionTracker().GetStats() {
+		r.trafficDirty = true
 		if row.Resource == "user" && row.Traffic > 0 {
 			if r.traffic.Activity == nil {
 				r.traffic.Activity = map[string]int64{}
 			}
 			r.traffic.Activity[row.Tag] = max(r.traffic.Activity[row.Tag], row.DateTime)
+			if id := r.trafficAliases[row.Tag]; id != "" {
+				if r.traffic.Users == nil {
+					r.traffic.Users = map[string]UserTraffic{}
+				}
+				counter := r.traffic.Users[id]
+				if row.Direction {
+					counter.Up += min(row.Traffic, math.MaxInt64-counter.Up)
+				} else {
+					counter.Down += min(row.Traffic, math.MaxInt64-counter.Down)
+				}
+				counter.At = max(counter.At, row.DateTime)
+				r.traffic.Users[id] = counter
+			}
 		}
 		if row.Resource != "inbound" {
 			continue
@@ -46,16 +65,13 @@ func (r *CoreRuntime) Traffic() *TrafficSample {
 		return nil
 	}
 	defer r.mu.Unlock()
-	if r.traffic.Process == "" {
-		id, err := uuid.NewV4()
-		if err != nil {
-			return nil
-		}
-		r.traffic.Process = id.String()
-	}
 	r.collectTraffic()
+	if r.trafficLoadError != nil || r.persistTraffic() != nil {
+		return nil
+	}
 	sample := r.traffic
 	sample.Activity = maps.Clone(r.traffic.Activity)
+	sample.Users = maps.Clone(r.traffic.Users)
 	return &sample
 }
 
@@ -66,6 +82,53 @@ func (r *CoreRuntime) SampleTraffic() {
 	}
 	defer r.mu.Unlock()
 	r.collectTraffic()
+	_ = r.persistTraffic()
+}
+
+func trafficAliases(access AccessSnapshot) map[string]string {
+	aliases := map[string]string{}
+	for _, grant := range access.Clients {
+		if grant.TrafficID == "" {
+			continue
+		}
+		aliases[grant.Name] = grant.TrafficID
+		for kind, raw := range grant.Credentials {
+			if !UsernameAuth(kind) {
+				continue
+			}
+			var auth struct {
+				Username string `json:"username"`
+			}
+			if json.Unmarshal(raw, &auth) == nil && auth.Username != "" {
+				aliases[auth.Username] = grant.TrafficID
+			}
+		}
+	}
+	return aliases
+}
+
+func (r *CoreRuntime) setTrafficAliases(aliases []map[string]string) {
+	if len(aliases) > 0 {
+		r.trafficAliases = aliases[0]
+	}
+}
+
+func (r *CoreRuntime) SetTrafficAccess(access AccessSnapshot) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.collectTraffic()
+	r.trafficAliases = trafficAliases(access)
+}
+
+func (r *CoreRuntime) TrafficAccountingError() string {
+	if !r.mu.TryLock() {
+		return ""
+	}
+	defer r.mu.Unlock()
+	if r.trafficLoadError != nil || r.trafficWriteError != nil {
+		return "traffic_accounting_failed"
+	}
+	return ""
 }
 
 func (r *CoreRuntime) pruneActivity() {

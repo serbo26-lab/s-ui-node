@@ -22,6 +22,7 @@ type Structure struct {
 
 type Grant struct {
 	Name        string                     `json:"name"`
+	TrafficID   string                     `json:"traffic_id,omitempty"`
 	Expires     int64                      `json:"expires"`
 	All         bool                       `json:"all"`
 	Tags        []string                   `json:"tags,omitempty"`
@@ -82,6 +83,7 @@ func (a AccessSnapshot) Validate() error {
 		return errors.New("invalid access identity or array")
 	}
 	seen := map[string]bool{}
+	trafficNames := map[string]string{}
 	for _, g := range a.Clients {
 		if g.Name == "" || seen[g.Name] || g.Expires < 0 || (g.All && len(g.Tags) > 0) || (!g.All && len(g.Tags) == 0) {
 			return errors.New("invalid access grant")
@@ -97,6 +99,16 @@ func (a AccessSnapshot) Validate() error {
 		for protocol, raw := range g.Credentials {
 			if err := ValidateCredential(protocol, raw); err != nil {
 				return err
+			}
+			if UsernameAuth(protocol) && g.TrafficID != "" {
+				var auth struct {
+					Username string `json:"username"`
+				}
+				_ = json.Unmarshal(raw, &auth)
+				if owner, exists := trafficNames[auth.Username]; exists && owner != g.TrafficID {
+					return errors.New("ambiguous traffic username")
+				}
+				trafficNames[auth.Username] = g.TrafficID
 			}
 		}
 		for tag, raw := range g.InboundCredentials {

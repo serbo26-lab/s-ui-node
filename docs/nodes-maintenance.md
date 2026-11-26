@@ -68,4 +68,28 @@ Node agents sample authenticated user traffic every second, including while
 the panel is unreachable. The panel merges that activity into the existing
 client Last online timestamp when communication resumes. Older observations
 cannot move the timestamp backwards. User activity is recorded independently
-of traffic-chart settings and does not add remote traffic to local quota.
+of traffic-chart settings. Remote user traffic also contributes to the client's
+existing upload/download counters and quota.
+
+## Shared client quota
+
+Each agent retains cumulative per-client byte counters in a private, atomically
+written ledger. The ledger survives ordinary agent restarts. The panel commits
+each node's cursor and the corresponding client usage in the same transaction.
+Repeated polls, delayed smaller samples and a panel restart do not charge the
+same bytes twice. Different nodes add independent deltas, including concurrent
+connections. Quota resets preserve cursors so old samples are not charged again.
+The normal S-UI deplete job disables the client locally and on all assigned nodes.
+
+Accounting starts when the upgraded agent receives a metered access snapshot;
+previous unmetered remote traffic is not reconstructed. Graph collection is
+independent of quota collection. Existing agents upgrade through the panel's
+normal agent update path.
+
+Enforcement follows the panel's polling/depletion interval. An offline node
+continues serving the last saved configuration; it reports accumulated usage
+after reconnection. A shared hard byte limit during a panel outage is not
+provided, so simultaneous sessions and reporting delays can exceed the quota.
+A forced power loss can lose traffic since the last one-second checkpoint.
+Bytes received after a quota reset are charged to the current period, even if
+they were accumulated offline before the reset.

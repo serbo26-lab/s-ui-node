@@ -64,7 +64,7 @@ func compileAccess(tx *gorm.DB, node model.Node, extended, proxies bool) (nodeag
 		if json.Unmarshal(client.Config, &config) != nil {
 			continue
 		} // corrupt clients fail closed individually
-		g := nodeagent.Grant{Name: effectiveUserName(tx, node, client), Expires: client.Expiry, All: (node.AssignmentMode == model.NodeAssignmentWhole || node.AssignmentMode == model.NodeAssignmentActivating), Tags: tags[client.Id], Credentials: map[string]json.RawMessage{}}
+		g := nodeagent.Grant{Name: effectiveUserName(tx, node, client), TrafficID: clientTrafficID(client), Expires: client.Expiry, All: (node.AssignmentMode == model.NodeAssignmentWhole || node.AssignmentMode == model.NodeAssignmentActivating), Tags: tags[client.Id], Credentials: map[string]json.RawMessage{}}
 		changed := false
 		if config == nil {
 			config = map[string]json.RawMessage{}

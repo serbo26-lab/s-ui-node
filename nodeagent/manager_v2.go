@@ -161,7 +161,7 @@ func (m *ManagerV2) fail(code string) {
 	m.mu.Unlock()
 }
 
-func (m *ManagerV2) applySafe(body []byte) error {
+func (m *ManagerV2) applySafe(body []byte, access AccessSnapshot) error {
 	done := make(chan struct{})
 	exited := make(chan struct{})
 	timer := time.NewTimer(m.applyTimeout)
@@ -174,7 +174,14 @@ func (m *ManagerV2) applySafe(body []byte) error {
 			m.runtime.Interrupt()
 		}
 	}()
-	err := m.runtime.ApplySafe(body)
+	var err error
+	if accounting, ok := m.runtime.(interface {
+		ApplyWithAccess([]byte, AccessSnapshot) error
+	}); ok {
+		err = accounting.ApplyWithAccess(body, access)
+	} else {
+		err = m.runtime.ApplySafe(body)
+	}
 	close(done)
 	<-exited // A late watchdog must never cancel the next runtime operation.
 	return err
@@ -209,11 +216,14 @@ func (m *ManagerV2) applyCurrent(candidate *Structure) error {
 				err = m.runtime.Validate(body)
 			}
 			if err == nil && (!bytes.Equal(body, m.effective) || !m.runtime.Running()) {
-				err = m.applySafe(body)
+				err = m.applySafe(body, state.Access)
 			}
 		}
 		if err != nil {
 			return err
+		}
+		if accounting, ok := m.runtime.(interface{ SetTrafficAccess(AccessSnapshot) }); ok {
+			accounting.SetTrafficAccess(state.Access)
 		}
 		if trial {
 			if err := m.resources.FinishTrial(true); err != nil {

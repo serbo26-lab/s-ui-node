@@ -126,8 +126,8 @@ to allocate a fresh revision. Connection failures continue to be retried.
 
 ## Access and recovery
 
-Remote bytes do not increment local client counters. Client.Enable remains
-global: manual disable, expiry and the existing local-quota deplete task also
+Remote user bytes increment the same client counters as local inbounds.
+Client.Enable remains global: manual disable, expiry and the quota deplete task
 remove node users. Known expiry is enforced by the agent without the panel.
 New central revocation during an outage is delivered after reconnection.
 

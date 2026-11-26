@@ -19,6 +19,9 @@ func HandlerV2(manager *ManagerV2) http.Handler {
 		if runtime, ok := manager.runtime.(interface{ Traffic() *TrafficSample }); ok {
 			status.Traffic = runtime.Traffic()
 		}
+		if accounting, ok := manager.runtime.(interface{ TrafficAccountingError() string }); ok && status.Error == "" {
+			status.Error = accounting.TrafficAccountingError()
+		}
 		_ = json.NewEncoder(w).Encode(status)
 	}
 	mux.HandleFunc("/v2/status", status)

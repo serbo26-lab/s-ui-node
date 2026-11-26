@@ -19,6 +19,7 @@ func nodeSchema() []table {
 		{"node_tasks", &model.NodeTask{}, copyRows[model.NodeTask]},
 		{"node_assignment_migrations", &model.NodeAssignmentMigration{}, copyRows[model.NodeAssignmentMigration]},
 		{"node_access_states", &model.NodeAccessState{}, copyRows[model.NodeAccessState]},
+		{"node_client_traffics", &model.NodeClientTraffic{}, copyRows[model.NodeClientTraffic]},
 		{"node_deployments", &model.NodeDeployment{}, copyRows[model.NodeDeployment]},
 		{"node_port_reservations", &model.NodePortReservation{}, copyRows[model.NodePortReservation]},
 		{"node_dns_profiles", &model.NodeDNSProfile{}, copyRows[model.NodeDNSProfile]},

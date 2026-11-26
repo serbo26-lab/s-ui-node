@@ -28,6 +28,10 @@ type CoreRuntime struct {
 	cancelMu            sync.Mutex
 	certificateResolver func(string) (nodecert.Metadata, error)
 	traffic             TrafficSample
+	trafficAliases      map[string]string
+	trafficDirty        bool
+	trafficLoadError    error
+	trafficWriteError   error
 }
 
 func (r *CoreRuntime) SetCertificateResolver(resolve func(string) (nodecert.Metadata, error)) {
@@ -67,10 +71,14 @@ func (r *CoreRuntime) stopCore() error {
 func NewCoreRuntimeWithState(directory string) *CoreRuntime {
 	r := NewCoreRuntime()
 	r.stateDirectory, _ = filepath.Abs(directory)
+	r.trafficLoadError = r.loadTraffic()
 	return r
 }
 
 func (r *CoreRuntime) Validate(config []byte) error {
+	if r.trafficLoadError != nil {
+		return errors.New("invalid traffic accounting state")
+	}
 	var err error
 	config, err = r.prepareCertificates(config, false)
 	if err != nil {
@@ -115,7 +123,11 @@ func (r *CoreRuntime) Apply(config []byte) error {
 // and rebuilds the last-good structure with the latest durable access intent.
 func (r *CoreRuntime) ApplySafe(config []byte) error { return r.apply(config, false) }
 
-func (r *CoreRuntime) apply(config []byte, rollback bool) error {
+func (r *CoreRuntime) ApplyWithAccess(config []byte, access AccessSnapshot) error {
+	return r.apply(config, false, trafficAliases(access))
+}
+
+func (r *CoreRuntime) apply(config []byte, rollback bool, aliases ...map[string]string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	prepared, err := r.prepareCertificates(config, true)
@@ -126,11 +138,13 @@ func (r *CoreRuntime) apply(config []byte, rollback bool) error {
 		return err
 	}
 	config = prepared
+	r.collectTraffic()
 	previous := append([]byte(nil), r.config...)
 	if r.core.IsRunning() && r.core.GetCtx().Err() == nil && sameExceptUsers(previous, config) {
 		if err := r.updateUsers(config); err == nil {
 			r.config = append([]byte(nil), config...)
 			r.pruneActivity()
+			r.setTrafficAliases(aliases)
 			return nil
 		} else if !errors.Is(err, errHotUsersUnsupported) {
 			// A multi-inbound update can fail after one success; rebuild the
@@ -155,6 +169,7 @@ func (r *CoreRuntime) apply(config []byte, rollback bool) error {
 	}
 	r.config = append([]byte(nil), config...)
 	r.pruneActivity()
+	r.setTrafficAliases(aliases)
 	return nil
 }
 
@@ -242,6 +257,7 @@ func (r *CoreRuntime) Close() error {
 	defer r.mu.Unlock()
 	r.config = nil
 	r.collectTraffic()
+	_ = r.persistTraffic()
 	r.Interrupt()
 	return r.core.Stop()
 }
