@@ -13,6 +13,12 @@ An older supported database is migrated to the current panel version; the full
 ZIP carries the key needed on a fresh panel. See
 [installer backup](node-installer.md#backup) for integrity and key checks.
 
+The import marks restored node intent for one-time reconciliation. After an
+authenticated status check, the panel sends that intent at a new revision above
+the agent checkpoint, then consumes the mark transactionally. The agent keeps
+rejecting replayed old commands. Do not edit revision numbers or agent state
+files. Keep only one panel controlling a transferred node set at a time.
+
 ## Control certificates
 
 For nodes managed by the SSH installer (model 2), the panel checks the control

@@ -83,10 +83,19 @@ desired/applied access, resources
 and traffic cursors even while remote application is pending. It cannot include
 changes made after that snapshot. Save a new full backup after changing access.
 
-On a new panel without local history, a reachable agent still rejects an older
-access revision. Do not reset its epoch or edit revision numbers to force a
-restore. Recover from a sufficiently recent full backup or reconcile the
-authoritative checkpoints as an explicit operator recovery.
+An explicit import schedules restored node access and certificate settings as
+new commands above the authenticated agent's observed revisions. Structural
+delivery likewise advances above the observed revision. Archived worker leases
+are released. Agent epochs, keys, configuration and replay protection are not
+reset. Ordinary delivery without an import still rejects older/conflicting
+access or certificate commands.
+
+For a transfer, stop the previous panel before the restored panel adopts its
+network settings and controls the same nodes. Import preserves panel settings
+and subscription addresses; moving to another host still requires suitable
+DNS, certificate paths and network reachability. A backup made before an OS
+reinstall or management-key replacement cannot restore the missing remote
+identity; use explicit node recovery for that case.
 
 Actionable errors include `node_settings_version_conflict`,
 `node_listener_port_occupied`, `ssh_key_verification_failed`,
