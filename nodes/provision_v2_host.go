@@ -254,7 +254,7 @@ func verifyLiveProvision(ctx context.Context, job *model.NodeJob, plan *liveProv
 		db := database.GetDB()
 		_ = ReconcileAccess(ctx, job.NodeId)
 		var domain model.NodeDomainBinding
-		domainErr := db.First(&domain, "node_id = ?", job.NodeId).Error
+		domainErr := db.First(&domain, whereNodeID, job.NodeId).Error
 		if domainErr != nil && !errors.Is(domainErr, gorm.ErrRecordNotFound) {
 			return errors.New("installation_database_unavailable")
 		}
@@ -280,7 +280,7 @@ func verifyLiveProvision(ctx context.Context, job *model.NodeJob, plan *liveProv
 				if current.ManagementGeneration != plan.ExpectedGeneration {
 					return errors.New("management_target_changed")
 				}
-				if e := tx.Model(&model.NodeInstallation{}).Where("node_id = ?", job.NodeId).Update("ready", true).Error; e != nil {
+				if e := tx.Model(&model.NodeInstallation{}).Where(whereNodeID, job.NodeId).Update("ready", true).Error; e != nil {
 					return e
 				}
 				return tx.Where("node_id = ? AND host <> ?", job.NodeId, plan.Target.IP).Delete(&model.NodePortReservation{}).Error
@@ -374,11 +374,11 @@ func commitLiveTarget(job *model.NodeJob, plan *liveProvisionPlan, status nodeag
 			return err
 		}
 		// A stored leaf is not proof that this registration has received it.
-		if err := tx.Model(&model.NodeCertificateBinding{}).Where("node_id = ?", current.Id).Updates(map[string]interface{}{"state": "pending", "applied_revision": 0, "last_error": ""}).Error; err != nil {
+		if err := tx.Model(&model.NodeCertificateBinding{}).Where(whereNodeID, current.Id).Updates(map[string]interface{}{"state": "pending", "applied_revision": 0, "last_error": ""}).Error; err != nil {
 			return err
 		}
 		var domain model.NodeDomainBinding
-		if tx.First(&domain, "node_id = ?", current.Id).Error == nil {
+		if tx.First(&domain, whereNodeID, current.Id).Error == nil {
 			if domain.ExpectedIP == plan.Previous.IP && domain.ExpectedIP != plan.Target.IP {
 				if err := tx.Model(&domain).Updates(map[string]interface{}{"expected_ip": plan.Target.IP, "generation": domain.Generation + 1, "state": "pending", "last_error": ""}).Error; err != nil {
 					return err
@@ -410,7 +410,7 @@ func liveProvisionReady(id uint) bool {
 	db := database.GetDB()
 	var n model.Node
 	var access model.NodeAccessState
-	if db.First(&n, id).Error != nil || db.First(&access, "node_id = ?", id).Error != nil {
+	if db.First(&n, id).Error != nil || db.First(&access, whereNodeID, id).Error != nil {
 		return false
 	}
 	if n.DesiredRevision == 0 || n.DesiredRevision != n.AppliedRevision || n.TemplateTargetVersion != n.AppliedTemplateVersion || access.DesiredRevision == 0 || access.DesiredRevision != access.AppliedRevision || access.LastError != "" || n.LastError != "" || (!n.AgentRunning && n.Enable) {
@@ -433,12 +433,12 @@ func liveProvisionReady(id uint) bool {
 		return true
 	}
 	var domain model.NodeDomainBinding
-	if db.First(&domain, "node_id = ?", id).Error == nil {
+	if db.First(&domain, whereNodeID, id).Error == nil {
 		if domain.State != "ready" {
 			return false
 		}
 		var cert model.NodeCertificateBinding
-		if db.First(&cert, "node_id = ?", id).Error != nil || cert.State != "installed" {
+		if db.First(&cert, whereNodeID, id).Error != nil || cert.State != "installed" {
 			return false
 		}
 	}

@@ -51,10 +51,10 @@ func TestProvisionRecoveryRetainsInboundIDsCredentialsAndAssignments(t *testing.
 	if err := db.First(&after, before.Id).Error; err != nil {
 		t.Fatal(err)
 	}
-	var old, new map[string]interface{}
+	var old, updated map[string]interface{}
 	json.Unmarshal(before.Options, &old)
-	json.Unmarshal(after.Options, &new)
-	if string(mustJSON(old["tls"])) != string(mustJSON(new["tls"])) {
+	json.Unmarshal(after.Options, &updated)
+	if string(mustJSON(old["tls"])) != string(mustJSON(updated["tls"])) {
 		t.Fatal("recovery replaced existing VPN keys")
 	}
 	var binding model.ClientNodeInbound

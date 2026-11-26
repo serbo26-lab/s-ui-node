@@ -154,7 +154,9 @@ def _firewall_candidates(endpoints, backends, previous, rules):
 
 def _firewall_collect(state, backends):
     referenced = {key for owner in state['owners'].values() for key in owner['rules'] + owner['pending']}
-    for key, rule in list(state['rules'].items()):
+    # Snapshot keys because each successfully removed rule is deleted and saved.
+    for key in tuple(state['rules']):
+        rule = state['rules'][key]
         if key in referenced:
             continue
         if rule['owned']:
@@ -166,7 +168,7 @@ def _firewall_collect(state, backends):
 
 
 def configure_node_firewall(listeners, name, confirmed=False, version=None, release=False, initialize=False):
-    if not re.fullmatch(r's-ui-node-[1-9][0-9]*(?:-[a-f0-9]{12})?(?:-http01)?', name):
+    if not re.fullmatch(r's-ui-node-[1-9]\d*(?:-[a-f0-9]{12})?(?:-http01)?', name, flags=re.ASCII):
         raise ValueError('invalid firewall owner')
     endpoints = {(int(row['port']), row['network']) for row in listeners}
     if any(not 1 <= port <= 65535 or network not in ('tcp', 'udp') for port, network in endpoints):

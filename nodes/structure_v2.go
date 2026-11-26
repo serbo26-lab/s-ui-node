@@ -201,7 +201,7 @@ func observeStructure(db *gorm.DB, node model.Node, status nodeagent.StatusV2) e
 		// Do not free reservations for a newer materialized target while an old ACK arrives.
 		if result.RowsAffected > 0 && current.TemplateTargetVersion > 0 && current.TemplateId == snapshot.TemplateId && current.TemplateTargetVersion == snapshot.TemplateVersion && current.SettingsVersion == snapshot.SettingsVersion {
 			var reservations []model.NodePortReservation
-			if err := tx.Where("node_id = ?", node.Id).Find(&reservations).Error; err != nil {
+			if err := tx.Where(whereNodeID, node.Id).Find(&reservations).Error; err != nil {
 				return err
 			}
 			for _, row := range reservations {

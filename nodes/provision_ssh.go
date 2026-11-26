@@ -20,7 +20,7 @@ import (
 func connectSSH(ctx context.Context, install *model.NodeInstallation, password string, replaceHost bool) (*ssh.Client, error) {
 	auth := []ssh.AuthMethod{}
 	if password != "" {
-		auth = append(auth, ssh.Password(password), ssh.KeyboardInteractive(func(_ string, _ string, q []string, echo []bool) ([]string, error) {
+		auth = append(auth, ssh.Password(password), ssh.KeyboardInteractive(func(_, _ string, q []string, echo []bool) ([]string, error) {
 			a := make([]string, len(q))
 			for i := range a {
 				if echo[i] {

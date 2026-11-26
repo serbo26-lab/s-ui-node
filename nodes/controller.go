@@ -110,7 +110,7 @@ func Reconcile(ctx context.Context, id uint) (failure error) {
 	roots.AppendCertsFromPEM([]byte(node.ControlCA))
 	transport := &http.Transport{TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS13, RootCAs: roots, Certificates: []tls.Certificate{cert}}}
 	var installation model.NodeInstallation
-	if database.GetDB().First(&installation, "node_id = ?", node.Id).Error == nil && installation.PrivateKey != "" {
+	if database.GetDB().First(&installation, whereNodeID, node.Id).Error == nil && installation.PrivateKey != "" {
 		if !jobRunning(node.Id) && len(installation.PreviousTarget) > 0 {
 			retryPreviousRetirement(ctx, installation)
 		}

@@ -48,7 +48,7 @@ var provisionLifecycle sync.RWMutex
 var provisionParent context.Context = context.Background()
 
 func dbInstall(id uint, i *model.NodeInstallation) error {
-	return database.GetDB().First(i, "node_id = ?", id).Error
+	return database.GetDB().First(i, whereNodeID, id).Error
 }
 func jobRunning(id uint) bool {
 	_, ok := provisionJobs.Load(id)
@@ -169,7 +169,7 @@ func StartProvision(r ProvisionRequest, actor string) (model.NodeJob, error) {
 			if node.TemplateTargetVersion > 0 {
 				return errors.New("live_template_installer_not_ready")
 			}
-			if err := tx.First(&install, "node_id = ?", node.Id).Error; err != nil {
+			if err := tx.First(&install, whereNodeID, node.Id).Error; err != nil {
 				return errors.New("manual_node_requires_advanced_settings")
 			}
 			if jobRunning(node.Id) {
@@ -314,7 +314,7 @@ func runProvision(job model.NodeJob, r ProvisionRequest, install model.NodeInsta
 	ports := map[string]int{}
 	if r.NodeId != 0 {
 		var inbounds []model.NodeInbound
-		database.GetDB().Where("node_id = ?", job.NodeId).Find(&inbounds)
+		database.GetDB().Where(whereNodeID, job.NodeId).Find(&inbounds)
 		for _, i := range inbounds {
 			var o struct {
 				Port int `json:"listen_port"`

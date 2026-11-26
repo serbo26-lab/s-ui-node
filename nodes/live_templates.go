@@ -61,7 +61,7 @@ func bindLiveTemplate(tx *gorm.DB, node *model.Node, template model.NodeTemplate
 	}
 	if node.TemplateId != template.Id || node.TemplateTargetVersion == 0 {
 		var count int64
-		if err := tx.Model(&model.NodeInbound{}).Where("node_id = ?", node.Id).Count(&count).Error; err != nil {
+		if err := tx.Model(&model.NodeInbound{}).Where(whereNodeID, node.Id).Count(&count).Error; err != nil {
 			return err
 		}
 		if count > 0 && !replace {
@@ -82,7 +82,7 @@ func bindLiveTemplate(tx *gorm.DB, node *model.Node, template model.NodeTemplate
 			}
 			if previousRoot != nextRoot {
 				var version model.NodeTemplateVersion
-				if err := tx.First(&version, "template_id = ? AND version = ?", template.Id, template.Version).Error; err != nil {
+				if err := tx.First(&version, whereTemplateVersion, template.Id, template.Version).Error; err != nil {
 					return err
 				}
 				var target TemplateSpec
@@ -111,7 +111,7 @@ func bindLiveTemplate(tx *gorm.DB, node *model.Node, template model.NodeTemplate
 func liveVersion(tx *gorm.DB, node model.Node) (TemplateSpec, error) {
 	var version model.NodeTemplateVersion
 	var spec TemplateSpec
-	if err := tx.First(&version, "template_id = ? AND version = ?", node.TemplateId, node.TemplateTargetVersion).Error; err != nil {
+	if err := tx.First(&version, whereTemplateVersion, node.TemplateId, node.TemplateTargetVersion).Error; err != nil {
 		return spec, err
 	}
 	if version.SchemaVersion != 1 || versionDigest(version.Payload) != version.Digest {
@@ -143,7 +143,7 @@ func saveLiveAction(tx *gorm.DB, object, action string, data json.RawMessage, ac
 		if template.Kind == deploymentTemplate {
 			return errors.New("edit_node_inbound_selection")
 		}
-		if err := tx.First(&version, "template_id = ? AND version = ?", request.Id, request.Version).Error; err != nil {
+		if err := tx.First(&version, whereTemplateVersion, request.Id, request.Version).Error; err != nil {
 			return err
 		}
 		if version.SchemaVersion != 1 {
@@ -195,16 +195,16 @@ func saveLiveAction(tx *gorm.DB, object, action string, data json.RawMessage, ac
 			if strings.TrimSpace(request.Name) == "" {
 				return errors.New("private_template_needs_name")
 			}
-			copy := model.NodeTemplate{Name: request.Name, Scope: "private", OwnerNodeId: node.Id, ParentTemplateId: node.TemplateId}
+			draft := model.NodeTemplate{Name: request.Name, Scope: "private", OwnerNodeId: node.Id, ParentTemplateId: node.TemplateId}
 			if action == "sharedcopy" {
-				copy.Scope = "shared"
-				copy.OwnerNodeId = 0
+				draft.Scope = "shared"
+				draft.OwnerNodeId = 0
 			}
 			body, _ := json.Marshal(map[string]interface{}{"spec": spec})
-			if _, err := saveVersionedTemplate(tx, &copy, model.NodeTemplate{}, body); err != nil {
+			if _, err := saveVersionedTemplate(tx, &draft, model.NodeTemplate{}, body); err != nil {
 				return err
 			}
-			node.TemplateId, node.TemplateTargetVersion = copy.Id, copy.Version
+			node.TemplateId, node.TemplateTargetVersion = draft.Id, draft.Version
 			if err := tx.Save(&node).Error; err != nil {
 				return err
 			}

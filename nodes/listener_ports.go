@@ -80,9 +80,9 @@ func listenerRequests(tx *gorm.DB, node model.Node, spec TemplateSpec, overrides
 			return nil, err
 		}
 		port := options.Port
-		source, sourced := entry.Sources["/listen_port"]
-		transportSource, transportSourced := entry.Sources["/transport"]
-		typeSource, typeSourced := entry.Sources["/transport/type"]
+		source, sourced := entry.Sources[listenPortPath]
+		transportSource, transportSourced := entry.Sources[transportPath]
+		typeSource, typeSourced := entry.Sources[transportTypePath]
 		clearTransportType := false
 		for _, override := range overrides[entry.Key] {
 			if override.Path == "/network" {
@@ -91,16 +91,16 @@ func listenerRequests(tx *gorm.DB, node model.Node, spec TemplateSpec, overrides
 					return nil, errors.New("invalid node network")
 				}
 			}
-			if override.Path == "/listen_port" {
+			if override.Path == listenPortPath {
 				source, sourced = override.Source, override.Operation == "set"
 				port = nil
 			}
-			if override.Path == "/transport" {
+			if override.Path == transportPath {
 				transportSource, transportSourced = override.Source, override.Operation == "set"
 				typeSourced = false
 				options.Transport = listenerTransport{}
 			}
-			if override.Path == "/transport/type" {
+			if override.Path == transportTypePath {
 				typeSource, typeSourced = override.Source, override.Operation == "set"
 				clearTransportType = !typeSourced
 			}
@@ -147,7 +147,7 @@ func loadListenerRequests(db *gorm.DB, node model.Node) ([]listenerRequest, erro
 		return nil, err
 	}
 	var rows []model.NodeOverride
-	if err := db.Where("node_id = ? AND path IN ? AND archived = false", node.Id, []string{"/listen_port", "/transport", "/transport/type", "/network"}).Find(&rows).Error; err != nil {
+	if err := db.Where("node_id = ? AND path IN ? AND archived = false", node.Id, []string{listenPortPath, transportPath, transportTypePath, "/network"}).Find(&rows).Error; err != nil {
 		return nil, err
 	}
 	overrides := map[string][]SpecOverride{}
@@ -363,7 +363,7 @@ func inspectChangedListeners(ctx context.Context, db *gorm.DB, node model.Node) 
 		return nil, nil
 	}
 	var install model.NodeInstallation
-	if err := db.First(&install, "node_id = ?", node.Id).Error; err != nil {
+	if err := db.First(&install, whereNodeID, node.Id).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, nil
 		}

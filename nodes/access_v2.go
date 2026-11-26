@@ -155,7 +155,7 @@ func prepareAccess(db *gorm.DB, node model.Node, status nodeagent.StatusV2) (nod
 			return errors.New("access_target_changed")
 		}
 		var state model.NodeAccessState
-		err := tx.First(&state, "node_id = ?", node.Id).Error
+		err := tx.First(&state, whereNodeID, node.Id).Error
 		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 			return err
 		}

@@ -85,7 +85,7 @@ func ActivateNodeMigration(ctx context.Context, request PrepareMigrationRequest,
 		if err := tx.First(&node, request.NodeId).Error; err != nil {
 			return err
 		}
-		if err := tx.First(&migration, "node_id = ?", node.Id).Error; err != nil {
+		if err := tx.First(&migration, whereNodeID, node.Id).Error; err != nil {
 			return err
 		}
 		if request.ReportDigest == "" || migration.ReportDigest != request.ReportDigest {
@@ -132,7 +132,7 @@ func ActivateNodeMigration(ctx context.Context, request PrepareMigrationRequest,
 	}
 	if migration.State == "activating" {
 		_ = ReconcileAccess(ctx, request.NodeId)
-		_ = database.GetDB().First(&migration, "node_id = ?", request.NodeId).Error
+		_ = database.GetDB().First(&migration, whereNodeID, request.NodeId).Error
 	}
 	return migration, nil
 }
@@ -142,7 +142,7 @@ func finishMigration(tx *gorm.DB, node model.Node, status nodeagent.StatusV2) er
 		return nil
 	}
 	var access model.NodeAccessState
-	if err := tx.First(&access, "node_id = ?", node.Id).Error; err != nil {
+	if err := tx.First(&access, whereNodeID, node.Id).Error; err != nil {
 		return err
 	}
 	if access.DesiredRevision == 0 || access.DesiredRevision != access.AppliedRevision {

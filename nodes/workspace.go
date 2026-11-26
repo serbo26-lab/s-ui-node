@@ -29,13 +29,13 @@ func ReadWorkspace(id uint) (map[string]interface{}, error) {
 	if err := db.Where("node_id = ? AND archived = false", id).Order("connection_key,path").Find(&overrides).Error; err != nil {
 		return nil, err
 	}
-	if err := db.Where("node_id = ?", id).Order("id").Find(&connections).Error; err != nil {
+	if err := db.Where(whereNodeID, id).Order("id").Find(&connections).Error; err != nil {
 		return nil, err
 	}
 	for i := range connections {
 		redactInbound(&connections[i])
 	}
-	if err := db.Where("node_id = ?", id).Find(&tasks).Error; err != nil {
+	if err := db.Where(whereNodeID, id).Find(&tasks).Error; err != nil {
 		return nil, err
 	}
 	return map[string]interface{}{"spec": spec, "overrides": overrides, "connections": connections, "tasks": tasks}, nil

@@ -298,8 +298,8 @@ func (a *ApiService) GetDb(c *gin.Context) {
 			jsonMsg(c, "", err)
 			return
 		}
-		c.Header("Content-Type", "application/zip")
-		c.Header("Content-Disposition", "attachment; filename=s-ui_"+time.Now().Format("20060102-150405")+".zip")
+		c.Header(contentTypeHeader, "application/zip")
+		c.Header(contentDispositionHeader, "attachment; filename=s-ui_"+time.Now().Format(backupTimeLayout)+".zip")
 		c.Writer.Write(body)
 		return
 	}
@@ -308,8 +308,8 @@ func (a *ApiService) GetDb(c *gin.Context) {
 		jsonMsg(c, "", err)
 		return
 	}
-	c.Header("Content-Type", "application/octet-stream")
-	c.Header("Content-Disposition", "attachment; filename=s-ui_"+time.Now().Format("20060102-150405")+".db")
+	c.Header(contentTypeHeader, "application/octet-stream")
+	c.Header(contentDispositionHeader, "attachment; filename=s-ui_"+time.Now().Format(backupTimeLayout)+".db")
 	c.Writer.Write(db)
 }
 
@@ -487,8 +487,8 @@ func (a *ApiService) GetSingboxConfig(c *gin.Context) {
 		c.Writer.WriteString(err.Error())
 		return
 	}
-	c.Header("Content-Type", "application/json")
-	c.Header("Content-Disposition", "attachment; filename=config_"+time.Now().Format("20060102-150405")+".json")
+	c.Header(contentTypeHeader, "application/json")
+	c.Header(contentDispositionHeader, "attachment; filename=config_"+time.Now().Format(backupTimeLayout)+".json")
 	c.Writer.Write(*rawConfig)
 }
 

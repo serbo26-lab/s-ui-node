@@ -90,10 +90,10 @@ func persistCertificateVersion(nodeID uint, generation uint64, domain model.Node
 	err = database.GetDB().Transaction(func(tx *gorm.DB) error {
 		var binding model.NodeCertificateBinding
 		var current model.NodeDomainBinding
-		if err := tx.First(&binding, "node_id = ?", nodeID).Error; err != nil {
+		if err := tx.First(&binding, whereNodeID, nodeID).Error; err != nil {
 			return err
 		}
-		if err := tx.First(&current, "node_id = ?", nodeID).Error; err != nil {
+		if err := tx.First(&current, whereNodeID, nodeID).Error; err != nil {
 			return err
 		}
 		if binding.Generation != generation || current.Generation != domain.Generation {
@@ -101,7 +101,7 @@ func persistCertificateVersion(nodeID uint, generation uint64, domain model.Node
 		}
 		if binding.CurrentVersion > 0 {
 			var previous model.NodeCertificateVersion
-			if err := tx.First(&previous, "node_id = ? AND version = ?", nodeID, binding.CurrentVersion).Error; err != nil {
+			if err := tx.First(&previous, whereNodeVersion, nodeID, binding.CurrentVersion).Error; err != nil {
 				return err
 			}
 			var old nodecert.Metadata
@@ -136,7 +136,7 @@ func prepareCertificateRequest(node model.Node, domain model.NodeDomainBinding, 
 	switch binding.Mode {
 	case "dns01", "provided":
 		var version model.NodeCertificateVersion
-		if err := database.GetDB().First(&version, "node_id = ? AND version = ?", node.Id, binding.CurrentVersion).Error; err != nil {
+		if err := database.GetDB().First(&version, whereNodeVersion, node.Id, binding.CurrentVersion).Error; err != nil {
 			return request, err
 		}
 		bundle, err := openCertificateVersion(version)
@@ -158,11 +158,11 @@ func prepareCertificateRequest(node model.Node, domain model.NodeDomainBinding, 
 	fingerprint := versionDigest(body)
 	err := database.GetDB().Transaction(func(tx *gorm.DB) error {
 		var current model.NodeCertificateBinding
-		if err := tx.First(&current, "node_id = ?", node.Id).Error; err != nil {
+		if err := tx.First(&current, whereNodeID, node.Id).Error; err != nil {
 			return err
 		}
 		var target model.NodeDomainBinding
-		if err := tx.First(&target, "node_id = ?", node.Id).Error; err != nil {
+		if err := tx.First(&target, whereNodeID, node.Id).Error; err != nil {
 			return err
 		}
 		if current.Generation != binding.Generation || target.Generation != domain.Generation {
@@ -208,7 +208,7 @@ func prepareCertificateRequest(node model.Node, domain model.NodeDomainBinding, 
 func reconcileCertificate(ctx context.Context, node model.Node, domain model.NodeDomainBinding) error {
 	db := database.GetDB()
 	var binding model.NodeCertificateBinding
-	err := db.First(&binding, "node_id = ?", node.Id).Error
+	err := db.First(&binding, whereNodeID, node.Id).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		if domain.CertificateMode != "auto" || node.TemplateTargetVersion == 0 {
 			return nil
@@ -239,7 +239,7 @@ func reconcileCertificate(ctx context.Context, node model.Node, domain model.Nod
 		if err := db.Transaction(func(tx *gorm.DB) error { _, err := saveCertificateBinding(tx, "save", request); return err }); err != nil {
 			return err
 		}
-		if err := db.First(&binding, "node_id = ?", node.Id).Error; err != nil {
+		if err := db.First(&binding, whereNodeID, node.Id).Error; err != nil {
 			return err
 		}
 	} else if err != nil {
@@ -254,7 +254,7 @@ func reconcileCertificate(ctx context.Context, node model.Node, domain model.Nod
 		var version model.NodeCertificateVersion
 		var meta nodecert.Metadata
 		if binding.CurrentVersion > 0 {
-			if err := db.First(&version, "node_id = ? AND version = ?", node.Id, binding.CurrentVersion).Error; err != nil {
+			if err := db.First(&version, whereNodeVersion, node.Id, binding.CurrentVersion).Error; err != nil {
 				return err
 			}
 			json.Unmarshal(version.Metadata, &meta)
@@ -322,7 +322,7 @@ func reconcileCertificate(ctx context.Context, node model.Node, domain model.Nod
 			return err
 		}
 	}
-	if err := db.First(&binding, "node_id = ?", node.Id).Error; err != nil {
+	if err := db.First(&binding, whereNodeID, node.Id).Error; err != nil {
 		return err
 	}
 	control, closeControl, err := controlClient(ctx, node)
@@ -385,7 +385,7 @@ func acknowledgeCertificate(node model.Node, binding model.NodeCertificateBindin
 			return errors.New("management_target_changed")
 		}
 		var current model.NodeCertificateBinding
-		if err := tx.First(&current, "node_id = ?", node.Id).Error; err != nil {
+		if err := tx.First(&current, whereNodeID, node.Id).Error; err != nil {
 			return err
 		}
 		if current.Generation != binding.Generation || current.DesiredRevision != request.Revision {
@@ -408,7 +408,7 @@ func acknowledgeCertificate(node model.Node, binding model.NodeCertificateBindin
 
 func resourceTLSContext(tx *gorm.DB, node model.Node, ctx *ResolveContext) error {
 	var domain model.NodeDomainBinding
-	err := tx.First(&domain, "node_id = ?", node.Id).Error
+	err := tx.First(&domain, whereNodeID, node.Id).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil
 	}
@@ -421,7 +421,7 @@ func resourceTLSContext(tx *gorm.DB, node model.Node, ctx *ResolveContext) error
 	}
 	ctx.Parameters["primary_domain"], _ = json.Marshal(domain.AppliedFQDN)
 	var certificate model.NodeCertificateBinding
-	err = tx.First(&certificate, "node_id = ?", node.Id).Error
+	err = tx.First(&certificate, whereNodeID, node.Id).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil
 	}

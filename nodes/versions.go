@@ -50,7 +50,7 @@ func appendTemplateVersion(tx *gorm.DB, value *model.NodeTemplate, old model.Nod
 	}
 	if current > 0 {
 		var previous model.NodeTemplateVersion
-		if err := tx.First(&previous, "template_id = ? AND version = ?", value.Id, current).Error; err != nil {
+		if err := tx.First(&previous, whereTemplateVersion, value.Id, current).Error; err != nil {
 			return err
 		}
 		if previous.SchemaVersion == value.SchemaVersion && previous.Digest == versionDigest(payload) {
@@ -102,7 +102,7 @@ func saveVersionedTemplate(tx *gorm.DB, value *model.NodeTemplate, old model.Nod
 	prior := &TemplateSpec{}
 	if old.Id != 0 {
 		var history []model.NodeTemplateVersion
-		if err := tx.Where("template_id = ?", old.Id).Order("version").Find(&history).Error; err != nil {
+		if err := tx.Where(whereTemplateID, old.Id).Order("version").Find(&history).Error; err != nil {
 			return false, err
 		}
 		for _, version := range history {
@@ -210,7 +210,7 @@ func saveVersionedTemplate(tx *gorm.DB, value *model.NodeTemplate, old model.Nod
 
 func TemplateHistory(id uint) ([]model.NodeTemplateVersion, error) {
 	versions := []model.NodeTemplateVersion{}
-	err := database.GetDB().Order("version").Where("template_id = ?", id).Find(&versions).Error
+	err := database.GetDB().Order("version").Where(whereTemplateID, id).Find(&versions).Error
 	return versions, err
 }
 
@@ -232,7 +232,7 @@ func ReadTemplateVersion(id uint, version uint64) (TemplateVersionView, error) {
 		version = template.Version
 	}
 	var row model.NodeTemplateVersion
-	if err := database.GetDB().First(&row, "template_id = ? AND version = ?", id, version).Error; err != nil {
+	if err := database.GetDB().First(&row, whereTemplateVersion, id, version).Error; err != nil {
 		return view, err
 	}
 	view = TemplateVersionView{TemplateId: id, Version: row.Version, SchemaVersion: row.SchemaVersion, Digest: row.Digest}

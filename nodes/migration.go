@@ -44,7 +44,7 @@ func migrationReport(tx *gorm.DB, nodeID uint) (MigrationReport, error) {
 	}
 	report.Mode = node.AssignmentMode
 	var inbounds []model.NodeInbound
-	if err := tx.Where("node_id = ?", nodeID).Order("id").Find(&inbounds).Error; err != nil {
+	if err := tx.Where(whereNodeID, nodeID).Order("id").Find(&inbounds).Error; err != nil {
 		return report, err
 	}
 	for _, in := range inbounds {
@@ -154,7 +154,7 @@ func PrepareNodeMigration(request PrepareMigrationRequest, actor string) (model.
 		}
 		body, _ := json.Marshal(canonical)
 		if report.Mode == model.NodeAssignmentPrepared {
-			if err := tx.First(&migration, "node_id = ?", request.NodeId).Error; err != nil {
+			if err := tx.First(&migration, whereNodeID, request.NodeId).Error; err != nil {
 				return err
 			}
 			if migration.ReportDigest == report.Digest && string(migration.Decisions) == string(body) {
@@ -162,14 +162,14 @@ func PrepareNodeMigration(request PrepareMigrationRequest, actor string) (model.
 			}
 		} else {
 			var count int64
-			if err := tx.Model(&model.ClientNode{}).Where("node_id = ?", request.NodeId).Count(&count).Error; err != nil {
+			if err := tx.Model(&model.ClientNode{}).Where(whereNodeID, request.NodeId).Count(&count).Error; err != nil {
 				return err
 			}
 			if count > 0 {
 				return errors.New("unexpected_prepared_grants_require_review")
 			}
 		}
-		if err := tx.Where("node_id = ?", request.NodeId).Delete(&model.ClientNode{}).Error; err != nil {
+		if err := tx.Where(whereNodeID, request.NodeId).Delete(&model.ClientNode{}).Error; err != nil {
 			return err
 		}
 		for _, decision := range canonical {

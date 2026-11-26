@@ -7,13 +7,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"reflect"
 	"strings"
 	"time"
 
 	"github.com/alireza0/s-ui/database/model"
 	"github.com/alireza0/s-ui/nodeagent"
-	"github.com/alireza0/s-ui/util"
 	"gorm.io/gorm"
 )
 
@@ -56,7 +54,7 @@ func compileNode(tx *gorm.DB, node model.Node, withUsers bool) (Snapshot, error)
 		s.TemplateId, s.TemplateVersion, s.SettingsVersion = node.TemplateId, node.MaterializedTemplateVersion, node.SettingsVersion
 	}
 	var installation model.NodeInstallation
-	s.Node.Managed = tx.First(&installation, "node_id = ?", node.Id).Error == nil || node.TemplateTargetVersion > 0
+	s.Node.Managed = tx.First(&installation, whereNodeID, node.Id).Error == nil || node.TemplateTargetVersion > 0
 	config := map[string]interface{}{"log": map[string]interface{}{"level": "error"}, "outbounds": []interface{}{map[string]interface{}{"type": "direct", "tag": "direct"}}, "route": map[string]interface{}{"final": "direct"}}
 	// Disable removes the listeners even when the saved configuration cannot be applied.
 	var base json.RawMessage
@@ -251,185 +249,4 @@ func supportsVision(options map[string]interface{}) bool {
 	tls, _ := options["tls"].(map[string]interface{})
 	transport, _ := options["transport"].(map[string]interface{})
 	return tls != nil && tls["enabled"] == true && (transport == nil || transport["type"] == nil || transport["type"] == "")
-}
-
-func clientConnections(tx *gorm.DB, client model.Client) ([]clientConnection, error) {
-	result := []clientConnection{}
-	if !client.Enable || (client.Expiry > 0 && client.Expiry <= time.Now().Unix()) {
-		return result, nil
-	}
-	if !tx.Migrator().HasTable(&model.ClientNodeInbound{}) {
-		return result, nil
-	}
-	var selected []model.ClientNodeInbound
-	if err := tx.Where("client_id = ?", client.Id).Find(&selected).Error; err != nil {
-		return nil, err
-	}
-	wanted := map[uint]bool{}
-	for _, row := range selected {
-		wanted[row.NodeInboundId] = true
-	}
-	whole := map[uint]bool{}
-	if tx.Migrator().HasTable(&model.ClientNode{}) {
-		var bindings []model.ClientNode
-		if err := tx.Where("client_id = ? AND active = ?", client.Id, true).Find(&bindings).Error; err != nil {
-			return nil, err
-		}
-		for _, binding := range bindings {
-			whole[binding.NodeId] = true
-		}
-	}
-	if len(wanted) == 0 && len(whole) == 0 {
-		return result, nil
-	}
-	var nodes []model.Node
-	if err := tx.Where("enable = ? AND applied_revision > 0", true).Order("id").Find(&nodes).Error; err != nil {
-		return nil, err
-	}
-	var credentials map[string]map[string]interface{}
-	if err := json.Unmarshal(client.Config, &credentials); err != nil {
-		return nil, err
-	}
-	for _, node := range nodes {
-		wholeSelected := node.AssignmentMode == model.NodeAssignmentWhole && whole[node.Id]
-		var s Snapshot
-		if json.Unmarshal(node.AppliedSnapshot, &s) != nil || !s.Node.Enable {
-			continue
-		}
-		if node.AgentProtocol == 2 {
-			if !node.AgentRunning {
-				continue
-			}
-			var acl model.NodeAccessState
-			if tx.First(&acl, "node_id = ?", node.Id).Error != nil || acl.AppliedRevision == 0 {
-				continue
-			}
-			var access nodeagent.AccessSnapshot
-			if json.Unmarshal(acl.AppliedSnapshot, &access) != nil || access.Epoch != node.ControlEpoch {
-				continue
-			}
-			spec := nodeagent.Structure{NodeID: uint64(node.Id), Epoch: node.ControlEpoch, Revision: s.Deployment.Revision, Config: s.Deployment.Config}
-			body, err := nodeagent.Compose(spec, access, time.Now().Unix())
-			if err != nil {
-				continue
-			}
-			s.Deployment.Config = body
-		}
-		var applied struct {
-			Inbounds []struct {
-				Tag   string                   `json:"tag"`
-				Users []map[string]interface{} `json:"users"`
-			} `json:"inbounds"`
-		}
-		if err := json.Unmarshal(s.Deployment.Config, &applied); err != nil {
-			return nil, err
-		}
-		nodeInbounds := map[string]uint{}
-		for _, inbound := range s.Inbounds {
-			nodeInbounds[inbound.ConnectionKey] = inbound.Id
-		}
-		for _, inbound := range s.Inbounds {
-			if !(wholeSelected || (node.AssignmentMode != model.NodeAssignmentWhole && wanted[inbound.Id])) {
-				continue
-			}
-			if !certificatePublished(node, s, inbound) {
-				continue
-			}
-			var options map[string]interface{}
-			if err := json.Unmarshal(inbound.Options, &options); err != nil {
-				return nil, err
-			}
-			method, _ := options["method"].(string)
-			expected := credentials[nodeagent.CredentialKey(inbound.Type, method)]
-			if len(expected) == 0 {
-				continue
-			}
-			userField, userValue := "name", any(effectiveUserName(tx, node, client))
-			if nodeagent.UsernameAuth(inbound.Type) {
-				userField, userValue = "username", expected["username"]
-			}
-			valid := false
-			for _, server := range applied.Inbounds {
-				if server.Tag != serverTag(node.Id, inbound.Id) {
-					continue
-				}
-				for _, user := range server.Users {
-					if user[userField] != userValue {
-						continue
-					}
-					valid = true
-					for key, expected := range expected {
-						if key == "name" || (key == "flow" && !supportsVision(options)) {
-							continue
-						}
-						if !reflect.DeepEqual(user[key], expected) {
-							valid = false
-						}
-					}
-				}
-			}
-			if !valid {
-				continue
-			}
-			delete(options, "tls")
-			delete(options, "users")
-			delete(options, "type")
-			delete(options, "tag")
-			b, _ := json.Marshal(options)
-			addresses, outbound, err := clientPublication(inbound.ClientOptions, s.Node.Address, options["listen_port"])
-			if err != nil {
-				return nil, err
-			}
-			// A node's Realm registration credential is never a client default.
-			if realm, ok := options["realm"].(map[string]interface{}); ok {
-				delete(realm, "token")
-				b, _ = json.Marshal(options)
-			}
-			label := fmt.Sprintf("%s / %s [node:%d,in:%d]", s.Node.Name, inbound.Tag, node.Id, inbound.Id)
-			if s.Node.Managed {
-				label = s.Node.Name + " · " + strings.ToUpper(inbound.Type)
-				count := 0
-				for _, other := range s.Inbounds {
-					if other.Type == inbound.Type {
-						count++
-					}
-				}
-				if count > 1 {
-					if inbound.DisplayName != "" {
-						label += " · " + inbound.DisplayName
-					} else {
-						label += fmt.Sprintf(" · %v", options["listen_port"])
-					}
-				}
-			}
-			i := &model.Inbound{Id: inbound.Id, Type: inbound.Type, Tag: label, Enable: true, Options: b, Addrs: addresses, OutJson: outbound}
-			serverTLS, publicTLS, err := clientTLS(inbound)
-			if err != nil {
-				return nil, err
-			}
-			if serverTLS != nil {
-				i.TlsId = inbound.Id
-				i.Tls = &model.Tls{Server: serverTLS, Client: publicTLS}
-			}
-			if err := util.FillOutJson(i, s.Node.Address); err != nil {
-				return nil, err
-			}
-			connection := clientConnection{inbound: i}
-			if inbound.Type == "shadowtls" {
-				detour, _ := options["detour"].(string)
-				connection.target = nodeInbounds[detour]
-				handshake, _ := options["handshake"].(map[string]any)
-				var clientOut map[string]any
-				if err := json.Unmarshal(i.OutJson, &clientOut); err != nil {
-					return nil, err
-				}
-				if tls, ok := clientOut["tls"].(map[string]any); ok {
-					tls["server_name"] = handshake["server"]
-				}
-				i.OutJson, _ = json.Marshal(clientOut)
-			}
-			result = append(result, connection)
-		}
-	}
-	return result, nil
 }

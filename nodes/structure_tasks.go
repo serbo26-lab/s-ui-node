@@ -13,7 +13,7 @@ import (
 )
 
 func leaseStructure(node model.Node) (func(error), bool, error) {
-	noop := func(error) {}
+	noop := func(error) { /* No lease was acquired, so there is nothing to release. */ }
 	if node.TemplateTargetVersion == 0 {
 		return noop, true, nil
 	}

@@ -66,8 +66,8 @@ func Validate(bundle Bundle, domain string, roots *x509.CertPool, now time.Time)
 	}
 	sha := sha256.Sum256(leaf.Raw)
 	result = Metadata{Domain: domain, SHA256: hex.EncodeToString(sha[:]), Digest: Digest(bundle), NotBefore: leaf.NotBefore.Unix(), NotAfter: leaf.NotAfter.Unix()}
-	result.CertificatePath = filepath.ToSlash(filepath.Join("certificates", "managed", result.Digest, "cert.pem"))
-	result.KeyPath = filepath.ToSlash(filepath.Join("certificates", "managed", result.Digest, "key.pem"))
+	result.CertificatePath = filepath.ToSlash(filepath.Join("certificates", "managed", result.Digest, certificateFileName))
+	result.KeyPath = filepath.ToSlash(filepath.Join("certificates", "managed", result.Digest, privateKeyFileName))
 	return result, nil
 }
 
@@ -169,11 +169,11 @@ func Install(root string, bundle Bundle, domain string, roots *x509.CertPool) (M
 		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 			return meta, errors.New("certificate_artifact_invalid")
 		}
-		cert, err := os.ReadFile(filepath.Join(target, "cert.pem"))
+		cert, err := os.ReadFile(filepath.Join(target, certificateFileName))
 		if err != nil {
 			return meta, err
 		}
-		key, err := os.ReadFile(filepath.Join(target, "key.pem"))
+		key, err := os.ReadFile(filepath.Join(target, privateKeyFileName))
 		if err != nil {
 			return meta, err
 		}
@@ -189,7 +189,7 @@ func Install(root string, bundle Bundle, domain string, roots *x509.CertPool) (M
 		return meta, err
 	}
 	defer os.RemoveAll(temp)
-	for name, body := range map[string]string{"cert.pem": bundle.Certificate, "key.pem": bundle.Key} {
+	for name, body := range map[string]string{certificateFileName: bundle.Certificate, privateKeyFileName: bundle.Key} {
 		f, err := os.OpenFile(filepath.Join(temp, name), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 		if err != nil {
 			return meta, err

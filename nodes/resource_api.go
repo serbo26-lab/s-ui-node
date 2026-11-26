@@ -234,7 +234,7 @@ func saveDomainBinding(tx *gorm.DB, action string, data json.RawMessage) (uint, 
 		return r.NodeId, err
 	}
 	var old model.NodeDomainBinding
-	err = tx.First(&old, "node_id = ?", r.NodeId).Error
+	err = tx.First(&old, whereNodeID, r.NodeId).Error
 	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 		return r.NodeId, err
 	}
@@ -350,11 +350,11 @@ func saveCertificateBinding(tx *gorm.DB, action string, data json.RawMessage) (u
 		return r.NodeId, err
 	}
 	var domain model.NodeDomainBinding
-	if err := tx.First(&domain, "node_id = ?", r.NodeId).Error; err != nil {
+	if err := tx.First(&domain, whereNodeID, r.NodeId).Error; err != nil {
 		return r.NodeId, errors.New("node_domain_required")
 	}
 	var old model.NodeCertificateBinding
-	err := tx.First(&old, "node_id = ?", r.NodeId).Error
+	err := tx.First(&old, whereNodeID, r.NodeId).Error
 	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 		return r.NodeId, err
 	}

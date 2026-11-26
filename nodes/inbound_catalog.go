@@ -26,7 +26,7 @@ func UpgradeInboundCatalog(db *gorm.DB) error {
 		for _, template := range templates {
 			if template.Scope == "private" {
 				var used int64
-				if err := tx.Model(&model.Node{}).Where("template_id = ?", template.Id).Count(&used).Error; err != nil {
+				if err := tx.Model(&model.Node{}).Where(whereTemplateID, template.Id).Count(&used).Error; err != nil {
 					return err
 				}
 				if used == 0 {
@@ -94,7 +94,7 @@ func splitDeploymentTemplate(tx *gorm.DB, template model.NodeTemplate) error {
 
 func catalogMembers(tx *gorm.DB, templateID uint) ([]uint, error) {
 	var ids []uint
-	err := tx.Model(&model.NodeTemplateMember{}).Where("template_id = ?", templateID).Order("position").Pluck("inbound_id", &ids).Error
+	err := tx.Model(&model.NodeTemplateMember{}).Where(whereTemplateID, templateID).Order("position").Pluck("inbound_id", &ids).Error
 	return ids, err
 }
 
@@ -155,7 +155,7 @@ func createDeploymentTemplate(tx *gorm.DB, node model.Node) (model.NodeTemplate,
 }
 
 func writeCatalogSelection(tx *gorm.DB, template *model.NodeTemplate, ids []uint, spec TemplateSpec) error {
-	if err := tx.Where("template_id = ?", template.Id).Delete(&model.NodeTemplateMember{}).Error; err != nil {
+	if err := tx.Where(whereTemplateID, template.Id).Delete(&model.NodeTemplateMember{}).Error; err != nil {
 		return err
 	}
 	for position, id := range ids {
@@ -224,7 +224,7 @@ func refreshCatalogDeployments(tx *gorm.DB, inboundID uint) error {
 			return err
 		}
 		var nodes []model.Node
-		if err := tx.Where("template_id = ?", id).Find(&nodes).Error; err != nil {
+		if err := tx.Where(whereTemplateID, id).Find(&nodes).Error; err != nil {
 			return err
 		}
 		for _, node := range nodes {

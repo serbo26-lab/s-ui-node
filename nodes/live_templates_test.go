@@ -726,14 +726,14 @@ func TestLiveSharedCopyExportsSourcesAndUnrelatedKeysNeedMapping(t *testing.T) {
 	if err := Save("nodes", "sharedcopy", body, "test"); err != nil {
 		t.Fatal(err)
 	}
-	var copy model.NodeTemplate
-	f.db.Where("name = ?", "exported").First(&copy)
+	var draft model.NodeTemplate
+	f.db.Where("name = ?", "exported").First(&draft)
 	var version model.NodeTemplateVersion
-	f.db.Where("template_id = ? AND version = ?", copy.Id, copy.Version).First(&version)
-	if copy.Scope != "shared" || copy.OwnerNodeId != 0 || bytes.Contains(version.Payload, []byte("first.example")) || bytes.Contains(version.Payload, []byte("private_key")) {
-		t.Fatal("shared copy exported node-specific values")
+	f.db.Where("template_id = ? AND version = ?", draft.Id, draft.Version).First(&version)
+	if draft.Scope != "shared" || draft.OwnerNodeId != 0 || bytes.Contains(version.Payload, []byte("first.example")) || bytes.Contains(version.Payload, []byte("private_key")) {
+		t.Fatal("shared draft exported node-specific values")
 	}
-	f.bind(t, 1, copy.Id, true)
+	f.bind(t, 1, draft.Id, true)
 	ReconcileAll(context.Background())
 	if f.links(t) != 2 {
 		t.Fatal("related template did not retain identities")

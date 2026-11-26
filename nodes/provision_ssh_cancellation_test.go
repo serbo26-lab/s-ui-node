@@ -54,7 +54,7 @@ func TestLiveSSHCancelDuringHandshakeAndChannelOpen(t *testing.T) {
 				}
 				defer server.Close()
 				go ssh.DiscardRequests(requests)
-				if request := <-channels; request != nil {
+				if <-channels != nil {
 					close(started)
 					<-release
 				}

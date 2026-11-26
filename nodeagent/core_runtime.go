@@ -97,6 +97,10 @@ func (r *CoreRuntime) Validate(config []byte) error {
 	if err := options.UnmarshalJSONContext(r.core.GetCtx(), config); err != nil {
 		return err
 	}
+	return validateRuntimeUsers(config)
+}
+
+func validateRuntimeUsers(config []byte) error {
 	var raw struct {
 		Inbounds []struct {
 			Type  string `json:"type"`

@@ -205,7 +205,7 @@ func applyTemplate(tx *gorm.DB, node *model.Node, targetID uint) error {
 		}
 	}
 	var existing []model.NodeInbound
-	if err := tx.Where("node_id = ?", node.Id).Order("id").Find(&existing).Error; err != nil {
+	if err := tx.Where(whereNodeID, node.Id).Order("id").Find(&existing).Error; err != nil {
 		return err
 	}
 	kept := map[uint]bool{}

@@ -69,7 +69,7 @@ func decodeJSON(raw []byte, target interface{}, strict bool) error {
 		return err
 	}
 	var extra interface{}
-	if err := d.Decode(&extra); err != io.EOF {
+	if d.Decode(&extra) != io.EOF {
 		return errors.New("unexpected trailing JSON")
 	}
 	return nil
@@ -169,7 +169,7 @@ func validateSource(path string, source ValueSource) error {
 	case "node_generated":
 		switch source.Purpose {
 		case "listen_port":
-			if path != "/listen_port" {
+			if path != listenPortPath {
 				return errors.New("invalid_listener_port_source")
 			}
 		case "hysteria2_obfs_password":
@@ -273,7 +273,7 @@ func NormalizeSpec(raw json.RawMessage, previous *TemplateSpec) (TemplateSpec, e
 			if err != nil || p < 1 || p > 65535 {
 				return spec, errors.New("invalid listen_port")
 			}
-		} else if _, bound := entry.Sources["/listen_port"]; !bound {
+		} else if _, bound := entry.Sources[listenPortPath]; !bound {
 			return spec, errors.New("listen_port or its node source is required")
 		}
 		if secretLiteral(options) {

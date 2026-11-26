@@ -439,7 +439,7 @@ func (s *ClientService) UpdateClientsOnInboundDelete(tx *gorm.DB, id uint, tag s
 		return nil
 	}
 	var clients []model.Client
-	err = tx.Model(model.Client{}).Where("id IN ?", clientIds).Find(&clients).Error
+	err = tx.Model(model.Client{}).Where(whereClientIDs, clientIds).Find(&clients).Error
 	if err != nil {
 		return err
 	}
@@ -489,7 +489,7 @@ func (s *ClientService) UpdateLinksByInboundChange(tx *gorm.DB, inbounds *[]mode
 			continue
 		}
 		var clients []model.Client
-		err = tx.Model(model.Client{}).Where("id IN ?", clientIds).Find(&clients).Error
+		err = tx.Model(model.Client{}).Where(whereClientIDs, clientIds).Find(&clients).Error
 		if err != nil {
 			return err
 		}
@@ -583,7 +583,7 @@ func (s *ClientService) DepleteClients() ([]uint, error) {
 		if err = nodes.PrepareClientEnableChange(tx, ids, false, columns); err != nil {
 			return nil, err
 		}
-		err = tx.Model(model.Client{}).Where("id IN ?", ids).Updates(columns).Error
+		err = tx.Model(model.Client{}).Where(whereClientIDs, ids).Updates(columns).Error
 		if err != nil {
 			return nil, err
 		}

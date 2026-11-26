@@ -11,10 +11,10 @@ func HandlerV2(manager *ManagerV2) http.Handler {
 	mux := http.NewServeMux()
 	status := func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
-			http.Error(w, "method not allowed", 405)
+			http.Error(w, methodNotAllowed, 405)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(contentTypeHeader, jsonContentType)
 		status := manager.Status()
 		if runtime, ok := manager.runtime.(interface{ Traffic() *TrafficSample }); ok {
 			status.Traffic = runtime.Traffic()
@@ -27,7 +27,7 @@ func HandlerV2(manager *ManagerV2) http.Handler {
 	mux.HandleFunc("/v2/status", status)
 	mux.HandleFunc("/v2/certificate", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPut {
-			http.Error(w, "method not allowed", 405)
+			http.Error(w, methodNotAllowed, 405)
 			return
 		}
 		if manager.resources == nil {
@@ -50,7 +50,7 @@ func HandlerV2(manager *ManagerV2) http.Handler {
 			http.Error(w, "certificate request not accepted", code)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(contentTypeHeader, jsonContentType)
 		json.NewEncoder(w).Encode(manager.Status())
 	})
 	// Old controllers see protocol=2 and cannot overwrite the independent ACL.
@@ -60,7 +60,7 @@ func HandlerV2(manager *ManagerV2) http.Handler {
 	})
 	write := func(w http.ResponseWriter, r *http.Request, access bool) {
 		if r.Method != http.MethodPut {
-			http.Error(w, "method not allowed", 405)
+			http.Error(w, methodNotAllowed, 405)
 			return
 		}
 		r.Body = http.MaxBytesReader(w, r.Body, 8<<20)
@@ -90,7 +90,7 @@ func HandlerV2(manager *ManagerV2) http.Handler {
 			}
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(contentTypeHeader, jsonContentType)
 		_ = json.NewEncoder(w).Encode(manager.Status())
 	}
 	mux.HandleFunc("/v2/access", func(w http.ResponseWriter, r *http.Request) { write(w, r, true) })

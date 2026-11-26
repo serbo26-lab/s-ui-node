@@ -25,7 +25,7 @@ var provisionFirewallPython string
 // CAP_NET_BIND_SERVICE and never receives firewall administration privileges.
 func ensureNodeFirewall(ctx context.Context, db *gorm.DB, node model.Node, snapshot Snapshot, confirmed bool) error {
 	var install model.NodeInstallation
-	if err := db.First(&install, "node_id = ?", node.Id).Error; err != nil {
+	if err := db.First(&install, whereNodeID, node.Id).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil
 		}
@@ -68,7 +68,7 @@ func ensureNodeFirewall(ctx context.Context, db *gorm.DB, node model.Node, snaps
 	if !confirmed {
 		firewallReceipts.Delete(node.Id)
 	}
-	if err := configureManagedFirewall(ctx, node, install, name, listeners, snapshot.Deployment.Revision, 0, confirmed); err != nil {
+	if err := configureManagedFirewall(ctx, node, install, name, listeners, firewallVersion{Revision: snapshot.Deployment.Revision}, confirmed); err != nil {
 		return err
 	}
 	if confirmed {
@@ -88,7 +88,12 @@ func firewallOwnerName(id uint, owner string) (string, error) {
 	return name, nil
 }
 
-func configureManagedFirewall(ctx context.Context, node model.Node, install model.NodeInstallation, name string, listeners []listenerSocket, revision, policy uint64, confirmed bool) error {
+type firewallVersion struct {
+	Revision uint64
+	Policy   uint64
+}
+
+func configureManagedFirewall(ctx context.Context, node model.Node, install model.NodeInstallation, name string, listeners []listenerSocket, version firewallVersion, confirmed bool) error {
 	ctx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
 	client, err := connectSSH(ctx, &install, "", false)
@@ -104,7 +109,7 @@ print(json.dumps({'configured':True}))
 `
 	_, err = remotePython(ctx, client, install.SSHUser, script, map[string]interface{}{
 		"listeners": listeners, "name": name, "confirmed": confirmed,
-		"version": map[string]interface{}{"operation": install.BootstrapID, "generation": node.ManagementGeneration, "revision": revision, "policy": policy},
+		"version": map[string]interface{}{"operation": install.BootstrapID, "generation": node.ManagementGeneration, "revision": version.Revision, "policy": version.Policy},
 	})
 	if err != nil {
 		return errNodeFirewall
@@ -114,7 +119,7 @@ print(json.dumps({'configured':True}))
 
 func ensureCertificateFirewall(ctx context.Context, db *gorm.DB, node model.Node, binding model.NodeCertificateBinding, enabled bool) error {
 	var install model.NodeInstallation
-	if err := db.First(&install, "node_id = ?", node.Id).Error; err != nil {
+	if err := db.First(&install, whereNodeID, node.Id).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil
 		}
@@ -129,7 +134,7 @@ func ensureCertificateFirewall(ctx context.Context, db *gorm.DB, node model.Node
 	}
 	if !node.Enable {
 		// A stopped node must close the latest resource generation as well.
-		if err := db.Where("node_id = ?", node.Id).Take(&binding).Error; err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		if err := db.Where(whereNodeID, node.Id).Take(&binding).Error; err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 			return err
 		}
 		enabled = false
@@ -143,7 +148,7 @@ func ensureCertificateFirewall(ctx context.Context, db *gorm.DB, node model.Node
 	if enabled {
 		listeners = append(listeners, listenerSocket{Port: 80, Network: "tcp"})
 	}
-	if err := configureManagedFirewall(ctx, node, install, name, listeners, binding.Generation, node.SettingsVersion, true); err != nil {
+	if err := configureManagedFirewall(ctx, node, install, name, listeners, firewallVersion{Revision: binding.Generation, Policy: node.SettingsVersion}, true); err != nil {
 		return err
 	}
 	certificateFirewallReceipts.Store(node.Id, receipt)

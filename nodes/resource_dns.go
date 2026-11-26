@@ -79,14 +79,14 @@ func profileSecret(profile model.NodeDNSProfile) (string, error) {
 	}
 	return stored.Value, nil
 }
-func cfResource(ctx context.Context, profile model.NodeDNSProfile, method, path string, payload interface{}, target interface{}) error {
+func cfResource(ctx context.Context, profile model.NodeDNSProfile, method, path string, payload, target interface{}) error {
 	secret, err := profileSecret(profile)
 	if err != nil {
 		return err
 	}
 	return cfResourceAuth(ctx, profile, secret, method, path, payload, target)
 }
-func cfResourceAuth(ctx context.Context, profile model.NodeDNSProfile, secret, method, path string, payload interface{}, target interface{}) error {
+func cfResourceAuth(ctx context.Context, profile model.NodeDNSProfile, secret, method, path string, payload, target interface{}) error {
 	var body io.Reader
 	if payload != nil {
 		encoded, err := json.Marshal(payload)
@@ -151,7 +151,7 @@ func verifyResourceZone(ctx context.Context, p model.NodeDNSProfile, id, domain 
 		return err
 	}
 	var actual DNSZone
-	if err := cfResource(ctx, p, "GET", "/zones/"+id, nil, &actual); err != nil {
+	if err := cfResource(ctx, p, "GET", cloudflareZonesPath+id, nil, &actual); err != nil {
 		return err
 	}
 	if actual.Id != zone.Id || actual.Name != zone.Name {
@@ -193,7 +193,7 @@ func ensureResourceRecord(ctx context.Context, nodeID uint, profile model.NodeDN
 	if err != nil {
 		return record, err
 	}
-	path := "/zones/" + zone + "/dns_records"
+	path := cloudflareZonesPath + zone + "/dns_records"
 	var list []resourceRecord
 	if err := cfResource(ctx, profile, "GET", path+"?name="+url.QueryEscape(name)+"&per_page=100", nil, &list); err != nil {
 		return record, err
@@ -211,8 +211,8 @@ func ensureResourceRecord(ctx context.Context, nodeID uint, profile model.NodeDN
 			if chosen != nil {
 				return record, errors.New("dns_record_duplicate_owner")
 			}
-			copy := candidate
-			chosen = &copy
+			snapshot := candidate
+			chosen = &snapshot
 			continue
 		}
 		if kind != "TXT" || candidate.Type == "CNAME" {
@@ -245,7 +245,7 @@ func removeResourceRecord(ctx context.Context, record model.NodeDNSRecord) error
 	if err := database.GetDB().First(&profile, record.ProfileId).Error; err != nil {
 		return err
 	}
-	path := "/zones/" + record.ZoneId + "/dns_records"
+	path := cloudflareZonesPath + record.ZoneId + "/dns_records"
 	if record.RemoteId == "" {
 		var list []resourceRecord
 		if err := cfResource(ctx, profile, "GET", path+"?name="+url.QueryEscape(record.Name)+"&per_page=100", nil, &list); err != nil {

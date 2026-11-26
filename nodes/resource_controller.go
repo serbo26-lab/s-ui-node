@@ -26,7 +26,7 @@ func resourceLock(id uint) *sync.Mutex {
 }
 func leaseResources(id uint) (func(error), bool, error) {
 	db := database.GetDB()
-	noop := func(error) {}
+	noop := func(error) { /* No lease was acquired, so there is nothing to release. */ }
 	if err := db.Transaction(func(tx *gorm.DB) error {
 		var node model.Node
 		if err := tx.First(&node, id).Error; err != nil {
@@ -93,7 +93,7 @@ func ReconcileResources(parent context.Context, id uint) (failure error) {
 	ctx, cancel := context.WithTimeout(parent, 6*time.Minute)
 	defer cancel()
 	var domain model.NodeDomainBinding
-	if err := db.First(&domain, "node_id = ?", id).Error; err != nil {
+	if err := db.First(&domain, whereNodeID, id).Error; err != nil {
 		return err
 	}
 	phase := "domain"
@@ -120,7 +120,7 @@ func ReconcileResources(parent context.Context, id uint) (failure error) {
 				}
 				return tx.Model(&model.NodeDomainBinding{}).Where("node_id = ? AND generation = ?", id, domain.Generation).Updates(map[string]interface{}{"state": "failed", "last_error": code, "checked_at": time.Now().Unix()}).Error
 			}
-			return tx.Model(&model.NodeCertificateBinding{}).Where("node_id = ?", id).Update("last_error", code).Error
+			return tx.Model(&model.NodeCertificateBinding{}).Where(whereNodeID, id).Update("last_error", code).Error
 		})
 	}()
 	if domain.Mode == "managed" {
@@ -141,7 +141,7 @@ func ReconcileResources(parent context.Context, id uint) (failure error) {
 	}
 	if err := db.Transaction(func(tx *gorm.DB) error {
 		var current model.NodeDomainBinding
-		if err := tx.First(&current, "node_id = ?", id).Error; err != nil {
+		if err := tx.First(&current, whereNodeID, id).Error; err != nil {
 			return err
 		}
 		if current.Generation != domain.Generation {
@@ -229,7 +229,7 @@ func CleanupNodeDNS(ctx context.Context, id, recordID uint, actor string) error 
 		return errors.New("node_resource_job_running")
 	}
 	var domain model.NodeDomainBinding
-	db.First(&domain, "node_id = ?", id)
+	db.First(&domain, whereNodeID, id)
 	var records []model.NodeDNSRecord
 	query := db.Where("node_id = ? AND retired = ?", id, false)
 	if recordID != 0 {

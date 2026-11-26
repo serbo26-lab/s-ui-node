@@ -26,34 +26,16 @@ func PrepareClientCredentials(tx *gorm.DB, client *model.Client) error {
 	if err != nil {
 		return err
 	}
-	var ids []uint
-	if client.NodeInbounds != nil {
-		if bytes.Equal(bytes.TrimSpace(client.NodeInbounds), []byte("null")) {
-			return errors.New("nodeinbounds must be an array, not null")
-		}
-		if err := json.Unmarshal(client.NodeInbounds, &ids); err != nil {
-			return errors.New("nodeinbounds must contain numeric IDs")
-		}
-	} else if client.Id != 0 {
-		ids, err = database.LegacyNodeInboundIDs(tx, client.Id)
-		if err != nil {
-			return err
-		}
+	ids, err := credentialInboundIDs(tx, client)
+	if err != nil {
+		return err
 	}
 	if len(ids) == 0 && len(whole) == 0 {
 		return preserveNodeGeneration(tx, client, ids)
 	}
-	var inbounds []model.NodeInbound
-	if err := tx.Where("id in ?", ids).Find(&inbounds).Error; err != nil {
+	inbounds, err := credentialInbounds(tx, ids, len(whole) > 0)
+	if err != nil {
 		return err
-	}
-	if len(whole) > 0 {
-		for _, kind := range nodeagent.InboundTypes(true) {
-			if nodeagent.ProxyInbound(kind) {
-				continue
-			}
-			inbounds = append(inbounds, model.NodeInbound{Type: kind})
-		}
 	}
 	var config map[string]map[string]interface{}
 	if err := json.Unmarshal(client.Config, &config); err != nil {
@@ -63,87 +45,149 @@ func PrepareClientCredentials(tx *gorm.DB, client *model.Client) error {
 		config = map[string]map[string]interface{}{}
 	}
 	if len(whole) > 0 && client.Id != 0 {
-		var old model.Client
-		if err := tx.First(&old, client.Id).Error; err != nil {
+		if err := preserveWholeCredentials(tx, client, config); err != nil {
 			return err
-		}
-		var previous map[string]map[string]interface{}
-		if err := json.Unmarshal(old.Config, &previous); err != nil {
-			return err
-		}
-		for kind, user := range previous {
-			if !nodeagent.SupportsInbound(kind, true) && kind != "shadowsocks16" {
-				continue
-			}
-			if config[kind] == nil {
-				config[kind] = map[string]interface{}{}
-				for field, value := range user {
-					config[kind][field] = value
-				}
-				config[kind]["name"] = client.Name
-			}
-			for _, field := range []string{"uuid", "password", "auth_str", "userkey", "username"} {
-				if _, exists := config[kind][field]; !exists {
-					if value, ok := user[field]; ok {
-						config[kind][field] = value
-					}
-				}
-			}
 		}
 	}
 	for _, inbound := range inbounds {
-		user := config[inbound.Type]
-		newUser := user == nil
-		if user == nil {
-			user = map[string]interface{}{"name": client.Name}
-			config[inbound.Type] = user
-		}
-		if nodeagent.NeedsUUID(inbound.Type) {
-			if value, exists := user["uuid"]; exists && value != nil {
-				if _, ok := value.(string); !ok {
-					return errors.New("node UUID must be a string")
-				}
-			}
-			value, _ := user["uuid"].(string)
-			if value == "" {
-				generated, err := uuid.NewV4()
-				if err != nil {
-					return err
-				}
-				value = generated.String()
-				user["uuid"] = value
-			}
-			if _, err := uuid.FromString(value); err != nil {
-				return errors.New("invalid UUID for selected node protocol")
-			}
-		}
-		if nodeagent.NeedsPassword(inbound.Type) {
-			if value, exists := user["password"]; exists && value != nil {
-				if _, ok := value.(string); !ok {
-					return errors.New("node password must be a string")
-				}
-			}
-			value, _ := user["password"].(string)
-			if value == "" {
-				buf := make([]byte, 24)
-				if _, err := rand.Read(buf); err != nil {
-					return err
-				}
-				user["password"] = base64.RawURLEncoding.EncodeToString(buf)
-			}
-		}
-		if inbound.Type == "vless" && newUser {
-			if _, ok := user["flow"]; !ok {
-				user["flow"] = "xtls-rprx-vision"
-			}
+		if err := ensureInboundCredentials(config, inbound.Type, client.Name); err != nil {
+			return err
 		}
 	}
 	value, err := json.Marshal(config)
-	if err == nil {
-		client.Config = value
-		return preserveNodeGeneration(tx, client, ids)
+	if err != nil {
+		return err
 	}
-	return err
+	client.Config = value
+	return preserveNodeGeneration(tx, client, ids)
+}
+
+func credentialInboundIDs(tx *gorm.DB, client *model.Client) ([]uint, error) {
+	var ids []uint
+	if client.NodeInbounds != nil {
+		if bytes.Equal(bytes.TrimSpace(client.NodeInbounds), []byte("null")) {
+			return nil, errors.New("nodeinbounds must be an array, not null")
+		}
+		if err := json.Unmarshal(client.NodeInbounds, &ids); err != nil {
+			return nil, errors.New("nodeinbounds must contain numeric IDs")
+		}
+	} else if client.Id != 0 {
+		return database.LegacyNodeInboundIDs(tx, client.Id)
+	}
+	return ids, nil
+}
+
+func credentialInbounds(tx *gorm.DB, ids []uint, whole bool) ([]model.NodeInbound, error) {
+	var inbounds []model.NodeInbound
+	if err := tx.Where("id in ?", ids).Find(&inbounds).Error; err != nil {
+		return nil, err
+	}
+	if whole {
+		for _, kind := range nodeagent.InboundTypes(true) {
+			if !nodeagent.ProxyInbound(kind) {
+				inbounds = append(inbounds, model.NodeInbound{Type: kind})
+			}
+		}
+	}
+	return inbounds, nil
+}
+
+func preserveWholeCredentials(tx *gorm.DB, client *model.Client, config map[string]map[string]interface{}) error {
+	var old model.Client
+	if err := tx.First(&old, client.Id).Error; err != nil {
+		return err
+	}
+	var previous map[string]map[string]interface{}
+	if err := json.Unmarshal(old.Config, &previous); err != nil {
+		return err
+	}
+	for kind, user := range previous {
+		if !nodeagent.SupportsInbound(kind, true) && kind != "shadowsocks16" {
+			continue
+		}
+		mergePreviousCredentials(config, kind, user, client.Name)
+	}
+	return nil
+}
+
+func mergePreviousCredentials(config map[string]map[string]interface{}, kind string, user map[string]interface{}, name string) {
+	if config[kind] == nil {
+		config[kind] = map[string]interface{}{}
+		for field, value := range user {
+			config[kind][field] = value
+		}
+		config[kind]["name"] = name
+	}
+	for _, field := range []string{"uuid", "password", "auth_str", "userkey", "username"} {
+		if _, exists := config[kind][field]; !exists {
+			if value, ok := user[field]; ok {
+				config[kind][field] = value
+			}
+		}
+	}
+}
+
+func ensureInboundCredentials(config map[string]map[string]interface{}, kind, name string) error {
+	user := config[kind]
+	newUser := user == nil
+	if newUser {
+		user = map[string]interface{}{"name": name}
+		config[kind] = user
+	}
+	if nodeagent.NeedsUUID(kind) {
+		if err := ensureCredentialUUID(user); err != nil {
+			return err
+		}
+	}
+	if nodeagent.NeedsPassword(kind) {
+		if err := ensureCredentialPassword(user); err != nil {
+			return err
+		}
+	}
+	if kind == "vless" && newUser {
+		if _, ok := user["flow"]; !ok {
+			user["flow"] = "xtls-rprx-vision"
+		}
+	}
+	return nil
+}
+
+func ensureCredentialUUID(user map[string]interface{}) error {
+	if value, exists := user["uuid"]; exists && value != nil {
+		if _, ok := value.(string); !ok {
+			return errors.New("node UUID must be a string")
+		}
+	}
+	value, _ := user["uuid"].(string)
+	if value == "" {
+		generated, err := uuid.NewV4()
+		if err != nil {
+			return err
+		}
+		value = generated.String()
+		user["uuid"] = value
+	}
+	if _, err := uuid.FromString(value); err != nil {
+		return errors.New("invalid UUID for selected node protocol")
+	}
+	return nil
+}
+
+func ensureCredentialPassword(user map[string]interface{}) error {
+	if value, exists := user["password"]; exists && value != nil {
+		if _, ok := value.(string); !ok {
+			return errors.New("node password must be a string")
+		}
+	}
+	value, _ := user["password"].(string)
+	if value == "" {
+		buf := make([]byte, 24)
+		if _, err := rand.Read(buf); err != nil {
+			return err
+		}
+		user["password"] = base64.RawURLEncoding.EncodeToString(buf)
+	}
+	return nil
 }
 
 func preserveNodeGeneration(tx *gorm.DB, client *model.Client, selected []uint) error {

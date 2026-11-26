@@ -37,23 +37,7 @@ func (r *CoreRuntime) accumulateTraffic(rows []model.Stats) {
 	for _, row := range rows {
 		r.trafficDirty = true
 		if row.Resource == "user" && row.Traffic > 0 {
-			if r.traffic.Activity == nil {
-				r.traffic.Activity = map[string]int64{}
-			}
-			r.traffic.Activity[row.Tag] = max(r.traffic.Activity[row.Tag], row.DateTime)
-			if id := r.trafficAliases[row.Tag]; id != "" {
-				if r.traffic.Users == nil {
-					r.traffic.Users = map[string]UserTraffic{}
-				}
-				counter := r.traffic.Users[id]
-				if row.Direction {
-					counter.Up += min(row.Traffic, math.MaxInt64-counter.Up)
-				} else {
-					counter.Down += min(row.Traffic, math.MaxInt64-counter.Down)
-				}
-				counter.At = max(counter.At, row.DateTime)
-				r.traffic.Users[id] = counter
-			}
+			r.accumulateUserTraffic(row)
 		}
 		if row.Resource != "inbound" {
 			continue
@@ -64,6 +48,28 @@ func (r *CoreRuntime) accumulateTraffic(rows []model.Stats) {
 		}
 		*value += min(row.Traffic, math.MaxInt64-*value)
 	}
+}
+
+func (r *CoreRuntime) accumulateUserTraffic(row model.Stats) {
+	if r.traffic.Activity == nil {
+		r.traffic.Activity = map[string]int64{}
+	}
+	r.traffic.Activity[row.Tag] = max(r.traffic.Activity[row.Tag], row.DateTime)
+	id := r.trafficAliases[row.Tag]
+	if id == "" {
+		return
+	}
+	if r.traffic.Users == nil {
+		r.traffic.Users = map[string]UserTraffic{}
+	}
+	counter := r.traffic.Users[id]
+	if row.Direction {
+		counter.Up += min(row.Traffic, math.MaxInt64-counter.Up)
+	} else {
+		counter.Down += min(row.Traffic, math.MaxInt64-counter.Down)
+	}
+	counter.At = max(counter.At, row.DateTime)
+	r.traffic.Users[id] = counter
 }
 
 func (r *CoreRuntime) Traffic() *TrafficSample {

@@ -54,7 +54,7 @@ func configureManagedNode(tx *gorm.DB, node *model.Node, i *model.NodeInstallati
 		return err
 	}
 	var existing []model.NodeInbound
-	if err := tx.Where("node_id = ?", node.Id).Find(&existing).Error; err != nil {
+	if err := tx.Where(whereNodeID, node.Id).Find(&existing).Error; err != nil {
 		return err
 	}
 	selected := map[string]bool{}

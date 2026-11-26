@@ -58,7 +58,7 @@ func controlClient(ctx context.Context, node model.Node) (*http.Client, func(), 
 	transport := &http.Transport{TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS13, RootCAs: roots, Certificates: []tls.Certificate{cert}}}
 	closeTransport := func() { transport.CloseIdleConnections() }
 	var installation model.NodeInstallation
-	if database.GetDB().First(&installation, "node_id = ?", node.Id).Error == nil && installation.PrivateKey != "" {
+	if database.GetDB().First(&installation, whereNodeID, node.Id).Error == nil && installation.PrivateKey != "" {
 		sshClient, _, err := managedTransport(ctx, node.Id)
 		if err != nil {
 			return nil, nil, err

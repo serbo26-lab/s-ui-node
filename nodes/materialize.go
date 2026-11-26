@@ -19,7 +19,7 @@ import (
 
 func physicalNodeHost(tx *gorm.DB, node model.Node) string {
 	var installation model.NodeInstallation
-	if tx.First(&installation, "node_id = ?", node.Id).Error == nil && installation.IP != "" {
+	if tx.First(&installation, whereNodeID, node.Id).Error == nil && installation.IP != "" {
 		return strings.ToLower(installation.IP)
 	}
 	u, _ := url.Parse(node.Address)
@@ -159,7 +159,7 @@ func materializeTemplate(tx *gorm.DB, node *model.Node, occupied map[listenerSoc
 	}
 	domain := node.LinkAddress
 	var installation model.NodeInstallation
-	if tx.First(&installation, "node_id = ?", node.Id).Error == nil && installation.Domain != "" {
+	if tx.First(&installation, whereNodeID, node.Id).Error == nil && installation.Domain != "" {
 		domain = installation.Domain
 	}
 	if validPublishedAddress(domain) && net.ParseIP(strings.Trim(domain, "[]")) == nil {
@@ -181,7 +181,7 @@ func materializeTemplate(tx *gorm.DB, node *model.Node, occupied map[listenerSoc
 		return err
 	}
 	for _, listener := range listeners {
-		ctx.Generated[listener.Key+"/listen_port"], _ = json.Marshal(listener.Port)
+		ctx.Generated[listener.Key+listenPortPath], _ = json.Marshal(listener.Port)
 	}
 	for _, entry := range spec.Entries {
 		if !entry.Enable {
@@ -222,7 +222,7 @@ func materializeTemplate(tx *gorm.DB, node *model.Node, occupied map[listenerSoc
 		return err
 	}
 	var existing []model.NodeInbound
-	if err := tx.Where("node_id = ?", node.Id).Find(&existing).Error; err != nil {
+	if err := tx.Where(whereNodeID, node.Id).Find(&existing).Error; err != nil {
 		return err
 	}
 	byKey := map[string]model.NodeInbound{}

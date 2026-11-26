@@ -95,15 +95,15 @@ func createLiveProvision(r ProvisionRequest, actor string) (model.NodeJob, bool,
 	signature := r
 	signature.Password = ""
 	if signature.Domain != nil {
-		copy := *signature.Domain
-		copy.Certificate = ""
-		copy.Key = ""
-		signature.Domain = &copy
+		snapshot := *signature.Domain
+		snapshot.Certificate = ""
+		snapshot.Key = ""
+		signature.Domain = &snapshot
 	}
 	body, _ := json.Marshal(signature)
 	digest := versionDigest(body)
 	db := database.GetDB()
-	if err := db.First(&job, "request_key = ?", r.RequestKey).Error; err == nil {
+	if err := db.First(&job, whereRequestKey, r.RequestKey).Error; err == nil {
 		if job.RequestDigest != digest {
 			return job, false, errors.New("install_request_conflict")
 		}
@@ -183,7 +183,7 @@ func createLiveProvision(r ProvisionRequest, actor string) (model.NodeJob, bool,
 	err := db.Transaction(func(tx *gorm.DB) error {
 		// The unique request index also fences concurrent creates.
 		var same model.NodeJob
-		if tx.First(&same, "request_key = ?", r.RequestKey).Error == nil {
+		if tx.First(&same, whereRequestKey, r.RequestKey).Error == nil {
 			if same.RequestDigest != digest {
 				return errors.New("install_request_conflict")
 			}
@@ -199,7 +199,7 @@ func createLiveProvision(r ProvisionRequest, actor string) (model.NodeJob, bool,
 			if r.ExpectedVersion == nil || node.SettingsVersion != *r.ExpectedVersion {
 				return errors.New("node_settings_version_conflict")
 			}
-			if err := tx.First(&installation, "node_id = ?", node.Id).Error; err != nil {
+			if err := tx.First(&installation, whereNodeID, node.Id).Error; err != nil {
 				return errors.New("node_not_ssh_managed")
 			}
 			var active int64
@@ -284,7 +284,7 @@ func createLiveProvision(r ProvisionRequest, actor string) (model.NodeJob, bool,
 	})
 	if err != nil {
 		var same model.NodeJob
-		if db.First(&same, "request_key = ?", r.RequestKey).Error == nil && same.RequestDigest == digest {
+		if db.First(&same, whereRequestKey, r.RequestKey).Error == nil && same.RequestDigest == digest {
 			return same, false, nil
 		}
 	}
@@ -322,7 +322,7 @@ func provisionLiveTemplate(tx *gorm.DB, node model.Node, r ProvisionRequest) (mo
 		if err != nil {
 			return template, err
 		}
-		e := SpecEntry{Key: key.String(), Name: strings.ToUpper(kind), Protocol: kind, Enable: true, Sources: map[string]ValueSource{"/listen_port": {Kind: "node_generated", Purpose: "listen_port"}}}
+		e := SpecEntry{Key: key.String(), Name: strings.ToUpper(kind), Protocol: kind, Enable: true, Sources: map[string]ValueSource{listenPortPath: {Kind: "node_generated", Purpose: "listen_port"}}}
 		if kind == "vless" {
 			e.Options = json.RawMessage(`{"listen":"::","tls":{"enabled":true,"server_name":"www.cloudflare.com","reality":{"enabled":true,"handshake":{"server":"www.cloudflare.com","server_port":443}}}}`)
 			e.Sources["/tls/reality/private_key"] = ValueSource{Kind: "node_generated", Purpose: "reality_private_key"}

@@ -99,7 +99,7 @@ func SaveProvisionSettings(data []byte) error {
 	var zone struct {
 		Name string `json:"name"`
 	}
-	if err = cloudflare(ctx, token, "GET", "/zones/"+s.ZoneId, nil, &zone); err != nil {
+	if err = cloudflare(ctx, token, "GET", cloudflareZonesPath+s.ZoneId, nil, &zone); err != nil {
 		return err
 	}
 	if s.DomainSuffix != zone.Name && !strings.HasSuffix(s.DomainSuffix, "."+zone.Name) {
@@ -117,7 +117,7 @@ type cloudRecord struct {
 	Comment string `json:"comment"`
 }
 
-func cloudflare(ctx context.Context, token, method, path string, body interface{}, target interface{}) error {
+func cloudflare(ctx context.Context, token, method, path string, body, target interface{}) error {
 	var data io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
@@ -155,7 +155,7 @@ func ensureNodeDNS(ctx context.Context, i *model.NodeInstallation) error {
 	if err != nil {
 		return errors.New("state_key_unavailable")
 	}
-	path := "/zones/" + settings.ZoneId + "/dns_records"
+	path := cloudflareZonesPath + settings.ZoneId + "/dns_records"
 	var list []cloudRecord
 	if err = cloudflare(ctx, token, "GET", path+"?name="+url.QueryEscape(i.Domain), nil, &list); err != nil {
 		return err
@@ -176,8 +176,8 @@ func ensureNodeDNS(ctx context.Context, i *model.NodeInstallation) error {
 			return errors.New("dns_name_occupied")
 		}
 		if record.Type == kind {
-			copy := record
-			chosen = &copy
+			snapshot := record
+			chosen = &snapshot
 		} else {
 			var discarded interface{}
 			if err = cloudflare(ctx, token, "DELETE", path+"/"+record.Id, nil, &discarded); err != nil {

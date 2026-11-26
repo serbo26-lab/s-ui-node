@@ -162,7 +162,7 @@ func openRealmDraft(entry *SpecEntry) error {
 	if entry.RealmServerSecret == "" && entry.RealmClientSecret == "" {
 		return nil
 	}
-	restore := func(raw *json.RawMessage, secret string, purpose string) error {
+	restore := func(raw *json.RawMessage, secret, purpose string) error {
 		if secret == "" {
 			return nil
 		}

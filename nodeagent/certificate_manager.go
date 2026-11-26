@@ -178,8 +178,8 @@ func (r *CertificateManager) Configure(request CertificateRequest) error {
 		return nil
 	}
 	next := r.state
-	copy := request
-	next.Config = &copy
+	snapshot := request
+	next.Config = &snapshot
 	next.LastError = ""
 	next.FailedDigest = ""
 	next.RetryAt = 0
@@ -261,8 +261,8 @@ func (r *CertificateManager) BeginTrial() bool {
 	if meta.Digest == "" || meta.NotAfter <= time.Now().Unix() || r.state.Active[meta.Domain].Digest == meta.Digest || r.state.FailedDigest == meta.Digest && r.state.RetryAt > time.Now().Unix() {
 		return false
 	}
-	copy := meta
-	r.trial = &copy
+	snapshot := meta
+	r.trial = &snapshot
 	return true
 }
 func (r *CertificateManager) FinishTrial(success bool) error {

@@ -34,16 +34,9 @@ func recordClientTraffic(db *gorm.DB, node model.Node, sample *nodeagent.Traffic
 		if found.Error != nil || found.RowsAffected == 0 {
 			return found.Error
 		}
-		var clients []model.Client
-		query := tx.Model(&model.Client{})
-		if current.AssignmentMode == model.NodeAssignmentWhole || current.AssignmentMode == model.NodeAssignmentActivating {
-			// Retain revoked assignments for the final traffic reported by their
-			// previous authenticated sessions. They grant no further access.
-			query = query.Where("clients.id IN (?)", tx.Model(&model.ClientNode{}).Select("client_id").Where("node_id = ?", current.Id))
-		} else {
-			query = query.Where("clients.id IN (?)", tx.Model(&model.ClientNodeInbound{}).Select("client_node_inbounds.client_id").Joins("JOIN node_inbounds AS ni ON ni.id = client_node_inbounds.node_inbound_id").Where("ni.node_id = ?", current.Id))
-		}
-		if err := query.Find(&clients).Error; err != nil {
+		// Revoked sessions may still report final usage, without regaining access.
+		clients, err := accountingClients(tx, current, true)
+		if err != nil {
 			return err
 		}
 		for _, client := range clients {

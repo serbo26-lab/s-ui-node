@@ -27,8 +27,10 @@ import (
 var backupImportMu sync.Mutex
 
 const (
-	backupLimit   = 256 << 20
-	backupKeyName = "node-provision.key"
+	backupDatabaseName = "panel.db"
+	backupManifestName = "manifest.json"
+	backupLimit        = 256 << 20
+	backupKeyName      = "node-provision.key"
 )
 
 type nodeBackupManifest struct {
@@ -193,11 +195,11 @@ func GetFullBackup(exclude string) ([]byte, error) {
 	encoded, _ := json.Marshal(manifest)
 	var output bytes.Buffer
 	archive := zip.NewWriter(&output)
-	files := map[string][]byte{"panel.db": body, "manifest.json": encoded}
+	files := map[string][]byte{backupDatabaseName: body, backupManifestName: encoded}
 	if len(key) > 0 {
-		files["node-provision.key"] = key
+		files[backupKeyName] = key
 	}
-	for _, name := range []string{"manifest.json", "panel.db", "node-provision.key"} {
+	for _, name := range []string{backupManifestName, backupDatabaseName, backupKeyName} {
 		data, exists := files[name]
 		if !exists {
 			continue
@@ -229,17 +231,17 @@ func readFullBackup(reader io.ReaderAt, size int64) ([]byte, []byte, error) {
 	files := map[string][]byte{}
 	var total uint64
 	for _, file := range archive.File {
-		if file.Name != "panel.db" && file.Name != "node-provision.key" && file.Name != "manifest.json" {
+		if file.Name != backupDatabaseName && file.Name != backupKeyName && file.Name != backupManifestName {
 			return nil, nil, errors.New("invalid_node_backup_archive")
 		}
 		if _, exists := files[file.Name]; exists {
 			return nil, nil, errors.New("invalid_node_backup_archive")
 		}
 		limit := uint64(backupLimit)
-		if file.Name == "node-provision.key" {
+		if file.Name == backupKeyName {
 			limit = 32
 		}
-		if file.Name == "manifest.json" {
+		if file.Name == backupManifestName {
 			limit = 4096
 		}
 		total += file.UncompressedSize64
@@ -258,20 +260,20 @@ func readFullBackup(reader io.ReaderAt, size int64) ([]byte, []byte, error) {
 		files[file.Name] = body
 	}
 	var manifest nodeBackupManifest
-	if json.Unmarshal(files["manifest.json"], &manifest) != nil || manifest.Version != 1 || manifest.DatabaseSHA256 != backupHash(files["panel.db"]) {
+	if json.Unmarshal(files[backupManifestName], &manifest) != nil || manifest.Version != 1 || manifest.DatabaseSHA256 != backupHash(files[backupDatabaseName]) {
 		return nil, nil, errors.New("invalid_node_backup_manifest")
 	}
-	key := files["node-provision.key"]
+	key := files[backupKeyName]
 	if len(key) > 0 && (len(key) != 32 || manifest.KeySHA256 != backupHash(key)) {
 		return nil, nil, errors.New("node_backup_key_mismatch")
 	}
 	if manifest.KeySHA256 != "" && len(key) == 0 {
 		return nil, nil, errors.New("node_backup_key_required")
 	}
-	if err = validateBackupBytes(files["panel.db"], key); err != nil {
+	if err = validateBackupBytes(files[backupDatabaseName], key); err != nil {
 		return nil, nil, err
 	}
-	return files["panel.db"], key, nil
+	return files[backupDatabaseName], key, nil
 }
 
 // A prepared pair is rolled back after a crash; a ready pair has both new
@@ -421,7 +423,7 @@ func backupReadSource() (*gorm.DB, func(), error) {
 			return source, func() { pool.Close() }, nil
 		}
 	}
-	return db, func() {}, nil
+	return db, func() { /* The existing database is borrowed; its owner closes it. */ }, nil
 }
 
 func copyBackupSequences(source, target *gorm.DB) error {
