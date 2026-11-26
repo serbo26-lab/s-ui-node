@@ -77,24 +77,8 @@ func SaveProvisionSettings(data []byte) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
 	defer cancel()
-	if s.ZoneId == "" {
-		labels := strings.Split(s.DomainSuffix, ".")
-		for len(labels) >= 2 {
-			var zones []struct {
-				Id string `json:"id"`
-			}
-			if err = cloudflare(ctx, token, "GET", "/zones?name="+url.QueryEscape(strings.Join(labels, ".")), nil, &zones); err != nil {
-				return err
-			}
-			if len(zones) == 1 {
-				s.ZoneId = zones[0].Id
-				break
-			}
-			labels = labels[1:]
-		}
-		if s.ZoneId == "" {
-			return errors.New("dns_zone_not_found")
-		}
+	if err := resolveAutomationZone(ctx, token, &s); err != nil {
+		return err
 	}
 	var zone struct {
 		Name string `json:"name"`
@@ -195,4 +179,27 @@ func ensureNodeDNS(ctx context.Context, i *model.NodeInstallation) error {
 		i.DNSRecordId = record.Id
 	}
 	return err
+}
+
+func resolveAutomationZone(ctx context.Context, token string, s *model.NodeAutomation) error {
+	if s.ZoneId == "" {
+		labels := strings.Split(s.DomainSuffix, ".")
+		for len(labels) >= 2 {
+			var zones []struct {
+				Id string `json:"id"`
+			}
+			if err := cloudflare(ctx, token, "GET", "/zones?name="+url.QueryEscape(strings.Join(labels, ".")), nil, &zones); err != nil {
+				return err
+			}
+			if len(zones) == 1 {
+				s.ZoneId = zones[0].Id
+				break
+			}
+			labels = labels[1:]
+		}
+		if s.ZoneId == "" {
+			return errors.New("dns_zone_not_found")
+		}
+	}
+	return nil
 }

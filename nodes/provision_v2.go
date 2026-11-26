@@ -227,38 +227,11 @@ func provisionLiveTemplate(tx *gorm.DB, node model.Node, r ProvisionRequest) (mo
 		return template, err
 	}
 	for _, kind := range r.Protocols {
-		key, err := uuid.NewV4()
+		entry, err := defaultLiveProvisionEntry(kind)
 		if err != nil {
 			return template, err
 		}
-		e := SpecEntry{Key: key.String(), Name: strings.ToUpper(kind), Protocol: kind, Enable: true, Sources: map[string]ValueSource{listenPortPath: {Kind: "node_generated", Purpose: "listen_port"}}}
-		if kind == "vless" {
-			e.Options = json.RawMessage(`{"listen":"::","tls":{"enabled":true,"server_name":"www.cloudflare.com","reality":{"enabled":true,"handshake":{"server":"www.cloudflare.com","server_port":443}}}}`)
-			e.Sources["/tls/reality/private_key"] = ValueSource{Kind: "node_generated", Purpose: "reality_private_key"}
-			e.Sources["/tls/reality/short_id"] = ValueSource{Kind: "node_generated", Purpose: "reality_short_id"}
-		} else if !nodeagent.SupportsTLS(kind) {
-			switch kind {
-			case "shadowsocks":
-				e.Options = json.RawMessage(`{"listen":"::","method":"2022-blake3-aes-128-gcm"}`)
-			case "snell":
-				e.Options = json.RawMessage(`{"listen":"::","version":6}`)
-			case "shadowtls":
-				e.Options = json.RawMessage(`{"listen":"::","version":3,"handshake":{"server":"www.cloudflare.com","server_port":443}}`)
-			default:
-				e.Options = json.RawMessage(`{"listen":"::"}`)
-			}
-		} else {
-			e.Options = json.RawMessage(`{"listen":"::","tls":{"enabled":true}}`)
-			if kind == "tuic" || kind == "hysteria2" {
-				e.Options = json.RawMessage(`{"listen":"::","tls":{"enabled":true,"alpn":["h3"]}}`)
-			}
-			if kind == "hysteria" {
-				e.Options = json.RawMessage(`{"listen":"::","up_mbps":100,"down_mbps":100,"tls":{"enabled":true,"alpn":["h3"]}}`)
-			}
-			e.Sources["/tls/server_name"] = ValueSource{Kind: "node_parameter", Name: "primary_domain"}
-			e.Sources["/tls/certificate_binding"] = ValueSource{Kind: "node_certificate", Name: "primary"}
-		}
-		spec.Entries = append(spec.Entries, e)
+		spec.Entries = append(spec.Entries, entry)
 	}
 	body, _ := json.Marshal(spec)
 	normalized, err := NormalizeSpec(body, nil)
@@ -279,25 +252,11 @@ func provisionLiveTemplate(tx *gorm.DB, node model.Node, r ProvisionRequest) (mo
 }
 
 func provisionLiveResources(tx *gorm.DB, node model.Node, r ProvisionRequest) error {
-	spec, err := liveVersion(tx, node)
+	certificate, primaryDomain, err := liveResourceNeeds(tx, node)
 	if err != nil {
 		return err
 	}
-	needs := r.Domain != nil
-	for _, entry := range spec.Entries {
-		if entry.Enable {
-			if entry.TLSProfileID > 0 {
-				if err := applyTLSProfile(tx, &entry); err != nil {
-					return err
-				}
-			}
-			for _, s := range entry.Sources {
-				if s.Kind == "node_certificate" || s.Kind == "node_parameter" && s.Name == "primary_domain" {
-					needs = true
-				}
-			}
-		}
-	}
+	needs := r.Domain != nil || certificate || primaryDomain
 	if !needs {
 		return nil
 	}
@@ -572,4 +531,39 @@ func prepareTemplateLiveProtocols(r *ProvisionRequest) error {
 		}
 	}
 	return nil
+}
+
+func defaultLiveProvisionEntry(kind string) (SpecEntry, error) {
+	key, err := uuid.NewV4()
+	if err != nil {
+		return SpecEntry{}, err
+	}
+	e := SpecEntry{Key: key.String(), Name: strings.ToUpper(kind), Protocol: kind, Enable: true, Sources: map[string]ValueSource{listenPortPath: {Kind: "node_generated", Purpose: "listen_port"}}}
+	if kind == "vless" {
+		e.Options = json.RawMessage(`{"listen":"::","tls":{"enabled":true,"server_name":"www.cloudflare.com","reality":{"enabled":true,"handshake":{"server":"www.cloudflare.com","server_port":443}}}}`)
+		e.Sources["/tls/reality/private_key"] = ValueSource{Kind: "node_generated", Purpose: "reality_private_key"}
+		e.Sources["/tls/reality/short_id"] = ValueSource{Kind: "node_generated", Purpose: "reality_short_id"}
+	} else if !nodeagent.SupportsTLS(kind) {
+		switch kind {
+		case "shadowsocks":
+			e.Options = json.RawMessage(`{"listen":"::","method":"2022-blake3-aes-128-gcm"}`)
+		case "snell":
+			e.Options = json.RawMessage(`{"listen":"::","version":6}`)
+		case "shadowtls":
+			e.Options = json.RawMessage(`{"listen":"::","version":3,"handshake":{"server":"www.cloudflare.com","server_port":443}}`)
+		default:
+			e.Options = json.RawMessage(`{"listen":"::"}`)
+		}
+	} else {
+		e.Options = json.RawMessage(`{"listen":"::","tls":{"enabled":true}}`)
+		if kind == "tuic" || kind == "hysteria2" {
+			e.Options = json.RawMessage(`{"listen":"::","tls":{"enabled":true,"alpn":["h3"]}}`)
+		}
+		if kind == "hysteria" {
+			e.Options = json.RawMessage(`{"listen":"::","up_mbps":100,"down_mbps":100,"tls":{"enabled":true,"alpn":["h3"]}}`)
+		}
+		e.Sources["/tls/server_name"] = ValueSource{Kind: "node_parameter", Name: "primary_domain"}
+		e.Sources["/tls/certificate_binding"] = ValueSource{Kind: "node_certificate", Name: "primary"}
+	}
+	return e, nil
 }

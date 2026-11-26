@@ -166,37 +166,9 @@ func reconcileCertificate(ctx context.Context, node model.Node, domain model.Nod
 	var binding model.NodeCertificateBinding
 	err := db.First(&binding, whereNodeID, node.Id).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
-		if domain.CertificateMode != "auto" || node.TemplateTargetVersion == 0 {
-			return nil
-		}
-		spec, err := liveVersion(db, node)
-		if err != nil {
-			return err
-		}
-		needed := false
-		for _, entry := range spec.Entries {
-			if entry.Enable {
-				if entry.TLSProfileID > 0 {
-					if err := applyTLSProfile(db, &entry); err != nil {
-						return err
-					}
-				}
-				for _, source := range entry.Sources {
-					if source.Kind == "node_certificate" {
-						needed = true
-					}
-				}
-			}
-		}
-		if !needed {
-			return nil
-		}
-		request, _ := json.Marshal(map[string]interface{}{"node_id": node.Id, "mode": "auto"})
-		if err := db.Transaction(func(tx *gorm.DB) error { _, err := saveCertificateBinding(tx, "save", request); return err }); err != nil {
-			return err
-		}
-		if err := db.First(&binding, whereNodeID, node.Id).Error; err != nil {
-			return err
+		prepared, prepareErr := prepareAutomaticCertificate(db, node, domain, &binding)
+		if prepareErr != nil || !prepared {
+			return prepareErr
 		}
 	} else if err != nil {
 		return err
@@ -207,126 +179,15 @@ func reconcileCertificate(ctx context.Context, node model.Node, domain model.Nod
 		}
 	}
 	if binding.Mode == "dns01" {
-		var version model.NodeCertificateVersion
-		var meta nodecert.Metadata
-		if binding.CurrentVersion > 0 {
-			if err := db.First(&version, whereNodeVersion, node.Id, binding.CurrentVersion).Error; err != nil {
-				return err
-			}
-			json.Unmarshal(version.Metadata, &meta)
-		}
-		if binding.CurrentVersion == 0 || meta.Domain != domain.FQDN || nodecert.NeedsRenewal(meta, time.Now()) || binding.RenewRequested {
-			if binding.AccountKey == "" {
-				key, err := nodecert.NewAccountKey()
-				if err != nil {
-					return err
-				}
-				body, _ := json.Marshal(struct {
-					Node uint
-					Key  string
-				}{node.Id, key})
-				sealed, err := sealSecret(string(body))
-				if err != nil {
-					return err
-				}
-				if err := db.Model(&model.NodeCertificateBinding{}).Where("node_id = ? AND generation = ?", node.Id, binding.Generation).Update("account_key", sealed).Error; err != nil {
-					return err
-				}
-				binding.AccountKey = sealed
-			}
-			plain, err := openSecret(binding.AccountKey)
-			if err != nil {
-				return errors.New("certificate_state_key_unavailable")
-			}
-			var account struct {
-				Node uint
-				Key  string
-			}
-			if json.Unmarshal([]byte(plain), &account) != nil || account.Node != node.Id {
-				return errors.New("certificate_account_identity_mismatch")
-			}
-			var profile model.NodeDNSProfile
-			if err := db.First(&profile, binding.DNSProfileId).Error; err != nil {
-				return err
-			}
-			if err := verifyResourceZone(ctx, profile, binding.ZoneId, domain.FQDN); err != nil {
-				return err
-			}
-			solver := &resourceDNSSolver{nodeID: node.Id, profile: profile, zone: binding.ZoneId}
-			bundle, err := resourceIssueDNS(ctx, binding.CA, binding.Email, account.Key, domain.FQDN, solver)
-			if err != nil {
-				return err
-			}
-			if _, err := persistCertificateVersion(node.Id, binding.Generation, domain, bundle); err != nil {
-				return err
-			}
+		if err := prepareDNSCertificate(ctx, db, node, domain, &binding); err != nil {
+			return err
 		}
 	} else if binding.Mode == "provided" {
-		plain, err := openSecret(binding.Material)
-		if err != nil {
-			return errors.New("certificate_state_key_unavailable")
-		}
-		var stored struct {
-			Node   uint
-			Domain string
-			Bundle nodecert.Bundle
-		}
-		if json.Unmarshal([]byte(plain), &stored) != nil || stored.Node != node.Id || stored.Domain != domain.FQDN {
-			return errors.New("certificate_material_invalid")
-		}
-		if _, err := persistCertificateVersion(node.Id, binding.Generation, domain, stored.Bundle); err != nil {
+		if err := prepareProvidedCertificate(node, domain, binding); err != nil {
 			return err
 		}
 	}
-	if err := db.First(&binding, whereNodeID, node.Id).Error; err != nil {
-		return err
-	}
-	control, closeControl, err := controlClient(ctx, node)
-	if err != nil {
-		return err
-	}
-	defer closeControl()
-	status, err := getStatusV2(ctx, control, node)
-	if err != nil {
-		return err
-	}
-	if status.CertificateResource == nil {
-		return errors.New("agent_certificate_upgrade_required")
-	}
-	request, err := prepareCertificateRequest(node, domain, binding, status.CertificateResource)
-	if err != nil {
-		return err
-	}
-	if status.CertificateResource.Revision != request.Revision || status.CertificateResource.Digest != request.Digest() || status.CertificateResource.State == "failed" {
-		status, err = putV2(ctx, control, node, "/v2/certificate", request)
-		if err != nil {
-			return err
-		}
-	}
-	observed := status.CertificateResource
-	if observed == nil || observed.Revision != request.Revision || observed.Digest != request.Digest() {
-		return errors.New("certificate_ack_mismatch")
-	}
-	if observed.State != "ready" || observed.AppliedRevision != request.Revision {
-		if observed.LastError != "" {
-			return errors.New("agent_" + observed.LastError)
-		}
-		return errors.New("certificate_pending")
-	}
-	meta := observed.Metadata
-	if meta.Domain != domain.FQDN || meta.NotAfter <= time.Now().Unix() || len(meta.Digest) != 64 || meta.CertificatePath != "certificates/managed/"+meta.Digest+"/cert.pem" || meta.KeyPath != "certificates/managed/"+meta.Digest+"/key.pem" {
-		return errors.New("certificate_artifact_ack_invalid")
-	}
-	if request.Method == "install" && meta.Digest != nodecert.Digest(request.Bundle) {
-		return errors.New("certificate_artifact_digest_mismatch")
-	}
-	if err := acknowledgeCertificate(node, binding, request, meta, observed.LastError); err != nil {
-		return err
-	}
-	if binding.Mode != "http01" {
-		return ensureCertificateFirewall(ctx, db, node, binding, false)
-	}
-	return nil
+	return deliverResourceCertificate(ctx, db, node, domain, binding)
 }
 
 func acknowledgeCertificate(node model.Node, binding model.NodeCertificateBinding, request nodeagent.CertificateRequest, meta nodecert.Metadata, lastError string) error {
@@ -470,4 +331,212 @@ func prepareCertificateTransaction(tx *gorm.DB, node model.Node, domain model.No
 		}
 	}
 	return nil
+}
+
+func liveResourceNeeds(db *gorm.DB, node model.Node) (certificate, domain bool, err error) {
+	spec, err := liveVersion(db, node)
+	if err != nil {
+		return false, false, err
+	}
+	for _, entry := range spec.Entries {
+		if !entry.Enable {
+			continue
+		}
+		cert, primary, err := entryResourceNeeds(db, entry)
+		if err != nil {
+			return false, false, err
+		}
+		certificate = certificate || cert
+		domain = domain || primary
+	}
+	return certificate, domain, nil
+}
+
+func prepareAutomaticCertificate(db *gorm.DB, node model.Node, domain model.NodeDomainBinding, binding *model.NodeCertificateBinding) (bool, error) {
+	if domain.CertificateMode != "auto" || node.TemplateTargetVersion == 0 {
+		return false, nil
+	}
+	needed, _, err := liveResourceNeeds(db, node)
+	if err != nil {
+		return false, err
+	}
+	if !needed {
+		return false, nil
+	}
+	request, _ := json.Marshal(map[string]interface{}{"node_id": node.Id, "mode": "auto"})
+	if err := db.Transaction(func(tx *gorm.DB) error { _, err := saveCertificateBinding(tx, "save", request); return err }); err != nil {
+		return false, err
+	}
+	if err := db.First(binding, whereNodeID, node.Id).Error; err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func prepareDNSCertificate(ctx context.Context, db *gorm.DB, node model.Node, domain model.NodeDomainBinding, binding *model.NodeCertificateBinding) error {
+	var version model.NodeCertificateVersion
+	var meta nodecert.Metadata
+	if binding.CurrentVersion > 0 {
+		if err := db.First(&version, whereNodeVersion, node.Id, binding.CurrentVersion).Error; err != nil {
+			return err
+		}
+		json.Unmarshal(version.Metadata, &meta)
+	}
+	if binding.CurrentVersion == 0 || meta.Domain != domain.FQDN || nodecert.NeedsRenewal(meta, time.Now()) || binding.RenewRequested {
+		if err := ensureResourceAccountKey(db, node.Id, binding); err != nil {
+			return err
+		}
+		if err := renewResourceDNSCertificate(ctx, db, node, domain, *binding); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func ensureResourceAccountKey(db *gorm.DB, nodeID uint, binding *model.NodeCertificateBinding) error {
+	if binding.AccountKey == "" {
+		key, err := nodecert.NewAccountKey()
+		if err != nil {
+			return err
+		}
+		body, _ := json.Marshal(struct {
+			Node uint
+			Key  string
+		}{nodeID, key})
+		sealed, err := sealSecret(string(body))
+		if err != nil {
+			return err
+		}
+		if err := db.Model(&model.NodeCertificateBinding{}).Where("node_id = ? AND generation = ?", nodeID, binding.Generation).Update("account_key", sealed).Error; err != nil {
+			return err
+		}
+		binding.AccountKey = sealed
+	}
+	return nil
+}
+
+func renewResourceDNSCertificate(ctx context.Context, db *gorm.DB, node model.Node, domain model.NodeDomainBinding, binding model.NodeCertificateBinding) error {
+	plain, err := openSecret(binding.AccountKey)
+	if err != nil {
+		return errors.New("certificate_state_key_unavailable")
+	}
+	var account struct {
+		Node uint
+		Key  string
+	}
+	if json.Unmarshal([]byte(plain), &account) != nil || account.Node != node.Id {
+		return errors.New("certificate_account_identity_mismatch")
+	}
+	var profile model.NodeDNSProfile
+	if err := db.First(&profile, binding.DNSProfileId).Error; err != nil {
+		return err
+	}
+	if err := verifyResourceZone(ctx, profile, binding.ZoneId, domain.FQDN); err != nil {
+		return err
+	}
+	solver := &resourceDNSSolver{nodeID: node.Id, profile: profile, zone: binding.ZoneId}
+	bundle, err := resourceIssueDNS(ctx, binding.CA, binding.Email, account.Key, domain.FQDN, solver)
+	if err != nil {
+		return err
+	}
+	if _, err := persistCertificateVersion(node.Id, binding.Generation, domain, bundle); err != nil {
+		return err
+	}
+	return nil
+}
+
+func prepareProvidedCertificate(node model.Node, domain model.NodeDomainBinding, binding model.NodeCertificateBinding) error {
+	plain, err := openSecret(binding.Material)
+	if err != nil {
+		return errors.New("certificate_state_key_unavailable")
+	}
+	var stored struct {
+		Node   uint
+		Domain string
+		Bundle nodecert.Bundle
+	}
+	if json.Unmarshal([]byte(plain), &stored) != nil || stored.Node != node.Id || stored.Domain != domain.FQDN {
+		return errors.New("certificate_material_invalid")
+	}
+	if _, err := persistCertificateVersion(node.Id, binding.Generation, domain, stored.Bundle); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateCertificateAcknowledgement(domain model.NodeDomainBinding, request nodeagent.CertificateRequest, observed *nodeagent.CertificateResourceStatus) (nodecert.Metadata, error) {
+	if observed == nil || observed.Revision != request.Revision || observed.Digest != request.Digest() {
+		return nodecert.Metadata{}, errors.New("certificate_ack_mismatch")
+	}
+	if observed.State != "ready" || observed.AppliedRevision != request.Revision {
+		if observed.LastError != "" {
+			return nodecert.Metadata{}, errors.New("agent_" + observed.LastError)
+		}
+		return nodecert.Metadata{}, errors.New("certificate_pending")
+	}
+	meta := observed.Metadata
+	if meta.Domain != domain.FQDN || meta.NotAfter <= time.Now().Unix() || len(meta.Digest) != 64 || meta.CertificatePath != "certificates/managed/"+meta.Digest+"/cert.pem" || meta.KeyPath != "certificates/managed/"+meta.Digest+"/key.pem" {
+		return nodecert.Metadata{}, errors.New("certificate_artifact_ack_invalid")
+	}
+	if request.Method == "install" && meta.Digest != nodecert.Digest(request.Bundle) {
+		return nodecert.Metadata{}, errors.New("certificate_artifact_digest_mismatch")
+	}
+	return meta, nil
+}
+
+func deliverResourceCertificate(ctx context.Context, db *gorm.DB, node model.Node, domain model.NodeDomainBinding, binding model.NodeCertificateBinding) error {
+	if err := db.First(&binding, whereNodeID, node.Id).Error; err != nil {
+		return err
+	}
+	control, closeControl, err := controlClient(ctx, node)
+	if err != nil {
+		return err
+	}
+	defer closeControl()
+	status, err := getStatusV2(ctx, control, node)
+	if err != nil {
+		return err
+	}
+	if status.CertificateResource == nil {
+		return errors.New("agent_certificate_upgrade_required")
+	}
+	request, err := prepareCertificateRequest(node, domain, binding, status.CertificateResource)
+	if err != nil {
+		return err
+	}
+	if status.CertificateResource.Revision != request.Revision || status.CertificateResource.Digest != request.Digest() || status.CertificateResource.State == "failed" {
+		status, err = putV2(ctx, control, node, "/v2/certificate", request)
+		if err != nil {
+			return err
+		}
+	}
+	observed := status.CertificateResource
+	meta, err := validateCertificateAcknowledgement(domain, request, observed)
+	if err != nil {
+		return err
+	}
+	if err := acknowledgeCertificate(node, binding, request, meta, observed.LastError); err != nil {
+		return err
+	}
+	if binding.Mode != "http01" {
+		return ensureCertificateFirewall(ctx, db, node, binding, false)
+	}
+	return nil
+}
+
+func entryResourceNeeds(db *gorm.DB, entry SpecEntry) (certificate, domain bool, err error) {
+	if entry.TLSProfileID > 0 {
+		if err := applyTLSProfile(db, &entry); err != nil {
+			return false, false, err
+		}
+	}
+	for _, source := range entry.Sources {
+		if source.Kind == "node_certificate" {
+			certificate = true
+		}
+		if source.Kind == "node_parameter" && source.Name == "primary_domain" {
+			domain = true
+		}
+	}
+	return certificate, domain, nil
 }

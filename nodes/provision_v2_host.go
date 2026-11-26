@@ -141,28 +141,8 @@ func executeLiveProvision(ctx context.Context, job *model.NodeJob, plan *livePro
 	}
 	plan.Target.ControlPort = inspection.ControlPort
 	plan.Target.Architecture = host.architecture
-	if plan.Target.PrivateKey == "" {
-		private, _, err := newSSHKey()
-		if err != nil {
-			return err
-		}
-		plan.Target.PrivateKey, err = sealSecret(private)
-		if err != nil {
-			return err
-		}
-	}
-	candidate := node
-	candidate.ControlCA, candidate.ControlCertificate, candidate.ControlKey = plan.Control.CA, plan.Control.Certificate, plan.Control.Key
-	if !liveControlValid(candidate, plan.Target) {
-		if err = newControlIdentity(&candidate, &plan.Target); err != nil {
-			return err
-		}
-		plan.Control = ControlTLS{candidate.ControlCA, candidate.ControlCertificate, candidate.ControlKey}
-	}
-	if !plan.Previous.Ready {
-		if err := db.Model(&model.NodeInstallation{}).Where("node_id = ? AND owner_id = ? AND ip = ? AND ssh_port = ? AND ssh_user = ? AND ready = false", job.NodeId, plan.Target.OwnerID, plan.Target.IP, plan.Target.SSHPort, plan.Target.SSHUser).Update("private_key", plan.Target.PrivateKey).Error; err != nil {
-			return err
-		}
+	if err := prepareLiveControlIdentity(db, job.NodeId, node, plan); err != nil {
+		return err
 	}
 	key, err := openSecret(plan.Target.PrivateKey)
 	if err != nil {
@@ -253,39 +233,11 @@ func verifyLiveProvision(ctx context.Context, job *model.NodeJob, plan *liveProv
 		// Import/restart may replace the pool while this durable job is waiting.
 		db := database.GetDB()
 		_ = ReconcileAccess(ctx, job.NodeId)
-		var domain model.NodeDomainBinding
-		domainErr := db.First(&domain, whereNodeID, job.NodeId).Error
-		if domainErr != nil && !errors.Is(domainErr, gorm.ErrRecordNotFound) {
-			return errors.New("installation_database_unavailable")
-		}
-		if domainErr == nil {
-			jobStage(job, "certificate", "running", "")
-			if resourceErr := ReconcileResources(ctx, job.NodeId); errors.Is(resourceErr, errV2Rejected) {
-				return errors.New("certificate_request_rejected")
-			}
-		}
-		structureErr := Reconcile(ctx, job.NodeId)
-		if errors.Is(structureErr, errListenerOccupied) || errors.Is(structureErr, errListenerReserved) || errors.Is(structureErr, errAutoPortsExhausted) || errors.Is(structureErr, errRealityHandshakeLoop) {
-			return structureErr
-		}
-		if errors.Is(structureErr, errV2Rejected) || (structureErr != nil && structureErr.Error() == "structural_revision_rejected") {
-			return errors.New("structural_revision_rejected")
+		if err := pollLiveProvision(ctx, db, job.NodeId, job); err != nil {
+			return err
 		}
 		if liveProvisionReady(job.NodeId) {
-			err := db.Transaction(func(tx *gorm.DB) error {
-				var current model.Node
-				if e := tx.First(&current, job.NodeId).Error; e != nil {
-					return e
-				}
-				if current.ManagementGeneration != plan.ExpectedGeneration {
-					return errors.New("management_target_changed")
-				}
-				if e := tx.Model(&model.NodeInstallation{}).Where(whereNodeID, job.NodeId).Update("ready", true).Error; e != nil {
-					return e
-				}
-				return tx.Where("node_id = ? AND host <> ?", job.NodeId, plan.Target.IP).Delete(&model.NodePortReservation{}).Error
-			})
-			return err
+			return markLiveProvisionReady(db, job.NodeId, plan)
 		}
 		var structureTask model.NodeTask
 		if db.First(&structureTask, "node_id = ? AND kind = ?", job.NodeId, "structure").Error == nil && structureTask.State == "rejected" {
@@ -416,18 +368,8 @@ func liveProvisionReady(id uint) bool {
 	if n.DesiredRevision == 0 || n.DesiredRevision != n.AppliedRevision || n.TemplateTargetVersion != n.AppliedTemplateVersion || access.DesiredRevision == 0 || access.DesiredRevision != access.AppliedRevision || access.LastError != "" || n.LastError != "" || (!n.AgentRunning && n.Enable) {
 		return false
 	}
-	var report struct {
-		Certificates []struct {
-			State string `json:"state"`
-		} `json:"certificates"`
-	}
-	if json.Unmarshal(n.TLSStatus, &report) != nil {
+	if !liveProvisionCertificatesReady(n.TLSStatus) {
 		return false
-	}
-	for _, c := range report.Certificates {
-		if c.State != "ready" && c.State != "not_required" {
-			return false
-		}
 	}
 	if !n.Enable {
 		return true
@@ -630,3 +572,85 @@ if not control:
 arch={'x86_64':'amd64','aarch64':'arm64'}.get(platform.machine(),'unsupported')
 print(json.dumps({'arch':arch,'control_port':control,'occupied':occupied}))
 `
+
+func prepareLiveControlIdentity(db *gorm.DB, nodeID uint, node model.Node, plan *liveProvisionPlan) error {
+	if plan.Target.PrivateKey == "" {
+		private, _, err := newSSHKey()
+		if err != nil {
+			return err
+		}
+		plan.Target.PrivateKey, err = sealSecret(private)
+		if err != nil {
+			return err
+		}
+	}
+	candidate := node
+	candidate.ControlCA, candidate.ControlCertificate, candidate.ControlKey = plan.Control.CA, plan.Control.Certificate, plan.Control.Key
+	if !liveControlValid(candidate, plan.Target) {
+		if err := newControlIdentity(&candidate, &plan.Target); err != nil {
+			return err
+		}
+		plan.Control = ControlTLS{candidate.ControlCA, candidate.ControlCertificate, candidate.ControlKey}
+	}
+	if !plan.Previous.Ready {
+		if err := db.Model(&model.NodeInstallation{}).Where("node_id = ? AND owner_id = ? AND ip = ? AND ssh_port = ? AND ssh_user = ? AND ready = false", nodeID, plan.Target.OwnerID, plan.Target.IP, plan.Target.SSHPort, plan.Target.SSHUser).Update("private_key", plan.Target.PrivateKey).Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func pollLiveProvision(ctx context.Context, db *gorm.DB, id uint, job *model.NodeJob) error {
+	var domain model.NodeDomainBinding
+	domainErr := db.First(&domain, whereNodeID, id).Error
+	if domainErr != nil && !errors.Is(domainErr, gorm.ErrRecordNotFound) {
+		return errors.New("installation_database_unavailable")
+	}
+	if domainErr == nil {
+		jobStage(job, "certificate", "running", "")
+		if resourceErr := ReconcileResources(ctx, id); errors.Is(resourceErr, errV2Rejected) {
+			return errors.New("certificate_request_rejected")
+		}
+	}
+	structureErr := Reconcile(ctx, id)
+	if errors.Is(structureErr, errListenerOccupied) || errors.Is(structureErr, errListenerReserved) || errors.Is(structureErr, errAutoPortsExhausted) || errors.Is(structureErr, errRealityHandshakeLoop) {
+		return structureErr
+	}
+	if errors.Is(structureErr, errV2Rejected) || (structureErr != nil && structureErr.Error() == "structural_revision_rejected") {
+		return errors.New("structural_revision_rejected")
+	}
+	return nil
+}
+
+func markLiveProvisionReady(db *gorm.DB, id uint, plan *liveProvisionPlan) error {
+	return db.Transaction(func(tx *gorm.DB) error {
+		var current model.Node
+		if e := tx.First(&current, id).Error; e != nil {
+			return e
+		}
+		if current.ManagementGeneration != plan.ExpectedGeneration {
+			return errors.New("management_target_changed")
+		}
+		if e := tx.Model(&model.NodeInstallation{}).Where(whereNodeID, id).Update("ready", true).Error; e != nil {
+			return e
+		}
+		return tx.Where("node_id = ? AND host <> ?", id, plan.Target.IP).Delete(&model.NodePortReservation{}).Error
+	})
+}
+
+func liveProvisionCertificatesReady(raw json.RawMessage) bool {
+	var report struct {
+		Certificates []struct {
+			State string `json:"state"`
+		} `json:"certificates"`
+	}
+	if json.Unmarshal(raw, &report) != nil {
+		return false
+	}
+	for _, c := range report.Certificates {
+		if c.State != "ready" && c.State != "not_required" {
+			return false
+		}
+	}
+	return true
+}

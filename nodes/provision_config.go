@@ -32,22 +32,8 @@ func configureManagedNode(tx *gorm.DB, node *model.Node, i *model.NodeInstallati
 	if config == nil {
 		config = map[string]interface{}{}
 	}
-	needsTLS := false
-	for _, p := range r.Protocols {
-		if p != "vless" {
-			needsTLS = true
-		}
-	}
-	if needsTLS {
-		s, err := loadAutomation()
-		if err != nil {
-			return err
-		}
-		token, err := openSecret(s.DNSToken)
-		if err != nil {
-			return err
-		}
-		config["certificate_providers"] = []interface{}{map[string]interface{}{"type": "acme", "tag": "sui-managed-acme", "domain": []string{i.Domain}, "email": s.Email, "dns01_challenge": map[string]interface{}{"provider": "cloudflare", "api_token": token, "resolvers": []string{"1.1.1.1:53", "8.8.8.8:53"}, "propagation_timeout": "3m"}}}
+	if err := configureManagedCertificate(config, i.Domain, r.Protocols); err != nil {
+		return err
 	}
 	node.Config, _ = json.Marshal(config)
 	if err := tx.Model(node).Select("name", "address", "link_address", "template_id", "enable", "config", "control_ca", "control_certificate", "control_key").Updates(node).Error; err != nil {
@@ -60,45 +46,7 @@ func configureManagedNode(tx *gorm.DB, node *model.Node, i *model.NodeInstallati
 	selected := map[string]bool{}
 	for _, kind := range r.Protocols {
 		selected[kind] = true
-		var inbound model.NodeInbound
-		found := false
-		for _, old := range existing {
-			if old.Type == kind {
-				inbound = old
-				found = true
-				break
-			}
-		}
-		options := map[string]interface{}{}
-		if found {
-			_ = json.Unmarshal(inbound.Options, &options)
-		}
-		if !found {
-			inbound = model.NodeInbound{NodeId: node.Id, Type: kind, Tag: strings.ToUpper(kind), Enable: true}
-			options = map[string]interface{}{"listen": "::"}
-		}
-		options["listen_port"] = ports[kind]
-		inbound.Enable = true
-		if kind == "vless" {
-			if _, ok := options["tls"]; !ok {
-				key, err := ecdh.X25519().GenerateKey(rand.Reader)
-				if err != nil {
-					return err
-				}
-				short := make([]byte, 8)
-				if _, err = rand.Read(short); err != nil {
-					return err
-				}
-				options["tls"] = map[string]interface{}{"enabled": true, "server_name": "www.cloudflare.com", "reality": map[string]interface{}{"enabled": true, "handshake": map[string]interface{}{"server": "www.cloudflare.com", "server_port": 443}, "private_key": base64.RawURLEncoding.EncodeToString(key.Bytes()), "short_id": []string{hex.EncodeToString(short)}}}
-			}
-		} else {
-			options["tls"] = map[string]interface{}{"enabled": true, "server_name": i.Domain, "certificate_provider": "sui-managed-acme", "alpn": []string{"h3"}}
-			if kind == "tuic" {
-				options["congestion_control"] = "cubic"
-			}
-		}
-		inbound.Options, _ = json.Marshal(options)
-		if err := tx.Save(&inbound).Error; err != nil {
+		if err := configureManagedInbound(tx, node.Id, i.Domain, kind, ports[kind], existing); err != nil {
 			return err
 		}
 	}
@@ -184,4 +132,77 @@ func renameOnly(request ProvisionRequest, previous model.NodeInstallation) bool 
 		}
 	}
 	return true
+}
+
+func configureManagedCertificate(config map[string]interface{}, domain string, protocols []string) error {
+	needsTLS := false
+	for _, p := range protocols {
+		if p != "vless" {
+			needsTLS = true
+		}
+	}
+	if needsTLS {
+		s, err := loadAutomation()
+		if err != nil {
+			return err
+		}
+		token, err := openSecret(s.DNSToken)
+		if err != nil {
+			return err
+		}
+		config["certificate_providers"] = []interface{}{map[string]interface{}{"type": "acme", "tag": "sui-managed-acme", "domain": []string{domain}, "email": s.Email, "dns01_challenge": map[string]interface{}{"provider": "cloudflare", "api_token": token, "resolvers": []string{"1.1.1.1:53", "8.8.8.8:53"}, "propagation_timeout": "3m"}}}
+	}
+	return nil
+}
+
+func configureManagedInbound(tx *gorm.DB, nodeID uint, domain, kind string, port int, existing []model.NodeInbound) error {
+	var inbound model.NodeInbound
+	found := false
+	for _, old := range existing {
+		if old.Type == kind {
+			inbound = old
+			found = true
+			break
+		}
+	}
+	options := map[string]interface{}{}
+	if found {
+		_ = json.Unmarshal(inbound.Options, &options)
+	}
+	if !found {
+		inbound = model.NodeInbound{NodeId: nodeID, Type: kind, Tag: strings.ToUpper(kind), Enable: true}
+		options = map[string]interface{}{"listen": "::"}
+	}
+	options["listen_port"] = port
+	inbound.Enable = true
+	if err := configureManagedInboundTLS(options, domain, kind); err != nil {
+		return err
+	}
+	inbound.Options, _ = json.Marshal(options)
+	if err := tx.Save(&inbound).Error; err != nil {
+		return err
+	}
+	return nil
+}
+
+func configureManagedInboundTLS(options map[string]interface{}, domain, kind string) error {
+	if kind == "vless" {
+		if _, ok := options["tls"]; !ok {
+			key, err := ecdh.X25519().GenerateKey(rand.Reader)
+			if err != nil {
+				return err
+			}
+			short := make([]byte, 8)
+			if _, err = rand.Read(short); err != nil {
+				return err
+			}
+			options["tls"] = map[string]interface{}{"enabled": true, "server_name": "www.cloudflare.com", "reality": map[string]interface{}{"enabled": true, "handshake": map[string]interface{}{"server": "www.cloudflare.com", "server_port": 443}, "private_key": base64.RawURLEncoding.EncodeToString(key.Bytes()), "short_id": []string{hex.EncodeToString(short)}}}
+		}
+	} else {
+		options["tls"] = map[string]interface{}{"enabled": true, "server_name": domain, "certificate_provider": "sui-managed-acme", "alpn": []string{"h3"}}
+		if kind == "tuic" {
+			options["congestion_control"] = "cubic"
+		}
+	}
+	return nil
 }

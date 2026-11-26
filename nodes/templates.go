@@ -184,27 +184,8 @@ func applyTemplate(tx *gorm.DB, node *model.Node, targetID uint) error {
 		wanted := Blueprint{Tag: slot.Tag, Type: slot.Type, Enable: slot.Enable, Options: slot.Options, ClientTLS: slot.ClientTLS}
 		baseJSON, _ := json.Marshal(wanted)
 		value := model.NodeInbound{NodeId: node.Id, Tag: slot.Tag, Type: slot.Type, Enable: slot.Enable, Options: slot.Options, ClientTLS: slot.ClientTLS}
-		for _, previous := range existing {
-			if previous.SourceTemplateId != targetID || previous.TemplateKey != slot.Key {
-				continue
-			}
-			if previous.Type != slot.Type {
-				return errors.New("template protocol changed; create a new inbound")
-			}
-			var old interface{}
-			_ = json.Unmarshal(previous.TemplateBase, &old)
-			currentJSON, _ := json.Marshal(Blueprint{Tag: previous.Tag, Type: previous.Type, Enable: previous.Enable, Options: previous.Options, ClientTLS: previous.ClientTLS})
-			var current, next interface{}
-			_ = json.Unmarshal(currentJSON, &current)
-			_ = json.Unmarshal(baseJSON, &next)
-			merged, _ := json.Marshal(mergeTemplate(old, current, next))
-			var result Blueprint
-			if err := json.Unmarshal(merged, &result); err != nil {
-				return err
-			}
-			value = previous
-			value.Tag, value.Type, value.Enable, value.Options, value.ClientTLS = result.Tag, result.Type, result.Enable, result.Options, result.ClientTLS
-			break
+		if err := mergeLegacySlot(existing, targetID, slot, baseJSON, &value); err != nil {
+			return err
 		}
 		if err := validateInbound(&value, false); err != nil {
 			return err
@@ -289,4 +270,30 @@ func mergeTemplateField(old, current, next map[string]interface{}, key string) (
 		return b, true
 	}
 	return mergeTemplate(a, b, c), true
+}
+
+func mergeLegacySlot(existing []model.NodeInbound, targetID uint, slot Blueprint, baseJSON []byte, value *model.NodeInbound) error {
+	for _, previous := range existing {
+		if previous.SourceTemplateId != targetID || previous.TemplateKey != slot.Key {
+			continue
+		}
+		if previous.Type != slot.Type {
+			return errors.New("template protocol changed; create a new inbound")
+		}
+		var old interface{}
+		_ = json.Unmarshal(previous.TemplateBase, &old)
+		currentJSON, _ := json.Marshal(Blueprint{Tag: previous.Tag, Type: previous.Type, Enable: previous.Enable, Options: previous.Options, ClientTLS: previous.ClientTLS})
+		var current, next interface{}
+		_ = json.Unmarshal(currentJSON, &current)
+		_ = json.Unmarshal(baseJSON, &next)
+		merged, _ := json.Marshal(mergeTemplate(old, current, next))
+		var result Blueprint
+		if err := json.Unmarshal(merged, &result); err != nil {
+			return err
+		}
+		*value = previous
+		value.Tag, value.Type, value.Enable, value.Options, value.ClientTLS = result.Tag, result.Type, result.Enable, result.Options, result.ClientTLS
+		break
+	}
+	return nil
 }

@@ -5,6 +5,7 @@ import (
 	_ "embed"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -180,21 +181,9 @@ func upgradeManagedAgent(parent context.Context, id uint, bundle agentBundle) {
 	}
 	activate, stop := context.WithTimeout(ctx, 55*time.Second)
 	defer stop()
-	if _, err := call(activate, "activate", digest); err == nil {
-		for activate.Err() == nil {
-			after, err := getStatusV2(activate, control, node)
-			if err == nil && matchesAgentUpgrade(before, after, bundle.SingBox, digest) {
-				if _, err := call(activate, "confirm", digest); err == nil {
-					confirm(after)
-					return
-				}
-				break
-			}
-			select {
-			case <-activate.Done():
-			case <-time.After(time.Second):
-			}
-		}
+	if after, confirmed := activateAgentUpgrade(activate, control, node, bundle.SingBox, digest, before, call); confirmed {
+		confirm(after)
+		return
 	}
 	// A separate remote deadline restores the working binary even if the
 	// controller loses SSH or is restarted before sending this request.
@@ -214,4 +203,23 @@ func matchesAgentUpgrade(before, after nodeagent.StatusV2, version, digest strin
 		before.SpecDigest == after.SpecDigest && after.AccessRevision >= before.AccessRevision &&
 		after.AccessRevision == after.AppliedAccessRevision && after.AccessDigest == after.AppliedAccessDigest &&
 		(after.AccessRevision > before.AccessRevision || after.AccessDigest == before.AccessDigest)
+}
+
+func activateAgentUpgrade(ctx context.Context, control *http.Client, node model.Node, version, digest string, before nodeagent.StatusV2, call func(context.Context, string, string) ([]byte, error)) (nodeagent.StatusV2, bool) {
+	if _, err := call(ctx, "activate", digest); err == nil {
+		for ctx.Err() == nil {
+			after, err := getStatusV2(ctx, control, node)
+			if err == nil && matchesAgentUpgrade(before, after, version, digest) {
+				if _, err := call(ctx, "confirm", digest); err == nil {
+					return after, true
+				}
+				break
+			}
+			select {
+			case <-ctx.Done():
+			case <-time.After(time.Second):
+			}
+		}
+	}
+	return nodeagent.StatusV2{}, false
 }

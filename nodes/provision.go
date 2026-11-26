@@ -72,18 +72,7 @@ func supportedProtocols(values []string, extended bool) ([]string, error) {
 	return result, nil
 }
 func normalizeProvision(r *ProvisionRequest) error {
-	r.Name = strings.TrimSpace(r.Name)
-	r.IP = strings.TrimSpace(r.IP)
-	r.SSHUser = strings.TrimSpace(r.SSHUser)
-	if r.SSHPort == 0 {
-		r.SSHPort = 22
-	}
-	if r.SSHUser == "" {
-		r.SSHUser = "root"
-	}
-	if r.Action == "" {
-		r.Action = "install"
-	}
+	provisionDefaults(r)
 	ip := net.ParseIP(r.IP)
 	if r.Name == "" || len([]rune(r.Name)) > 80 {
 		return errors.New("node_name_required")
@@ -116,68 +105,14 @@ func StartProvision(r ProvisionRequest, actor string) (model.NodeJob, error) {
 		return startLiveProvision(r, actor)
 	}
 	var job model.NodeJob
-	if r.NodeId != 0 {
-		var node model.Node
-		if err := database.GetDB().First(&node, r.NodeId).Error; err != nil {
-			return job, err
-		}
-		if node.TemplateTargetVersion > 0 {
-			return job, errors.New("live_template_installer_not_ready")
-		}
-	}
-	if r.TemplateId != 0 {
-		var template model.NodeTemplate
-		if err := database.GetDB().First(&template, r.TemplateId).Error; err != nil {
-			return job, err
-		}
-		if template.SchemaVersion == 1 {
-			return job, errors.New("versioned_template_runtime_not_ready")
-		}
-	}
-	if r.TemplateId != 0 && len(r.Protocols) == 0 {
-		var t model.NodeTemplate
-		if err := database.GetDB().First(&t, r.TemplateId).Error; err != nil {
-			return job, err
-		}
-		_ = json.Unmarshal(t.Protocols, &r.Protocols)
-	}
-	if err := normalizeProvision(&r); err != nil {
+	if err := prepareLegacyProvisionRequest(&r); err != nil {
 		return job, err
-	}
-	needsTLS := false
-	for _, p := range r.Protocols {
-		if p != "vless" {
-			needsTLS = true
-		}
-	}
-	if needsTLS {
-		settings, _ := loadAutomation()
-		if settings.DomainSuffix == "" || settings.DNSToken == "" {
-			return job, errors.New("dns_profile_required")
-		}
-	}
-	if r.NodeId == 0 && r.Password == "" {
-		return job, errors.New("ssh_password_required")
 	}
 	var install model.NodeInstallation
 	err := database.GetDB().Transaction(func(tx *gorm.DB) error {
 		var node model.Node
-		if r.NodeId != 0 {
-			if err := tx.First(&node, r.NodeId).Error; err != nil {
-				return err
-			}
-			if node.TemplateTargetVersion > 0 {
-				return errors.New("live_template_installer_not_ready")
-			}
-			if err := tx.First(&install, whereNodeID, node.Id).Error; err != nil {
-				return errors.New("manual_node_requires_advanced_settings")
-			}
-			if jobRunning(node.Id) {
-				return errors.New("node_job_running")
-			}
-			if len(install.PreviousTarget) > 0 && install.IP != r.IP {
-				return errors.New("old_server_retirement_pending")
-			}
+		if err := loadLegacyProvisionTarget(tx, r, &node, &install); err != nil {
+			return err
 		}
 		var duplicates int64
 		if err := tx.Model(&model.Node{}).Where("name = ? AND id <> ?", r.Name, r.NodeId).Count(&duplicates).Error; err != nil {
@@ -186,16 +121,8 @@ func StartProvision(r ProvisionRequest, actor string) (model.NodeJob, error) {
 		if duplicates > 0 {
 			return errors.New("node_name_exists")
 		}
-		if r.NodeId == 0 {
-			node = model.Node{Name: r.Name, LinkAddress: r.IP, Address: "https://127.0.0.1:16500", Enable: false, Config: json.RawMessage(`{}`)}
-			if err := tx.Create(&node).Error; err != nil {
-				return err
-			}
-			install = model.NodeInstallation{NodeId: node.Id, IP: r.IP, SSHPort: r.SSHPort, SSHUser: r.SSHUser}
-			install.Protocols, _ = json.Marshal(r.Protocols)
-			if err := tx.Create(&install).Error; err != nil {
-				return err
-			}
+		if err := createLegacyProvisionTarget(tx, r, &node, &install); err != nil {
+			return err
 		}
 		var active int64
 		if err := tx.Model(&model.NodeJob{}).Where("node_id = ? AND state IN ?", node.Id, []string{"queued", "running"}).Count(&active).Error; err != nil {
@@ -276,22 +203,7 @@ func runProvision(job model.NodeJob, r ProvisionRequest, install model.NodeInsta
 	}
 	defer client.Close()
 	if !hadPassword && renameOnly(r, previous) {
-		jobStage(&job, "configure", "running", "")
-		if err = database.GetDB().Model(&model.Node{}).Where("id = ?", job.NodeId).Updates(map[string]interface{}{"name": r.Name, "template_id": r.TemplateId, "desired_fingerprint": "", "rejected_revision": 0}).Error; err != nil {
-			fail("configuration_failed")
-			return
-		}
-		if err = Reconcile(ctx, job.NodeId); err != nil {
-			fail("control_unreachable")
-			return
-		}
-		var current model.Node
-		database.GetDB().First(&current, job.NodeId)
-		if !managedCertificatesReady(current, r.Protocols) {
-			fail("certificate_unavailable")
-			return
-		}
-		jobStage(&job, "ready", "succeeded", "")
+		finishLegacyRename(ctx, &job, r)
 		return
 	}
 	jobStage(&job, "preflight", "running", "")
@@ -448,34 +360,7 @@ func runProvision(job model.NodeJob, r ProvisionRequest, install model.NodeInsta
 		fail("configuration_failed")
 		return
 	}
-	jobStage(&job, "verify", "running", "")
-	for ctx.Err() == nil {
-		if err = Reconcile(ctx, job.NodeId); err == nil {
-			var current model.Node
-			database.GetDB().First(&current, job.NodeId)
-			if managedCertificatesReady(current, r.Protocols) {
-				if err := retirePreviousHost(ctx, &install); err != nil {
-					job.Warning = "old_server_retirement_pending"
-				}
-				install.Ready = true
-				database.GetDB().Save(&install)
-				jobStage(&job, "ready", "succeeded", "")
-				return
-			}
-			if job.Stage != "certificate" {
-				jobStage(&job, "certificate", "running", "")
-			}
-		}
-		select {
-		case <-ctx.Done():
-		case <-time.After(2 * time.Second):
-		}
-	}
-	if ctx.Err() == context.Canceled {
-		jobStage(&job, job.Stage, "interrupted", "panel_restarted")
-	} else {
-		fail("install_timeout")
-	}
+	verifyLegacyProvision(ctx, &job, r, &install)
 }
 
 func initializeProvisionJobs(ctx context.Context) {
@@ -484,4 +369,161 @@ func initializeProvisionJobs(ctx context.Context) {
 	provisionLifecycle.Unlock()
 	database.GetDB().Model(&model.NodeJob{}).Where("state IN ?", []string{"running", "queued"}).Updates(map[string]interface{}{"state": "interrupted", "error": "panel_restarted", "updated": time.Now().Unix()})
 	resumeLiveProvisionJobs(ctx)
+}
+
+func provisionDefaults(r *ProvisionRequest) {
+	r.Name = strings.TrimSpace(r.Name)
+	r.IP = strings.TrimSpace(r.IP)
+	r.SSHUser = strings.TrimSpace(r.SSHUser)
+	if r.SSHPort == 0 {
+		r.SSHPort = 22
+	}
+	if r.SSHUser == "" {
+		r.SSHUser = "root"
+	}
+	if r.Action == "" {
+		r.Action = "install"
+	}
+}
+
+func prepareLegacyProvisionRequest(r *ProvisionRequest) error {
+	if err := prepareLegacyTemplateSelection(r); err != nil {
+		return err
+	}
+	if err := normalizeProvision(r); err != nil {
+		return err
+	}
+	needsTLS := false
+	for _, p := range r.Protocols {
+		if p != "vless" {
+			needsTLS = true
+		}
+	}
+	if needsTLS {
+		settings, _ := loadAutomation()
+		if settings.DomainSuffix == "" || settings.DNSToken == "" {
+			return errors.New("dns_profile_required")
+		}
+	}
+	if r.NodeId == 0 && r.Password == "" {
+		return errors.New("ssh_password_required")
+	}
+	return nil
+}
+
+func loadLegacyProvisionTarget(tx *gorm.DB, r ProvisionRequest, node *model.Node, install *model.NodeInstallation) error {
+	if r.NodeId != 0 {
+		if err := tx.First(node, r.NodeId).Error; err != nil {
+			return err
+		}
+		if node.TemplateTargetVersion > 0 {
+			return errors.New("live_template_installer_not_ready")
+		}
+		if err := tx.First(install, whereNodeID, node.Id).Error; err != nil {
+			return errors.New("manual_node_requires_advanced_settings")
+		}
+		if jobRunning(node.Id) {
+			return errors.New("node_job_running")
+		}
+		if len(install.PreviousTarget) > 0 && install.IP != r.IP {
+			return errors.New("old_server_retirement_pending")
+		}
+	}
+	return nil
+}
+
+func createLegacyProvisionTarget(tx *gorm.DB, r ProvisionRequest, node *model.Node, install *model.NodeInstallation) error {
+	if r.NodeId == 0 {
+		*node = model.Node{Name: r.Name, LinkAddress: r.IP, Address: "https://127.0.0.1:16500", Enable: false, Config: json.RawMessage(`{}`)}
+		if err := tx.Create(node).Error; err != nil {
+			return err
+		}
+		*install = model.NodeInstallation{NodeId: node.Id, IP: r.IP, SSHPort: r.SSHPort, SSHUser: r.SSHUser}
+		install.Protocols, _ = json.Marshal(r.Protocols)
+		if err := tx.Create(install).Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func finishLegacyRename(ctx context.Context, job *model.NodeJob, r ProvisionRequest) {
+	jobStage(job, "configure", "running", "")
+	if err := database.GetDB().Model(&model.Node{}).Where("id = ?", job.NodeId).Updates(map[string]interface{}{"name": r.Name, "template_id": r.TemplateId, "desired_fingerprint": "", "rejected_revision": 0}).Error; err != nil {
+		failLegacyJob(job, "configuration_failed")
+		return
+	}
+	if err := Reconcile(ctx, job.NodeId); err != nil {
+		failLegacyJob(job, "control_unreachable")
+		return
+	}
+	var current model.Node
+	database.GetDB().First(&current, job.NodeId)
+	if !managedCertificatesReady(current, r.Protocols) {
+		failLegacyJob(job, "certificate_unavailable")
+		return
+	}
+	jobStage(job, "ready", "succeeded", "")
+}
+
+func verifyLegacyProvision(ctx context.Context, job *model.NodeJob, r ProvisionRequest, install *model.NodeInstallation) {
+	jobStage(job, "verify", "running", "")
+	for ctx.Err() == nil {
+		if err := Reconcile(ctx, job.NodeId); err == nil {
+			var current model.Node
+			database.GetDB().First(&current, job.NodeId)
+			if managedCertificatesReady(current, r.Protocols) {
+				if err := retirePreviousHost(ctx, install); err != nil {
+					job.Warning = "old_server_retirement_pending"
+				}
+				install.Ready = true
+				database.GetDB().Save(install)
+				jobStage(job, "ready", "succeeded", "")
+				return
+			}
+			if job.Stage != "certificate" {
+				jobStage(job, "certificate", "running", "")
+			}
+		}
+		select {
+		case <-ctx.Done():
+		case <-time.After(2 * time.Second):
+		}
+	}
+	if ctx.Err() == context.Canceled {
+		jobStage(job, job.Stage, "interrupted", "panel_restarted")
+	} else {
+		failLegacyJob(job, "install_timeout")
+	}
+}
+
+func failLegacyJob(job *model.NodeJob, code string) { jobStage(job, job.Stage, "failed", code) }
+
+func prepareLegacyTemplateSelection(r *ProvisionRequest) error {
+	if r.NodeId != 0 {
+		var node model.Node
+		if err := database.GetDB().First(&node, r.NodeId).Error; err != nil {
+			return err
+		}
+		if node.TemplateTargetVersion > 0 {
+			return errors.New("live_template_installer_not_ready")
+		}
+	}
+	if r.TemplateId != 0 {
+		var template model.NodeTemplate
+		if err := database.GetDB().First(&template, r.TemplateId).Error; err != nil {
+			return err
+		}
+		if template.SchemaVersion == 1 {
+			return errors.New("versioned_template_runtime_not_ready")
+		}
+	}
+	if r.TemplateId != 0 && len(r.Protocols) == 0 {
+		var t model.NodeTemplate
+		if err := database.GetDB().First(&t, r.TemplateId).Error; err != nil {
+			return err
+		}
+		_ = json.Unmarshal(t.Protocols, &r.Protocols)
+	}
+	return nil
 }
