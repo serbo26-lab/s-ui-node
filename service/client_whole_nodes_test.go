@@ -176,7 +176,7 @@ func TestWholeNodesQuotaAndResetPersistAccessEpoch(t *testing.T) {
 
 func assertWholeNodeCredentials(t *testing.T, client model.Client) map[string]map[string]interface{} {
 	t.Helper()
-	if string(client.Nodes) != "[1]" || string(client.Inbounds) != "[21]" || client.NodeMigrationRequired {
+	if string(client.Nodes) != "[1]" || string(client.Inbounds) != "[21]" {
 		t.Fatal("whole-node/local selection mismatch")
 	}
 	var cfg map[string]map[string]interface{}

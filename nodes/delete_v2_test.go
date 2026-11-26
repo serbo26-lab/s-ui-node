@@ -13,7 +13,7 @@ import (
 )
 
 func TestV2NodeDeletionRemovesGrantsAndControlState(t *testing.T) {
-	db, node, _ := fixture(t)
+	db, node, client := fixture(t)
 	addFixtureAssignment(t, db, node.Id)
 	node.Enable = false
 	node.DesiredRevision, node.AppliedRevision = 3, 3

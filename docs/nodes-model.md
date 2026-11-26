@@ -37,11 +37,11 @@ connection. The following endpoints are agent endpoints, not public panel API:
   with its latest durable access, including during structural recovery.
 
 Revisions are independent and monotonic inside a pinned epoch. A retry with the
-same revision and digest is idempotent; stale revisions, different payloads at
-the same revision and an unexpected epoch are rejected. An agent with access
-newer than a restored panel database is not overwritten automatically. These
-conflicts require explicit recovery; deleting the epoch to force acceptance is
-not a recovery procedure.
+same revision and digest is idempotent. The agent rejects stale revisions,
+different payloads at the same revision and unexpected epochs. After an explicit
+database import, the panel compares saved access and certificate intent with
+authenticated agent state and issues a new revision when needed. See
+[backup and restore](nodes-maintenance.md#backup-and-restore).
 
 Access updates can interrupt a blocked structural startup. A failed hot update
 rebuilds last-good structure with current permissions. If that cannot start,

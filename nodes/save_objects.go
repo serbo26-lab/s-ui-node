@@ -173,18 +173,10 @@ func retryNodeObject(tx *gorm.DB, value model.Node) error {
 	if err := tx.Model(&value).Updates(map[string]interface{}{"desired_fingerprint": "", "rejected_revision": 0, "last_error": ""}).Error; err != nil {
 		return err
 	}
-	if value.TemplateTargetVersion > 0 {
-		if err := database.QueueNodeTasks(tx, []uint{id}, "structure"); err != nil {
-			return err
-		}
+	if err := database.QueueNodeTasks(tx, []uint{id}, "structure"); err != nil {
+		return err
 	}
-	if value.AgentProtocol == 2 {
-		if err := database.QueueNodeTasks(tx, []uint{id}, "access"); err != nil {
-			return err
-		}
-	}
-
-	return nil
+	return database.QueueNodeTasks(tx, []uint{id}, "access")
 }
 
 func selectNodeObject(tx *gorm.DB, value model.Node, data json.RawMessage) error {
