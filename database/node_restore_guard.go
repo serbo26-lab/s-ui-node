@@ -14,6 +14,8 @@ import (
 
 var errNodeBackupStateStale = errors.New("node_backup_state_stale")
 
+const restoreNodeIDWhere = "node_id = ?"
+
 // A restore must not forget node intent already saved by this registration.
 // The agent still enforces its own monotonic checkpoint, including when the
 // destination is a new panel with no local history to compare.
@@ -74,14 +76,14 @@ func olderNodeCheckpoint(archived, desired, applied uint64) bool {
 
 func validateRestoredAccessCheckpoint(candidate *gorm.DB, nodeID uint) error {
 	var current, archived model.NodeAccessState
-	err := db.First(&current, "node_id = ?", nodeID).Error
+	err := db.First(&current, restoreNodeIDWhere, nodeID).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil
 	}
 	if err != nil {
 		return err
 	}
-	if err := candidate.First(&archived, "node_id = ?", nodeID).Error; err != nil {
+	if err := candidate.First(&archived, restoreNodeIDWhere, nodeID).Error; err != nil {
 		return errNodeBackupStateStale
 	}
 	if olderNodeCheckpoint(archived.DesiredRevision, current.DesiredRevision, current.AppliedRevision) {
@@ -95,14 +97,14 @@ func validateRestoredAccessCheckpoint(candidate *gorm.DB, nodeID uint) error {
 
 func validateRestoredCertificateCheckpoint(candidate *gorm.DB, nodeID uint) error {
 	var current, archived model.NodeCertificateBinding
-	err := db.First(&current, "node_id = ?", nodeID).Error
+	err := db.First(&current, restoreNodeIDWhere, nodeID).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil
 	}
 	if err != nil {
 		return err
 	}
-	if err := candidate.First(&archived, "node_id = ?", nodeID).Error; err != nil {
+	if err := candidate.First(&archived, restoreNodeIDWhere, nodeID).Error; err != nil {
 		return errNodeBackupStateStale
 	}
 	if olderNodeCheckpoint(archived.DesiredRevision, current.DesiredRevision, current.AppliedRevision) {
