@@ -157,51 +157,7 @@ func prepareCertificateRequest(node model.Node, domain model.NodeDomainBinding, 
 	body, _ := json.Marshal(request)
 	fingerprint := versionDigest(body)
 	err := database.GetDB().Transaction(func(tx *gorm.DB) error {
-		var current model.NodeCertificateBinding
-		if err := tx.First(&current, whereNodeID, node.Id).Error; err != nil {
-			return err
-		}
-		var target model.NodeDomainBinding
-		if err := tx.First(&target, whereNodeID, node.Id).Error; err != nil {
-			return err
-		}
-		if current.Generation != binding.Generation || target.Generation != domain.Generation {
-			return errors.New("certificate_target_changed")
-		}
-		if remote != nil && remote.Revision > current.DesiredRevision {
-			return errors.New("certificate_state_rollback_detected")
-		}
-		if current.DesiredRevision > 0 && remote != nil && remote.Revision == current.DesiredRevision {
-			plain, err := openSecret(current.DesiredRequest)
-			if err != nil {
-				return errors.New("certificate_state_key_unavailable")
-			}
-			var planned nodeagent.CertificateRequest
-			if json.Unmarshal([]byte(plain), &planned) != nil || planned.Digest() != remote.Digest {
-				return errors.New("certificate_state_conflict_detected")
-			}
-		}
-		if current.DesiredRevision == 0 || current.DesiredFingerprint != fingerprint {
-			current.DesiredRevision++
-			request.Revision = current.DesiredRevision
-			encoded, _ := json.Marshal(request)
-			sealed, err := sealSecret(string(encoded))
-			if err != nil {
-				return err
-			}
-			if err := tx.Model(&current).Updates(map[string]interface{}{"desired_revision": request.Revision, "desired_fingerprint": fingerprint, "desired_request": sealed}).Error; err != nil {
-				return err
-			}
-		} else {
-			plain, err := openSecret(current.DesiredRequest)
-			if err != nil {
-				return errors.New("certificate_state_key_unavailable")
-			}
-			if json.Unmarshal([]byte(plain), &request) != nil {
-				return errors.New("certificate_request_corrupt")
-			}
-		}
-		return nil
+		return prepareCertificateTransaction(tx, node, domain, binding, remote, fingerprint, &request)
 	})
 	return request, err
 }
@@ -459,4 +415,59 @@ func safeResourceError(err error) string {
 		return "node_resource_failed"
 	}
 	return value
+}
+
+func validateRemoteCertificateRevision(current model.NodeCertificateBinding, remote *nodeagent.CertificateResourceStatus) error {
+	if remote != nil && remote.Revision > current.DesiredRevision {
+		return errors.New("certificate_state_rollback_detected")
+	}
+	if current.DesiredRevision > 0 && remote != nil && remote.Revision == current.DesiredRevision {
+		plain, err := openSecret(current.DesiredRequest)
+		if err != nil {
+			return errors.New("certificate_state_key_unavailable")
+		}
+		var planned nodeagent.CertificateRequest
+		if json.Unmarshal([]byte(plain), &planned) != nil || planned.Digest() != remote.Digest {
+			return errors.New("certificate_state_conflict_detected")
+		}
+	}
+	return nil
+}
+
+func prepareCertificateTransaction(tx *gorm.DB, node model.Node, domain model.NodeDomainBinding, binding model.NodeCertificateBinding, remote *nodeagent.CertificateResourceStatus, fingerprint string, request *nodeagent.CertificateRequest) error {
+	var current model.NodeCertificateBinding
+	if err := tx.First(&current, whereNodeID, node.Id).Error; err != nil {
+		return err
+	}
+	var target model.NodeDomainBinding
+	if err := tx.First(&target, whereNodeID, node.Id).Error; err != nil {
+		return err
+	}
+	if current.Generation != binding.Generation || target.Generation != domain.Generation {
+		return errors.New("certificate_target_changed")
+	}
+	if err := validateRemoteCertificateRevision(current, remote); err != nil {
+		return err
+	}
+	if current.DesiredRevision == 0 || current.DesiredFingerprint != fingerprint {
+		current.DesiredRevision++
+		request.Revision = current.DesiredRevision
+		encoded, _ := json.Marshal(request)
+		sealed, err := sealSecret(string(encoded))
+		if err != nil {
+			return err
+		}
+		if err := tx.Model(&current).Updates(map[string]interface{}{"desired_revision": request.Revision, "desired_fingerprint": fingerprint, "desired_request": sealed}).Error; err != nil {
+			return err
+		}
+	} else {
+		plain, err := openSecret(current.DesiredRequest)
+		if err != nil {
+			return errors.New("certificate_state_key_unavailable")
+		}
+		if json.Unmarshal([]byte(plain), request) != nil {
+			return errors.New("certificate_request_corrupt")
+		}
+	}
+	return nil
 }

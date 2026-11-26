@@ -113,23 +113,10 @@ func cfResourceAuth(ctx context.Context, profile model.NodeDNSProfile, secret, m
 		return errors.New("dns_api_unreachable")
 	}
 	defer response.Body.Close()
-	var result struct {
-		Success bool            `json:"success"`
-		Result  json.RawMessage `json:"result"`
-		Errors  []struct {
-			Code int `json:"code"`
-		} `json:"errors"`
-	}
+	var result cloudflareResourceResult
 	decodeErr := json.NewDecoder(io.LimitReader(response.Body, 2<<20)).Decode(&result)
-	if response.StatusCode == http.StatusNotFound || response.StatusCode == http.StatusBadRequest {
-		parts := strings.Split(path, "/")
-		if (method == http.MethodGet || method == http.MethodDelete) && len(parts) == 5 && parts[1] == "zones" && parts[3] == "dns_records" && validZoneId(parts[2]) && validZoneId(parts[4]) {
-			// Cloudflare also reports a missing record as HTTP 400 with error 81044.
-			if decodeErr == nil && len(result.Errors) == 1 && result.Errors[0].Code == 81044 ||
-				response.StatusCode == http.StatusNotFound && errors.Is(decodeErr, io.EOF) {
-				return errDNSRecordMissing
-			}
-		}
+	if missingDNSRecordResponse(method, path, response.StatusCode, decodeErr, result) {
+		return errDNSRecordMissing
 	}
 	if decodeErr != nil || !result.Success || response.StatusCode/100 != 2 {
 		return errors.New("dns_api_rejected")
@@ -166,30 +153,8 @@ func ensureResourceRecord(ctx context.Context, nodeID uint, profile model.NodeDN
 	if err := verifyResourceZone(ctx, profile, zone, strings.TrimPrefix(name, "_acme-challenge.")); err != nil {
 		return record, err
 	}
-	err := db.Transaction(func(tx *gorm.DB) error {
-		var node model.Node
-		if err := tx.First(&node, nodeID).Error; err != nil {
-			return err
-		}
-		query := tx.Where("node_id = ? AND profile_id = ? AND zone_id = ? AND name = ? AND type = ? AND retired = ?", nodeID, profile.Id, zone, name, kind, false)
-		if kind == "TXT" {
-			query = query.Where("content = ?", content)
-		}
-		err := query.First(&record).Error
-		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
-			return err
-		}
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			id, err := uuid.NewV4()
-			if err != nil {
-				return err
-			}
-			record = model.NodeDNSRecord{NodeId: nodeID, ProfileId: profile.Id, ZoneId: zone, Name: name, Type: kind, Content: content, TargetContent: content, Owner: "S-UI " + id.String(), Challenge: kind == "TXT"}
-			return tx.Create(&record).Error
-		}
-		record.TargetContent = content
-		return tx.Model(&record).Update("target_content", content).Error
-	})
+	target := dnsRecordTarget{Name: name, Kind: kind, Content: content}
+	err := db.Transaction(func(tx *gorm.DB) error { return prepareDNSRecordRow(tx, nodeID, profile.Id, zone, target, &record) })
 	if err != nil {
 		return record, err
 	}
@@ -201,23 +166,9 @@ func ensureResourceRecord(ctx context.Context, nodeID uint, profile model.NodeDN
 	if len(list) >= 100 {
 		return record, errors.New("dns_record_inventory_too_large")
 	}
-	var chosen *resourceRecord
-	for _, candidate := range list {
-		if !strings.EqualFold(candidate.Name, name) {
-			continue
-		}
-		owned := candidate.Comment == record.Owner && candidate.Type == kind && (candidate.Id == record.RemoteId || record.RemoteId == "") && (candidate.Content == record.Content || candidate.Content == record.TargetContent) && !candidate.Proxied
-		if owned {
-			if chosen != nil {
-				return record, errors.New("dns_record_duplicate_owner")
-			}
-			snapshot := candidate
-			chosen = &snapshot
-			continue
-		}
-		if kind != "TXT" || candidate.Type == "CNAME" {
-			return record, errors.New("dns_name_occupied")
-		}
+	chosen, err := chooseOwnedDNSRecord(list, record, name, kind)
+	if err != nil {
+		return record, err
 	}
 	if record.RemoteId != "" && chosen == nil {
 		return record, errors.New("dns_owned_record_changed")
@@ -246,17 +197,8 @@ func removeResourceRecord(ctx context.Context, record model.NodeDNSRecord) error
 		return err
 	}
 	path := cloudflareZonesPath + record.ZoneId + "/dns_records"
-	if record.RemoteId == "" {
-		var list []resourceRecord
-		if err := cfResource(ctx, profile, "GET", path+"?name="+url.QueryEscape(record.Name)+"&per_page=100", nil, &list); err != nil {
-			return err
-		}
-		for _, candidate := range list {
-			if candidate.Comment == record.Owner && candidate.Name == record.Name && candidate.Type == record.Type {
-				record.RemoteId = candidate.Id
-				break
-			}
-		}
+	if err := findDNSRecordForRemoval(ctx, profile, &record, path); err != nil {
+		return err
 	}
 	if record.RemoteId != "" {
 		path += "/" + record.RemoteId
@@ -300,6 +242,94 @@ func verifyDomainAddress(ctx context.Context, domain, expected string) error {
 	for _, address := range addresses {
 		if !address.IP.Equal(ip) {
 			return errors.New("dns_address_mismatch")
+		}
+	}
+	return nil
+}
+
+type cloudflareResourceResult struct {
+	Success bool            `json:"success"`
+	Result  json.RawMessage `json:"result"`
+	Errors  []struct {
+		Code int `json:"code"`
+	} `json:"errors"`
+}
+
+func missingDNSRecordResponse(method, path string, status int, decodeErr error, result cloudflareResourceResult) bool {
+	if status == http.StatusNotFound || status == http.StatusBadRequest {
+		parts := strings.Split(path, "/")
+		if (method == http.MethodGet || method == http.MethodDelete) && len(parts) == 5 && parts[1] == "zones" && parts[3] == "dns_records" && validZoneId(parts[2]) && validZoneId(parts[4]) {
+			// Cloudflare also reports a missing record as HTTP 400 with error 81044.
+			if decodeErr == nil && len(result.Errors) == 1 && result.Errors[0].Code == 81044 ||
+				status == http.StatusNotFound && errors.Is(decodeErr, io.EOF) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+type dnsRecordTarget struct{ Name, Kind, Content string }
+
+func prepareDNSRecordRow(tx *gorm.DB, nodeID, profileID uint, zone string, target dnsRecordTarget, record *model.NodeDNSRecord) error {
+	name, kind, content := target.Name, target.Kind, target.Content
+	var node model.Node
+	if err := tx.First(&node, nodeID).Error; err != nil {
+		return err
+	}
+	query := tx.Where("node_id = ? AND profile_id = ? AND zone_id = ? AND name = ? AND type = ? AND retired = ?", nodeID, profileID, zone, name, kind, false)
+	if kind == "TXT" {
+		query = query.Where("content = ?", content)
+	}
+	err := query.First(record).Error
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		return err
+	}
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		id, err := uuid.NewV4()
+		if err != nil {
+			return err
+		}
+		*record = model.NodeDNSRecord{NodeId: nodeID, ProfileId: profileID, ZoneId: zone, Name: name, Type: kind, Content: content, TargetContent: content, Owner: "S-UI " + id.String(), Challenge: kind == "TXT"}
+		return tx.Create(record).Error
+	}
+	record.TargetContent = content
+	return tx.Model(record).Update("target_content", content).Error
+}
+
+func chooseOwnedDNSRecord(list []resourceRecord, record model.NodeDNSRecord, name, kind string) (*resourceRecord, error) {
+	var chosen *resourceRecord
+	for _, candidate := range list {
+		if !strings.EqualFold(candidate.Name, name) {
+			continue
+		}
+		owned := candidate.Comment == record.Owner && candidate.Type == kind && (candidate.Id == record.RemoteId || record.RemoteId == "") && (candidate.Content == record.Content || candidate.Content == record.TargetContent) && !candidate.Proxied
+		if owned {
+			if chosen != nil {
+				return nil, errors.New("dns_record_duplicate_owner")
+			}
+			snapshot := candidate
+			chosen = &snapshot
+			continue
+		}
+		if kind != "TXT" || candidate.Type == "CNAME" {
+			return nil, errors.New("dns_name_occupied")
+		}
+	}
+	return chosen, nil
+}
+
+func findDNSRecordForRemoval(ctx context.Context, profile model.NodeDNSProfile, record *model.NodeDNSRecord, path string) error {
+	if record.RemoteId == "" {
+		var list []resourceRecord
+		if err := cfResource(ctx, profile, "GET", path+"?name="+url.QueryEscape(record.Name)+"&per_page=100", nil, &list); err != nil {
+			return err
+		}
+		for _, candidate := range list {
+			if candidate.Comment == record.Owner && candidate.Name == record.Name && candidate.Type == record.Type {
+				record.RemoteId = candidate.Id
+				break
+			}
 		}
 	}
 	return nil

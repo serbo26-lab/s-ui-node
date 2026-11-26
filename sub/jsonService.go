@@ -382,46 +382,15 @@ func applyClientOutboundConfig(inData *model.Inbound, configs, outbound map[stri
 
 	// Shadowsocks
 	if protocol == "shadowsocks" {
-		var userPass []string
-		var inbOptions map[string]interface{}
-		err := json.Unmarshal(inData.Options, &inbOptions)
-		if err != nil {
-			return err
-		}
-		method, _ := inbOptions["method"].(string)
-		if strings.HasPrefix(method, "2022") {
-			inbPass, _ := inbOptions["password"].(string)
-			userPass = append(userPass, inbPass)
-		}
-		// Two assertions chained: when the first fails it yields a nil
-		// map, and indexing that is fine, but the shape is worth reading
-		// in one step rather than trusting the chain.
-		var pass string
-		if cfg, ok := configs[util.ShadowsocksClientConfigKey(method)].(map[string]interface{}); ok {
-			pass, _ = cfg["password"].(string)
-		}
-		userPass = append(userPass, pass)
-		outbound["password"] = strings.Join(userPass, ":")
-	} else { // Other protocols
-		config, _ := configs[protocol].(map[string]interface{})
-		for key, value := range config {
-			if key == "name" || key == "alterId" {
-				continue
-			}
-			if key == "flow" {
-				if inData.TlsId == 0 {
-					continue
-				}
-				if tr, ok := outbound["transport"].(map[string]interface{}); ok {
-					if transportType, _ := tr["type"].(string); transportType != "" {
-						continue
-					}
-				}
-			}
-			outbound[key] = value
-		}
+		return applyShadowsocksOutbound(inData, configs, outbound)
 	}
-
+	config, _ := configs[protocol].(map[string]interface{})
+	for key, value := range config {
+		if !includeOutboundField(key, inData, outbound) {
+			continue
+		}
+		outbound[key] = value
+	}
 	return nil
 }
 
@@ -488,4 +457,46 @@ func expandOutboundAddresses(inData *model.Inbound, outbound map[string]interfac
 		}
 	}
 	return nil
+}
+
+func applyShadowsocksOutbound(inData *model.Inbound, configs, outbound map[string]interface{}) error {
+	var userPass []string
+	var inbOptions map[string]interface{}
+	err := json.Unmarshal(inData.Options, &inbOptions)
+	if err != nil {
+		return err
+	}
+	method, _ := inbOptions["method"].(string)
+	if strings.HasPrefix(method, "2022") {
+		inbPass, _ := inbOptions["password"].(string)
+		userPass = append(userPass, inbPass)
+	}
+	// Two assertions chained: when the first fails it yields a nil
+	// map, and indexing that is fine, but the shape is worth reading
+	// in one step rather than trusting the chain.
+	var pass string
+	if cfg, ok := configs[util.ShadowsocksClientConfigKey(method)].(map[string]interface{}); ok {
+		pass, _ = cfg["password"].(string)
+	}
+	userPass = append(userPass, pass)
+	outbound["password"] = strings.Join(userPass, ":")
+	return nil
+}
+
+func includeOutboundField(key string, inbound *model.Inbound, outbound map[string]interface{}) bool {
+	if key == "name" || key == "alterId" {
+		return false
+	}
+	if key != "flow" {
+		return true
+	}
+	if inbound.TlsId == 0 {
+		return false
+	}
+	if transport, ok := outbound["transport"].(map[string]interface{}); ok {
+		if kind, _ := transport["type"].(string); kind != "" {
+			return false
+		}
+	}
+	return true
 }

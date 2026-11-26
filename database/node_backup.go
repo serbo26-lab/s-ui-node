@@ -442,33 +442,40 @@ func readBackupArchiveFiles(archive *zip.Reader) (map[string][]byte, error) {
 	files := map[string][]byte{}
 	var total uint64
 	for _, file := range archive.File {
-		if file.Name != backupDatabaseName && file.Name != backupKeyName && file.Name != backupManifestName {
-			return nil, errors.New("invalid_node_backup_archive")
+		if err := readBackupArchiveFile(file, files, &total); err != nil {
+			return nil, err
 		}
-		if _, exists := files[file.Name]; exists {
-			return nil, errors.New("invalid_node_backup_archive")
-		}
-		limit := uint64(backupLimit)
-		if file.Name == backupKeyName {
-			limit = 32
-		}
-		if file.Name == backupManifestName {
-			limit = 4096
-		}
-		total += file.UncompressedSize64
-		if file.UncompressedSize64 > limit || total > backupLimit {
-			return nil, errors.New("invalid_node_backup_archive")
-		}
-		stream, e := file.Open()
-		if e != nil {
-			return nil, e
-		}
-		body, e := io.ReadAll(io.LimitReader(stream, int64(limit)+1))
-		stream.Close()
-		if e != nil || uint64(len(body)) > limit {
-			return nil, errors.New("invalid_node_backup_archive")
-		}
-		files[file.Name] = body
 	}
 	return files, nil
+}
+
+func readBackupArchiveFile(file *zip.File, files map[string][]byte, total *uint64) error {
+	if file.Name != backupDatabaseName && file.Name != backupKeyName && file.Name != backupManifestName {
+		return errors.New("invalid_node_backup_archive")
+	}
+	if _, exists := files[file.Name]; exists {
+		return errors.New("invalid_node_backup_archive")
+	}
+	limit := uint64(backupLimit)
+	if file.Name == backupKeyName {
+		limit = 32
+	}
+	if file.Name == backupManifestName {
+		limit = 4096
+	}
+	*total += file.UncompressedSize64
+	if file.UncompressedSize64 > limit || *total > backupLimit {
+		return errors.New("invalid_node_backup_archive")
+	}
+	stream, e := file.Open()
+	if e != nil {
+		return e
+	}
+	body, e := io.ReadAll(io.LimitReader(stream, int64(limit)+1))
+	stream.Close()
+	if e != nil || uint64(len(body)) > limit {
+		return errors.New("invalid_node_backup_archive")
+	}
+	files[file.Name] = body
+	return nil
 }

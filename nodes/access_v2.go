@@ -223,18 +223,16 @@ func compileGrantCredentials(g *nodeagent.Grant, config map[string]json.RawMessa
 			continue
 		}
 		raw := config[kind]
-		if nodeagent.ExtendedInbound(kind) || kind == "shadowsocks16" {
-			if len(raw) == 0 || string(raw) == "null" {
-				var err error
-				raw, err = newNodeCredential(kind, name)
-				if err != nil {
-					return changed, err
-				}
-				config[kind], changed = raw, true
-			}
-			if nodeagent.ValidateCredential(kind, raw) != nil {
-				continue
-			}
+		raw, generated, include, err := grantProtocolCredential(kind, name, raw)
+		if err != nil {
+			return changed, err
+		}
+		if generated {
+			config[kind] = raw
+			changed = true
+		}
+		if !include {
+			continue
 		}
 		if len(raw) > 0 {
 			g.Credentials[kind] = raw
@@ -366,4 +364,22 @@ func finishAccessTask(db *gorm.DB, node model.Node, task model.NodeTask, lease s
 			return tx.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "node_id"}}, DoUpdates: clause.Assignments(map[string]interface{}{"last_error": code})}).Create(&row).Error
 		})
 	}
+}
+
+func grantProtocolCredential(kind, name string, raw json.RawMessage) (json.RawMessage, bool, bool, error) {
+	generated := false
+	if nodeagent.ExtendedInbound(kind) || kind == "shadowsocks16" {
+		if len(raw) == 0 || string(raw) == "null" {
+			var err error
+			raw, err = newNodeCredential(kind, name)
+			if err != nil {
+				return raw, generated, false, err
+			}
+			generated = true
+		}
+		if nodeagent.ValidateCredential(kind, raw) != nil {
+			return raw, generated, false, nil
+		}
+	}
+	return raw, generated, true, nil
 }

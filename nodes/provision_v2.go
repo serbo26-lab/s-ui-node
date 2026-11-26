@@ -147,37 +147,10 @@ func prepareLiveProvisionSelection(db *gorm.DB, r *ProvisionRequest) error {
 		return prepareExistingLiveSelection(db, r)
 	}
 	if len(r.InboundTemplateIds) > 0 {
-		if r.TemplateId != 0 {
-			return errors.New("edit_node_inbound_selection")
-		}
-		entries, err := selectedInboundEntries(db, r.InboundTemplateIds, 0)
-		if err != nil {
-			return err
-		}
-		r.Protocols = nil
-		for _, entry := range entries {
-			if entry.Enable {
-				r.Protocols = append(r.Protocols, entry.Protocol)
-			}
-		}
-		if len(r.Protocols) == 0 {
-			return errors.New("choose_node_inbound_templates")
-		}
-	} else if r.TemplateId != 0 {
-		view, err := ReadTemplateVersion(r.TemplateId, 0)
-		if err != nil {
-			return err
-		}
-		spec, err := NormalizeSpec(view.Spec, nil)
-		if err != nil {
-			return err
-		}
-		r.Protocols = nil
-		for _, e := range spec.Entries {
-			if e.Enable {
-				r.Protocols = append(r.Protocols, e.Protocol)
-			}
-		}
+		return prepareSelectedLiveProtocols(db, r)
+	}
+	if r.TemplateId != 0 {
+		return prepareTemplateLiveProtocols(r)
 	}
 	return nil
 }
@@ -559,6 +532,44 @@ func persistLiveProvisionPlan(tx *gorm.DB, node model.Node, installation model.N
 	}
 	if err = tx.Model(job).Update("plan", job.Plan).Error; err != nil {
 		return err
+	}
+	return nil
+}
+
+func prepareSelectedLiveProtocols(db *gorm.DB, r *ProvisionRequest) error {
+	if r.TemplateId != 0 {
+		return errors.New("edit_node_inbound_selection")
+	}
+	entries, err := selectedInboundEntries(db, r.InboundTemplateIds, 0)
+	if err != nil {
+		return err
+	}
+	r.Protocols = nil
+	for _, entry := range entries {
+		if entry.Enable {
+			r.Protocols = append(r.Protocols, entry.Protocol)
+		}
+	}
+	if len(r.Protocols) == 0 {
+		return errors.New("choose_node_inbound_templates")
+	}
+	return nil
+}
+
+func prepareTemplateLiveProtocols(r *ProvisionRequest) error {
+	view, err := ReadTemplateVersion(r.TemplateId, 0)
+	if err != nil {
+		return err
+	}
+	spec, err := NormalizeSpec(view.Spec, nil)
+	if err != nil {
+		return err
+	}
+	r.Protocols = nil
+	for _, e := range spec.Entries {
+		if e.Enable {
+			r.Protocols = append(r.Protocols, e.Protocol)
+		}
 	}
 	return nil
 }
