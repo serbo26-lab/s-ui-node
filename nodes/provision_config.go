@@ -150,6 +150,7 @@ func configureManagedCertificate(config map[string]interface{}, domain string, p
 		if err != nil {
 			return err
 		}
+		// Public bootstrap resolvers keep DNS-01 checks independent of the host resolver.
 		config["certificate_providers"] = []interface{}{map[string]interface{}{"type": "acme", "tag": "sui-managed-acme", "domain": []string{domain}, "email": s.Email, "dns01_challenge": map[string]interface{}{"provider": "cloudflare", "api_token": token, "resolvers": []string{"1.1.1.1:53", "8.8.8.8:53"}, "propagation_timeout": "3m"}}}
 	}
 	return nil

@@ -223,18 +223,7 @@ func runProvision(job model.NodeJob, r ProvisionRequest, install model.NodeInsta
 		return
 	}
 	jobStage(&job, "inspect", "running", "")
-	ports := map[string]int{}
-	if r.NodeId != 0 {
-		var inbounds []model.NodeInbound
-		database.GetDB().Where(whereNodeID, job.NodeId).Find(&inbounds)
-		for _, i := range inbounds {
-			var o struct {
-				Port int `json:"listen_port"`
-			}
-			_ = json.Unmarshal(i.Options, &o)
-			ports[i.Type] = o.Port
-		}
-	}
+	ports := legacyInspectionPorts(job.NodeId, r.NodeId != 0)
 	response, err := remotePython(ctx, client, r.SSHUser, inspectScript(job.NodeId), map[string]interface{}{"protocols": r.Protocols, "ports": ports, "control_port": install.ControlPort, "recover": oldIP == r.IP && r.NodeId != 0})
 	if err != nil {
 		fail("server_inspection_failed")
@@ -530,4 +519,20 @@ func prepareLegacyInstallIdentity(ctx context.Context, job *model.NodeJob, r Pro
 		}
 	}
 	return node, nil
+}
+
+func legacyInspectionPorts(nodeID uint, existing bool) map[string]int {
+	ports := map[string]int{}
+	if existing {
+		var inbounds []model.NodeInbound
+		database.GetDB().Where(whereNodeID, nodeID).Find(&inbounds)
+		for _, i := range inbounds {
+			var o struct {
+				Port int `json:"listen_port"`
+			}
+			_ = json.Unmarshal(i.Options, &o)
+			ports[i.Type] = o.Port
+		}
+	}
+	return ports
 }
