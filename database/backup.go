@@ -257,6 +257,13 @@ func (files restoreFiles) installDatabase(suppliedKey []byte, replaceKey bool) e
 		rollback()
 		return common.NewErrorf("Error initialising imported db: %v", err)
 	}
+	if err := prepareNodeRestore(); err != nil {
+		if pool, e := db.DB(); e == nil {
+			_ = pool.Close()
+		}
+		rollback()
+		return common.NewErrorf("Error preparing restored nodes: %v", err)
+	}
 	logger.Info("database imported; previous database kept at ", files.path(fallback))
 	return nil
 }

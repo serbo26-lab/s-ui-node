@@ -266,14 +266,10 @@ func prepareAccessTransaction(tx *gorm.DB, node model.Node, status nodeagent.Sta
 		return err
 	}
 	state.NodeId = node.Id
-	if status.AccessRevision > state.DesiredRevision {
-		return errors.New("access_state_rollback_detected")
-	}
-	if state.DesiredRevision > 0 && status.AccessRevision == state.DesiredRevision {
-		var planned nodeagent.AccessSnapshot
-		if json.Unmarshal(state.DesiredSnapshot, &planned) != nil || planned.Digest() != status.AccessDigest {
-			return errors.New("access_state_rollback_or_conflict_detected")
-		}
+	if current.RestoreAccessPending {
+		state.DesiredRevision = max(state.DesiredRevision, status.AccessRevision)
+	} else if err := validateAccessCheckpoint(state, status); err != nil {
+		return err
 	}
 	fresh, err := compileAccess(tx, current, extendedInboundsAvailable(tx, current, status), proxyInboundsAvailable(tx, current, status))
 	if err != nil {
@@ -281,7 +277,7 @@ func prepareAccessTransaction(tx *gorm.DB, node model.Node, status nodeagent.Sta
 	}
 	body, _ := json.Marshal(fresh)
 	fingerprint := versionDigest(body)
-	if state.DesiredRevision == 0 || state.DesiredFingerprint != fingerprint {
+	if current.RestoreAccessPending || state.DesiredRevision == 0 || state.DesiredFingerprint != fingerprint {
 		state.DesiredRevision++
 		fresh.Revision = state.DesiredRevision
 		if err := fresh.Validate(); err != nil {
@@ -293,7 +289,10 @@ func prepareAccessTransaction(tx *gorm.DB, node model.Node, status nodeagent.Sta
 			return err
 		}
 	}
-	return json.Unmarshal(state.DesiredSnapshot, desired)
+	if err := json.Unmarshal(state.DesiredSnapshot, desired); err != nil {
+		return err
+	}
+	return finishAccessRestore(tx, current)
 }
 
 func finishAccessLease(tx *gorm.DB, task model.NodeTask, lease string, failure error) error {

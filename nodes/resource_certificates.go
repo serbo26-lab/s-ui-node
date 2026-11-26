@@ -307,18 +307,14 @@ func prepareCertificateTransaction(tx *gorm.DB, node model.Node, domain model.No
 	if current.Generation != binding.Generation || target.Generation != domain.Generation {
 		return errors.New("certificate_target_changed")
 	}
-	if err := validateRemoteCertificateRevision(current, remote); err != nil {
+	restoring, err := restoredCertificateCheckpoint(tx, node, &current, remote)
+	if err != nil {
 		return err
 	}
-	if current.DesiredRevision == 0 || current.DesiredFingerprint != fingerprint {
+	if restoring || current.DesiredRevision == 0 || current.DesiredFingerprint != fingerprint {
 		current.DesiredRevision++
 		request.Revision = current.DesiredRevision
-		encoded, _ := json.Marshal(request)
-		sealed, err := sealSecret(string(encoded))
-		if err != nil {
-			return err
-		}
-		if err := tx.Model(&current).Updates(map[string]interface{}{"desired_revision": request.Revision, "desired_fingerprint": fingerprint, "desired_request": sealed}).Error; err != nil {
+		if err := storeCertificateRequest(tx, current, *request, fingerprint); err != nil {
 			return err
 		}
 	} else {
@@ -330,7 +326,19 @@ func prepareCertificateTransaction(tx *gorm.DB, node model.Node, domain model.No
 			return errors.New("certificate_request_corrupt")
 		}
 	}
+	if restoring {
+		return tx.Model(&model.Node{}).Where("id = ?", node.Id).Update("restore_certificate_pending", false).Error
+	}
 	return nil
+}
+
+func storeCertificateRequest(tx *gorm.DB, current model.NodeCertificateBinding, request nodeagent.CertificateRequest, fingerprint string) error {
+	encoded, _ := json.Marshal(request)
+	sealed, err := sealSecret(string(encoded))
+	if err != nil {
+		return err
+	}
+	return tx.Model(&current).Updates(map[string]interface{}{"desired_revision": request.Revision, "desired_fingerprint": fingerprint, "desired_request": sealed}).Error
 }
 
 func liveResourceNeeds(db *gorm.DB, node model.Node) (certificate, domain bool, err error) {

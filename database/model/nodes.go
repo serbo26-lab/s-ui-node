@@ -65,6 +65,8 @@ type Node struct {
 	TrafficDown                 int64  `json:"-"`
 	AgentTrafficAvailable       bool   `json:"agent_traffic_available" gorm:"-"`
 	ControlEpoch                string `json:"-"`
+	RestoreAccessPending        bool   `json:"-" gorm:"not null;default:false"`
+	RestoreCertificatePending   bool   `json:"-" gorm:"not null;default:false"`
 	ManagementGeneration        uint64 `json:"management_generation" gorm:"not null;default:1"`
 	TemplateTargetVersion       uint64 `json:"template_target_version"`
 	MaterializedTemplateVersion uint64 `json:"materialized_template_version"`

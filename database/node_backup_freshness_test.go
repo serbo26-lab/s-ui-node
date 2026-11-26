@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/alireza0/s-ui/config"
 	"github.com/alireza0/s-ui/database/model"
@@ -98,6 +99,8 @@ func TestRestoreAcceptsArchivedNodeStateAfterLaterChanges(t *testing.T) {
 func checkArchivedNodeStateRestore(t *testing.T, format string) {
 	t.Helper()
 	node, _ := nodeBackupStateFixture(t)
+	task := model.NodeTask{NodeId: node.Id, Kind: "access", Generation: 3, LeaseToken: "archived-lease", LeaseUntil: time.Now().Unix() + 600, State: "working"}
+	requireNodeTestSuccess(t, db.Create(&task).Error)
 	export := GetDb
 	if format == "zip" {
 		export = GetFullBackup
@@ -108,6 +111,10 @@ func checkArchivedNodeStateRestore(t *testing.T, format string) {
 	requireNodeTestSuccess(t, db.Model(&model.NodeAccessState{}).Where("node_id = ?", node.Id).Update("desired_revision", 9).Error)
 	requireNodeTestSuccess(t, restoreDB(backupMemoryFile{bytes.NewReader(archive)}))
 	checkRestoredNodeBackup(t, node)
+	requireNodeTestSuccess(t, db.First(&task, task.Id).Error)
+	if task.LeaseUntil != 0 || task.LeaseToken != "" || task.Generation != 4 || task.State != "queued" {
+		t.Fatal("restore retained an orphaned worker lease")
+	}
 }
 
 func checkRestoredNodeBackup(t *testing.T, expected model.Node) {
@@ -118,6 +125,9 @@ func checkRestoredNodeBackup(t *testing.T, expected model.Node) {
 	requireNodeTestSuccess(t, db.First(&access, "node_id = ?", expected.Id).Error)
 	if restored.SettingsVersion != 1 || restored.ControlEpoch != "fixture-epoch" || access.DesiredRevision != 2 {
 		t.Fatal("restore did not preserve the archived node state")
+	}
+	if !restored.RestoreAccessPending || !restored.RestoreCertificatePending {
+		t.Fatal("native restore did not schedule authenticated node reconciliation")
 	}
 }
 

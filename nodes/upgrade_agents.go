@@ -92,6 +92,12 @@ func upgradeAgents(ctx context.Context, bundle agentBundle) {
 }
 
 func upgradeManagedAgent(parent context.Context, id uint, bundle agentBundle) {
+	lock, _ := nodeLocks.LoadOrStore(id, &sync.Mutex{})
+	lock.(*sync.Mutex).Lock()
+	defer lock.(*sync.Mutex).Unlock()
+	if parent.Err() != nil {
+		return
+	}
 	operation := provisionOperationLock(id)
 	if !operation.TryLock() {
 		return
@@ -102,11 +108,6 @@ func upgradeManagedAgent(parent context.Context, id uint, bundle agentBundle) {
 	}
 	activeAgentUpgrades.Store(id, true)
 	defer activeAgentUpgrades.Delete(id)
-	lock, _ := nodeLocks.LoadOrStore(id, &sync.Mutex{})
-	if !lock.(*sync.Mutex).TryLock() {
-		return
-	}
-	defer lock.(*sync.Mutex).Unlock()
 	db := database.GetDB()
 	var node model.Node
 	if db.First(&node, id).Error != nil || node.AgentProtocol != 2 || node.ControlEpoch == "" {
