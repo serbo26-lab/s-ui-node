@@ -61,11 +61,20 @@ func (r *CoreRuntime) Interrupt() {
 }
 
 func (r *CoreRuntime) stopCore() error {
+	err := r.closeCoreTraffic()
+	r.freshCore()
+	return err
+}
+
+func (r *CoreRuntime) closeCoreTraffic() error {
+	box := r.core.GetInstance()
 	r.collectTraffic()
 	r.Interrupt()
 	err := r.core.Stop()
-	r.freshCore()
-	return err
+	if box != nil && box.SessionTracker() != nil {
+		r.accumulateTraffic(*box.SessionTracker().GetStats())
+	}
+	return errors.Join(err, r.persistTraffic())
 }
 
 func NewCoreRuntimeWithState(directory string) *CoreRuntime {
@@ -256,10 +265,7 @@ func (r *CoreRuntime) Close() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.config = nil
-	r.collectTraffic()
-	_ = r.persistTraffic()
-	r.Interrupt()
-	return r.core.Stop()
+	return r.closeCoreTraffic()
 }
 
 func (r *CoreRuntime) Running() bool { return r.core.IsRunning() && r.core.GetCtx().Err() == nil }

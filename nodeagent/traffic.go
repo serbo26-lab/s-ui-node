@@ -5,6 +5,8 @@ import (
 	"maps"
 	"math"
 	"time"
+
+	"github.com/alireza0/s-ui/database/model"
 )
 
 // A cumulative sample can be read by multiple controllers without draining
@@ -28,7 +30,11 @@ func (r *CoreRuntime) collectTraffic() {
 	if box == nil || box.SessionTracker() == nil {
 		return
 	}
-	for _, row := range *box.SessionTracker().GetStats() {
+	r.accumulateTraffic(*box.SessionTracker().GetStats())
+}
+
+func (r *CoreRuntime) accumulateTraffic(rows []model.Stats) {
+	for _, row := range rows {
 		r.trafficDirty = true
 		if row.Resource == "user" && row.Traffic > 0 {
 			if r.traffic.Activity == nil {

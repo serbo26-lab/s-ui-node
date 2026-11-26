@@ -1,12 +1,14 @@
 package nodes
 
 import (
+	"errors"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/alireza0/s-ui/database/model"
 	"github.com/alireza0/s-ui/nodeagent"
+	"gorm.io/gorm"
 )
 
 func TestClientQuotaSumsConcurrentNodesAndLocalTrafficWithoutReplay(t *testing.T) {
@@ -118,5 +120,35 @@ func TestClientTrafficRejectsForeignAndStaleNodeIdentities(t *testing.T) {
 	db.First(&client, client.Id)
 	if client.Up != 100 {
 		t.Fatal("invalid ledger charged usage")
+	}
+}
+
+func TestClientTrafficRollbackDoesNotConsumeTheCursor(t *testing.T) {
+	db, n, client := fixture(t)
+	sample := &nodeagent.TrafficSample{Process: "11111111-1111-4111-8111-111111111111", Users: map[string]nodeagent.UserTraffic{clientTrafficID(client): {Up: 100, Down: 200}}}
+	callback := "fixture-reject-client-usage"
+	if err := db.Callback().Update().Before("gorm:update").Register(callback, func(tx *gorm.DB) {
+		if tx.Statement.Table == "clients" {
+			tx.AddError(errors.New("fixture database failure"))
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	err := recordClientTraffic(db, n, sample, time.Now())
+	db.Callback().Update().Remove(callback)
+	if err == nil {
+		t.Fatal("injected database error was ignored")
+	}
+	var count int64
+	db.Model(&model.NodeClientTraffic{}).Count(&count)
+	if count != 0 {
+		t.Fatal("failed client update consumed the traffic cursor")
+	}
+	if err := recordClientTraffic(db, n, sample, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	db.First(&client, client.Id)
+	if client.Up != 100 || client.Down != 200 {
+		t.Fatal("retry did not charge exactly once", client.Up, client.Down)
 	}
 }
