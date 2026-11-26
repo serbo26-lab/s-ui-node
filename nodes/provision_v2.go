@@ -92,16 +92,7 @@ func createLiveProvision(r ProvisionRequest, actor string) (model.NodeJob, bool,
 	if !regexp.MustCompile(`^[a-zA-Z0-9_-]{16,96}$`).MatchString(r.RequestKey) {
 		return job, false, errors.New("install_request_key_required")
 	}
-	signature := r
-	signature.Password = ""
-	if signature.Domain != nil {
-		snapshot := *signature.Domain
-		snapshot.Certificate = ""
-		snapshot.Key = ""
-		signature.Domain = &snapshot
-	}
-	body, _ := json.Marshal(signature)
-	digest := versionDigest(body)
+	digest := liveProvisionDigest(r)
 	db := database.GetDB()
 	if err := db.First(&job, whereRequestKey, r.RequestKey).Error; err == nil {
 		if job.RequestDigest != digest {
@@ -111,42 +102,57 @@ func createLiveProvision(r ProvisionRequest, actor string) (model.NodeJob, bool,
 	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
 		return job, false, err
 	}
+	if err := prepareLiveProvisionSelection(db, &r); err != nil {
+		return job, false, err
+	}
+	if r.NodeId == 0 && r.Password == "" {
+		return job, false, errors.New("ssh_password_required")
+	}
+	if err := normalizeProvision(&r); err != nil {
+		return job, false, err
+	}
+	creation := liveProvisionCreation{request: r, actor: actor, digest: digest}
+	err := db.Transaction(creation.create)
+	if err != nil {
+		var same model.NodeJob
+		if db.First(&same, whereRequestKey, r.RequestKey).Error == nil && same.RequestDigest == digest {
+			return same, false, nil
+		}
+	}
+	return creation.job, creation.created, err
+}
+
+type liveProvisionCreation struct {
+	request       ProvisionRequest
+	actor, digest string
+	job           model.NodeJob
+	created       bool
+}
+
+func liveProvisionDigest(r ProvisionRequest) string {
+	signature := r
+	signature.Password = ""
+	if signature.Domain != nil {
+		snapshot := *signature.Domain
+		snapshot.Certificate = ""
+		snapshot.Key = ""
+		signature.Domain = &snapshot
+	}
+	body, _ := json.Marshal(signature)
+	return versionDigest(body)
+}
+
+func prepareLiveProvisionSelection(db *gorm.DB, r *ProvisionRequest) error {
 	if r.NodeId != 0 {
-		if len(r.InboundTemplateIds) > 0 {
-			return job, false, errors.New("installer_cannot_replace_live_template")
-		}
-		var node model.Node
-		if err := db.First(&node, r.NodeId).Error; err != nil {
-			return job, false, err
-		}
-		if node.AssignmentMode != model.NodeAssignmentWhole || node.AgentProtocol != 2 || node.TemplateTargetVersion == 0 {
-			return job, false, errors.New("live_node_required")
-		}
-		if r.ExpectedVersion == nil || *r.ExpectedVersion != node.SettingsVersion {
-			return job, false, errors.New("node_settings_version_conflict")
-		}
-		spec, err := liveVersion(db, node)
-		if err != nil {
-			return job, false, err
-		}
-		r.Protocols = nil
-		for _, e := range spec.Entries {
-			if e.Enable {
-				r.Protocols = append(r.Protocols, e.Protocol)
-			}
-		}
-		// Recovery preserves the bound template. Template replacement has its own CAS API.
-		if r.TemplateId != 0 && r.TemplateId != node.TemplateId {
-			return job, false, errors.New("installer_cannot_replace_live_template")
-		}
-		r.TemplateId = node.TemplateId
-	} else if len(r.InboundTemplateIds) > 0 {
+		return prepareExistingLiveSelection(db, r)
+	}
+	if len(r.InboundTemplateIds) > 0 {
 		if r.TemplateId != 0 {
-			return job, false, errors.New("edit_node_inbound_selection")
+			return errors.New("edit_node_inbound_selection")
 		}
 		entries, err := selectedInboundEntries(db, r.InboundTemplateIds, 0)
 		if err != nil {
-			return job, false, err
+			return err
 		}
 		r.Protocols = nil
 		for _, entry := range entries {
@@ -155,16 +161,16 @@ func createLiveProvision(r ProvisionRequest, actor string) (model.NodeJob, bool,
 			}
 		}
 		if len(r.Protocols) == 0 {
-			return job, false, errors.New("choose_node_inbound_templates")
+			return errors.New("choose_node_inbound_templates")
 		}
 	} else if r.TemplateId != 0 {
 		view, err := ReadTemplateVersion(r.TemplateId, 0)
 		if err != nil {
-			return job, false, err
+			return err
 		}
 		spec, err := NormalizeSpec(view.Spec, nil)
 		if err != nil {
-			return job, false, err
+			return err
 		}
 		r.Protocols = nil
 		for _, e := range spec.Entries {
@@ -173,124 +179,54 @@ func createLiveProvision(r ProvisionRequest, actor string) (model.NodeJob, bool,
 			}
 		}
 	}
-	if r.NodeId == 0 && r.Password == "" {
-		return job, false, errors.New("ssh_password_required")
-	}
-	if err := normalizeProvision(&r); err != nil {
-		return job, false, err
-	}
-	created := false
-	err := db.Transaction(func(tx *gorm.DB) error {
-		// The unique request index also fences concurrent creates.
-		var same model.NodeJob
-		if tx.First(&same, whereRequestKey, r.RequestKey).Error == nil {
-			if same.RequestDigest != digest {
-				return errors.New("install_request_conflict")
-			}
-			job = same
-			return nil
-		}
-		var node model.Node
-		var installation model.NodeInstallation
-		if r.NodeId != 0 {
-			if err := tx.First(&node, r.NodeId).Error; err != nil {
-				return err
-			}
-			if r.ExpectedVersion == nil || node.SettingsVersion != *r.ExpectedVersion {
-				return errors.New("node_settings_version_conflict")
-			}
-			if err := tx.First(&installation, whereNodeID, node.Id).Error; err != nil {
-				return errors.New("node_not_ssh_managed")
-			}
-			var active int64
-			if err := tx.Model(&model.NodeJob{}).Where("node_id = ? AND state IN ?", node.Id, []string{"queued", "running"}).Count(&active).Error; err != nil {
-				return err
-			}
-			if active > 0 || jobRunning(node.Id) {
-				return errors.New("node_job_running")
-			}
-			if len(installation.PreviousTarget) > 0 {
-				return errors.New("old_server_retirement_pending")
-			}
-		} else {
-			var count int64
-			if err := tx.Model(&model.Node{}).Where("name = ?", r.Name).Count(&count).Error; err != nil {
-				return err
-			}
-			if count > 0 {
-				return errors.New("node_name_exists")
-			}
-			node = model.Node{Name: r.Name, LinkAddress: r.IP, Address: controlAddress(16500), Enable: true, AgentProtocol: 2, AssignmentMode: model.NodeAssignmentWhole, Config: json.RawMessage(`{}`)}
-			if err := tx.Create(&node).Error; err != nil {
-				return err
-			}
-			id, err := uuid.NewV4()
-			if err != nil {
-				return err
-			}
-			installation = model.NodeInstallation{NodeId: node.Id, OwnerID: strings.ReplaceAll(id.String(), "-", ""), IP: r.IP, SSHPort: r.SSHPort, SSHUser: r.SSHUser}
-			if err = tx.Create(&installation).Error; err != nil {
-				return err
-			}
-			template, err := provisionLiveTemplate(tx, node, r)
-			if err != nil {
-				return err
-			}
-			if err = bindLiveTemplate(tx, &node, template, false); err != nil {
-				return err
-			}
-			if err = provisionLiveResources(tx, node, r); err != nil {
-				return err
-			}
-		}
-		if installation.OwnerID == "" {
-			return errors.New("legacy_installation_requires_migration")
-		}
-		id, err := uuid.NewV4()
-		if err != nil {
-			return err
-		}
-		job = model.NodeJob{Id: id.String(), NodeId: node.Id, ModelVersion: 2, RequestKey: r.RequestKey, RequestDigest: digest, Action: r.Action, State: "queued", Stage: "queued", Created: time.Now().Unix(), Updated: time.Now().Unix(), Events: json.RawMessage(`[]`)}
-		if err = tx.Create(&job).Error; err != nil {
-			return err
-		}
-		clean := r
-		clean.NodeId = node.Id
-		clean.Password = ""
-		clean.Domain = nil
-		plan := liveProvisionPlan{Version: 1, Request: clean, Target: installation, Previous: installation, ExpectedGeneration: node.ManagementGeneration, Control: ControlTLS{CA: node.ControlCA, Certificate: node.ControlCertificate, Key: node.ControlKey}}
-		plan.Target.IP, plan.Target.SSHPort, plan.Target.SSHUser = r.IP, r.SSHPort, r.SSHUser
-		if installation.IP != r.IP || installation.SSHPort != r.SSHPort || installation.SSHUser != r.SSHUser {
-			plan.Target.HostKey = ""
-		}
-		plan.Target.BootstrapID = job.Id
-		var encoded bytes.Buffer
-		if err = gob.NewEncoder(&encoded).Encode(plan); err != nil {
-			return err
-		}
-		job.Plan, err = sealSecret(base64.RawStdEncoding.EncodeToString(encoded.Bytes()))
-		if err != nil {
-			return err
-		}
-		if err = tx.Model(&job).Update("plan", job.Plan).Error; err != nil {
-			return err
-		}
-		audit, _ := json.Marshal(map[string]interface{}{"job": job.Id, "node_id": node.Id})
-		if err = tx.Create(&model.Changes{DateTime: time.Now().Unix(), Actor: actor, Key: "node-provision", Action: r.Action, Obj: audit}).Error; err != nil {
-			return err
-		}
-		created = true
-		return nil
-	})
-	if err != nil {
-		var same model.NodeJob
-		if db.First(&same, whereRequestKey, r.RequestKey).Error == nil && same.RequestDigest == digest {
-			return same, false, nil
-		}
-	}
-	return job, created, err
+	return nil
 }
 
+func (c *liveProvisionCreation) create(tx *gorm.DB) error {
+	r, actor, digest := c.request, c.actor, c.digest
+	var job model.NodeJob
+	defer func() { c.job = job }()
+	// The unique request index also fences concurrent creates.
+	var same model.NodeJob
+	if tx.First(&same, whereRequestKey, r.RequestKey).Error == nil {
+		if same.RequestDigest != digest {
+			return errors.New("install_request_conflict")
+		}
+		job = same
+		return nil
+	}
+	var node model.Node
+	var installation model.NodeInstallation
+	var err error
+	if r.NodeId != 0 {
+		node, installation, err = existingLiveProvisionTarget(tx, r)
+	} else {
+		node, installation, err = newLiveProvisionTarget(tx, r)
+	}
+	if err != nil {
+		return err
+	}
+	if installation.OwnerID == "" {
+		return errors.New("legacy_installation_requires_migration")
+	}
+	id, err := uuid.NewV4()
+	if err != nil {
+		return err
+	}
+	job = model.NodeJob{Id: id.String(), NodeId: node.Id, ModelVersion: 2, RequestKey: r.RequestKey, RequestDigest: digest, Action: r.Action, State: "queued", Stage: "queued", Created: time.Now().Unix(), Updated: time.Now().Unix(), Events: json.RawMessage(`[]`)}
+	if err = tx.Create(&job).Error; err != nil {
+		return err
+	}
+	if err := persistLiveProvisionPlan(tx, node, installation, r, &job); err != nil {
+		return err
+	}
+	audit, _ := json.Marshal(map[string]interface{}{"job": job.Id, "node_id": node.Id})
+	if err = tx.Create(&model.Changes{DateTime: time.Now().Unix(), Actor: actor, Key: "node-provision", Action: r.Action, Obj: audit}).Error; err != nil {
+		return err
+	}
+	c.created = true
+	return nil
+}
 func provisionLiveTemplate(tx *gorm.DB, node model.Node, r ProvisionRequest) (model.NodeTemplate, error) {
 	var template model.NodeTemplate
 	if r.TemplateId != 0 {
@@ -507,4 +443,122 @@ func resumeLiveProvisionJobs(ctx context.Context) {
 		}
 		go runLiveProvision(job, "")
 	}
+}
+
+func prepareExistingLiveSelection(db *gorm.DB, r *ProvisionRequest) error {
+	if len(r.InboundTemplateIds) > 0 {
+		return errors.New("installer_cannot_replace_live_template")
+	}
+	var node model.Node
+	if err := db.First(&node, r.NodeId).Error; err != nil {
+		return err
+	}
+	if node.AssignmentMode != model.NodeAssignmentWhole || node.AgentProtocol != 2 || node.TemplateTargetVersion == 0 {
+		return errors.New("live_node_required")
+	}
+	if r.ExpectedVersion == nil || *r.ExpectedVersion != node.SettingsVersion {
+		return errors.New("node_settings_version_conflict")
+	}
+	spec, err := liveVersion(db, node)
+	if err != nil {
+		return err
+	}
+	r.Protocols = nil
+	for _, e := range spec.Entries {
+		if e.Enable {
+			r.Protocols = append(r.Protocols, e.Protocol)
+		}
+	}
+	// Recovery preserves the bound template. Template replacement has its own CAS API.
+	if r.TemplateId != 0 && r.TemplateId != node.TemplateId {
+		return errors.New("installer_cannot_replace_live_template")
+	}
+	r.TemplateId = node.TemplateId
+	return nil
+}
+
+func existingLiveProvisionTarget(tx *gorm.DB, r ProvisionRequest) (model.Node, model.NodeInstallation, error) {
+	var node model.Node
+	var installation model.NodeInstallation
+	if err := tx.First(&node, r.NodeId).Error; err != nil {
+		return node, installation, err
+	}
+	if r.ExpectedVersion == nil || node.SettingsVersion != *r.ExpectedVersion {
+		return node, installation, errors.New("node_settings_version_conflict")
+	}
+	if err := tx.First(&installation, whereNodeID, node.Id).Error; err != nil {
+		return node, installation, errors.New("node_not_ssh_managed")
+	}
+	var active int64
+	if err := tx.Model(&model.NodeJob{}).Where("node_id = ? AND state IN ?", node.Id, []string{"queued", "running"}).Count(&active).Error; err != nil {
+		return node, installation, err
+	}
+	if active > 0 || jobRunning(node.Id) {
+		return node, installation, errors.New("node_job_running")
+	}
+	if len(installation.PreviousTarget) > 0 {
+		return node, installation, errors.New("old_server_retirement_pending")
+	}
+	return node, installation, nil
+}
+
+func newLiveProvisionTarget(tx *gorm.DB, r ProvisionRequest) (model.Node, model.NodeInstallation, error) {
+	var node model.Node
+	var installation model.NodeInstallation
+	var count int64
+	if err := tx.Model(&model.Node{}).Where("name = ?", r.Name).Count(&count).Error; err != nil {
+		return node, installation, err
+	}
+	if count > 0 {
+		return node, installation, errors.New("node_name_exists")
+	}
+	node = model.Node{Name: r.Name, LinkAddress: r.IP, Address: controlAddress(16500), Enable: true, AgentProtocol: 2, AssignmentMode: model.NodeAssignmentWhole, Config: json.RawMessage(`{}`)}
+	if err := tx.Create(&node).Error; err != nil {
+		return node, installation, err
+	}
+	id, err := uuid.NewV4()
+	if err != nil {
+		return node, installation, err
+	}
+	installation = model.NodeInstallation{NodeId: node.Id, OwnerID: strings.ReplaceAll(id.String(), "-", ""), IP: r.IP, SSHPort: r.SSHPort, SSHUser: r.SSHUser}
+	if err = tx.Create(&installation).Error; err != nil {
+		return node, installation, err
+	}
+	template, err := provisionLiveTemplate(tx, node, r)
+	if err != nil {
+		return node, installation, err
+	}
+	if err = bindLiveTemplate(tx, &node, template, false); err != nil {
+		return node, installation, err
+	}
+	if err = provisionLiveResources(tx, node, r); err != nil {
+		return node, installation, err
+	}
+	return node, installation, nil
+}
+
+func persistLiveProvisionPlan(tx *gorm.DB, node model.Node, installation model.NodeInstallation, r ProvisionRequest, job *model.NodeJob) error {
+	var err error
+	clean := r
+	clean.NodeId = node.Id
+	clean.Password = ""
+	clean.Domain = nil
+	plan := liveProvisionPlan{Version: 1, Request: clean, Target: installation, Previous: installation, ExpectedGeneration: node.ManagementGeneration, Control: ControlTLS{CA: node.ControlCA, Certificate: node.ControlCertificate, Key: node.ControlKey}}
+	plan.Target.IP, plan.Target.SSHPort, plan.Target.SSHUser = r.IP, r.SSHPort, r.SSHUser
+	if installation.IP != r.IP || installation.SSHPort != r.SSHPort || installation.SSHUser != r.SSHUser {
+		plan.Target.HostKey = ""
+	}
+	plan.Target.BootstrapID = job.Id
+	var encoded bytes.Buffer
+	if err = gob.NewEncoder(&encoded).Encode(plan); err != nil {
+		return err
+	}
+	job.Plan, err = sealSecret(base64.RawStdEncoding.EncodeToString(encoded.Bytes()))
+	if err != nil {
+		return err
+	}
+	if err = tx.Model(job).Update("plan", job.Plan).Error; err != nil {
+		return err
+	}
+	return nil
 }

@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"strconv"
 	"time"
 
 	"github.com/alireza0/s-ui/database/model"
@@ -71,71 +70,23 @@ func listenerRequests(tx *gorm.DB, node model.Node, spec TemplateSpec, overrides
 		if !entry.Enable {
 			continue
 		}
-		var options struct {
-			Port      json.RawMessage   `json:"listen_port"`
-			Transport listenerTransport `json:"transport"`
-			Network   string            `json:"network"`
-		}
+		var options listenerOptions
 		if err := json.Unmarshal(entry.Options, &options); err != nil {
 			return nil, err
 		}
-		port := options.Port
-		source, sourced := entry.Sources[listenPortPath]
-		transportSource, transportSourced := entry.Sources[transportPath]
-		typeSource, typeSourced := entry.Sources[transportTypePath]
-		clearTransportType := false
-		for _, override := range overrides[entry.Key] {
-			if override.Path == "/network" {
-				options.Network = ""
-				if override.Operation == "set" && (override.Source.Kind != "literal" || json.Unmarshal(override.Source.Value, &options.Network) != nil) {
-					return nil, errors.New("invalid node network")
-				}
-			}
-			if override.Path == listenPortPath {
-				source, sourced = override.Source, override.Operation == "set"
-				port = nil
-			}
-			if override.Path == transportPath {
-				transportSource, transportSourced = override.Source, override.Operation == "set"
-				typeSourced = false
-				options.Transport = listenerTransport{}
-			}
-			if override.Path == transportTypePath {
-				typeSource, typeSourced = override.Source, override.Operation == "set"
-				clearTransportType = !typeSourced
-			}
+		sources := listenerEntrySources(entry, options)
+		if err := sources.applyOverrides(&options, overrides[entry.Key]); err != nil {
+			return nil, err
 		}
-		if transportSourced && (transportSource.Kind != "literal" || json.Unmarshal(transportSource.Value, &options.Transport) != nil) {
-			return nil, errors.New("invalid_listener_transport_source")
-		}
-		if clearTransportType {
-			options.Transport.Type = ""
-		}
-		if typeSourced && (typeSource.Kind != "literal" || json.Unmarshal(typeSource.Value, &options.Transport.Type) != nil) {
-			return nil, errors.New("invalid_listener_transport_source")
+		if err := sources.applyTransport(&options); err != nil {
+			return nil, err
 		}
 		request := listenerRequest{Key: entry.Key, listenerSocket: listenerSocket{Network: listenerNetwork(entry.Protocol, options.Transport, options.Network)}}
-		if sourced {
-			switch {
-			case source.Kind == "literal":
-				port = source.Value
-			case source.Kind == "node_generated" && source.Purpose == "listen_port":
-				var err error
-				port, err = loadGeneratedValue(tx, node.Id, entry.Key, "listen_port")
-				if errors.Is(err, gorm.ErrRecordNotFound) {
-					requests = append(requests, request)
-					continue
-				}
-				if err != nil {
-					return nil, err
-				}
-			default:
-				return nil, errors.New("invalid_listener_port_source")
-			}
+		port, err := sources.resolvePort(tx, node.Id, entry.Key)
+		if err != nil {
+			return nil, err
 		}
-		if json.Unmarshal(port, &request.Port) != nil || request.Port < 1 || request.Port > 65535 {
-			return nil, errors.New("node_listener_port_required")
-		}
+		request.Port = port
 		requests = append(requests, request)
 	}
 	return requests, nil
@@ -197,39 +148,10 @@ func reserveListenerPlan(tx *gorm.DB, nodeID uint, host string, requests []liste
 	if host == "" && len(requests) > 0 {
 		return nil, errors.New("node_physical_host_required")
 	}
-	reserved := make(map[string][]provisionListener, len(requests))
-	reserve := func(request listenerRequest) error {
-		sockets := expandSocket(request.listenerSocket)
-		for _, socket := range sockets {
-			if occupied[socket] {
-				return errListenerOccupied
-			}
-		}
-		write := func(db *gorm.DB) error {
-			for _, socket := range sockets {
-				if err := reserveListenerPort(db, nodeID, host, request.Key, socket); err != nil {
-					return err
-				}
-			}
-			return nil
-		}
-		var err error
-		if len(sockets) > 1 {
-			err = tx.Transaction(write)
-		} else {
-			err = write(tx)
-		}
-		if err != nil {
-			return err
-		}
-		for _, socket := range sockets {
-			reserved[request.Key] = append(reserved[request.Key], provisionListener{request.Key, socket.Network, socket.Port})
-		}
-		return nil
-	}
+	plan := listenerReservations{tx: tx, nodeID: nodeID, host: host, occupied: occupied, reserved: make(map[string][]provisionListener, len(requests))}
 	for _, request := range requests {
 		if request.Port != 0 {
-			if err := reserve(request); err != nil {
+			if err := plan.reserve(request); err != nil {
 				return nil, err
 			}
 		}
@@ -238,28 +160,13 @@ func reserveListenerPlan(tx *gorm.DB, nodeID uint, host string, requests []liste
 		if request.Port != 0 {
 			continue
 		}
-		allocated := false
-		for _, port := range automaticListenerPorts {
-			request.Port = port
-			if err := reserve(request); err != nil {
-				if errors.Is(err, errListenerReserved) || errors.Is(err, errListenerOccupied) {
-					continue
-				}
-				return nil, err
-			}
-			if err := storeGeneratedValue(tx, nodeID, request.Key, "listen_port", json.RawMessage(strconv.Itoa(port))); err != nil {
-				return nil, err
-			}
-			allocated = true
-			break
-		}
-		if !allocated {
-			return nil, errAutoPortsExhausted
+		if err := plan.reserveAutomatic(request); err != nil {
+			return nil, err
 		}
 	}
 	listeners := make([]provisionListener, 0, len(requests))
 	for _, request := range requests {
-		listeners = append(listeners, reserved[request.Key]...)
+		listeners = append(listeners, plan.reserved[request.Key]...)
 	}
 	return listeners, nil
 }

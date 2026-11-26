@@ -34,70 +34,17 @@ func NodeProjections(tx *gorm.DB, clientIDs []uint) (map[uint]NodeAssignmentProj
 		return result, nil
 	}
 	if tx.Migrator().HasTable(&model.ClientNodeInbound{}) {
-		var bindings []model.ClientNodeInbound
-		query := tx.Model(&model.ClientNodeInbound{}).Select("client_node_inbounds.*").Where("client_node_inbounds.client_id IN ?", clientIDs)
-		if tx.Migrator().HasTable(&model.Node{}) {
-			query = query.Joins("LEFT JOIN node_inbounds AS ni ON ni.id = client_node_inbounds.node_inbound_id").Joins("LEFT JOIN nodes AS n ON n.id = ni.node_id").Where("n.id IS NULL OR n.assignment_mode <> ?", model.NodeAssignmentWhole)
-		}
-		if err := query.Order("client_id, node_inbound_id").Find(&bindings).Error; err != nil {
+		if err := legacyNodeProjections(tx, clientIDs, result); err != nil {
 			return nil, err
-		}
-		for _, binding := range bindings {
-			p := result[binding.ClientId]
-			p.Inbounds = append(p.Inbounds, binding.NodeInboundId)
-			p.Legacy = true
-			result[binding.ClientId] = p
 		}
 	}
 	if tx.Migrator().HasTable(&model.ClientNode{}) {
-		var bindings []model.ClientNode
-		if err := tx.Model(&model.ClientNode{}).Select("client_nodes.*").Joins("JOIN nodes ON nodes.id = client_nodes.node_id").Where("client_nodes.client_id IN ? AND client_nodes.active = ? AND nodes.assignment_mode = ?", clientIDs, true, model.NodeAssignmentWhole).Order("client_id, node_id").Find(&bindings).Error; err != nil {
+		if err := wholeNodeProjections(tx, clientIDs, result); err != nil {
 			return nil, err
-		}
-		nodeIDs := []uint{}
-		seenNodes := map[uint]bool{}
-		for _, binding := range bindings {
-			if !seenNodes[binding.NodeId] {
-				seenNodes[binding.NodeId] = true
-				nodeIDs = append(nodeIDs, binding.NodeId)
-			}
-		}
-		var nodes []model.Node
-		if len(nodeIDs) > 0 {
-			if err := tx.Select("id", "applied_revision", "applied_snapshot").Where("id IN ?", nodeIDs).Find(&nodes).Error; err != nil {
-				return nil, err
-			}
-		}
-		byNode := map[uint][]uint{}
-		for _, node := range nodes {
-			var applied struct {
-				Inbounds []struct {
-					Id uint `json:"id"`
-				} `json:"inbounds"`
-			}
-			if node.AppliedRevision > 0 && json.Unmarshal(node.AppliedSnapshot, &applied) == nil {
-				for _, in := range applied.Inbounds {
-					byNode[node.Id] = append(byNode[node.Id], in.Id)
-				}
-			}
-		}
-		for _, binding := range bindings {
-			p := result[binding.ClientId]
-			p.Nodes = append(p.Nodes, binding.NodeId)
-			p.Inbounds = append(p.Inbounds, byNode[binding.NodeId]...)
-			result[binding.ClientId] = p
 		}
 	}
 	for id, p := range result {
-		sort.Slice(p.Inbounds, func(i, j int) bool { return p.Inbounds[i] < p.Inbounds[j] })
-		unique := []uint{}
-		for _, in := range p.Inbounds {
-			if len(unique) == 0 || unique[len(unique)-1] != in {
-				unique = append(unique, in)
-			}
-		}
-		p.Inbounds = unique
-		result[id] = p
+		result[id] = canonicalNodeProjection(p)
 	}
 	return result, nil
 }
@@ -168,4 +115,80 @@ func RevokeClientNodes(tx *gorm.DB, clients []uint) error {
 		return tx.Model(&model.ClientNode{}).Where("client_id IN ? AND active = ?", clients, true).Updates(map[string]interface{}{"active": false, "generation": gorm.Expr("generation + 1")}).Error
 	}
 	return nil
+}
+
+func legacyNodeProjections(tx *gorm.DB, clientIDs []uint, result map[uint]NodeAssignmentProjection) error {
+	var bindings []model.ClientNodeInbound
+	query := tx.Model(&model.ClientNodeInbound{}).Select("client_node_inbounds.*").Where("client_node_inbounds.client_id IN ?", clientIDs)
+	if tx.Migrator().HasTable(&model.Node{}) {
+		query = query.Joins("LEFT JOIN node_inbounds AS ni ON ni.id = client_node_inbounds.node_inbound_id").Joins("LEFT JOIN nodes AS n ON n.id = ni.node_id").Where("n.id IS NULL OR n.assignment_mode <> ?", model.NodeAssignmentWhole)
+	}
+	if err := query.Order("client_id, node_inbound_id").Find(&bindings).Error; err != nil {
+		return err
+	}
+	for _, binding := range bindings {
+		p := result[binding.ClientId]
+		p.Inbounds = append(p.Inbounds, binding.NodeInboundId)
+		p.Legacy = true
+		result[binding.ClientId] = p
+	}
+	return nil
+}
+
+func appliedNodeInboundIDs(nodes []model.Node) map[uint][]uint {
+	byNode := map[uint][]uint{}
+	for _, node := range nodes {
+		var applied struct {
+			Inbounds []struct {
+				Id uint `json:"id"`
+			} `json:"inbounds"`
+		}
+		if node.AppliedRevision > 0 && json.Unmarshal(node.AppliedSnapshot, &applied) == nil {
+			for _, in := range applied.Inbounds {
+				byNode[node.Id] = append(byNode[node.Id], in.Id)
+			}
+		}
+	}
+	return byNode
+}
+
+func wholeNodeProjections(tx *gorm.DB, clientIDs []uint, result map[uint]NodeAssignmentProjection) error {
+	var bindings []model.ClientNode
+	if err := tx.Model(&model.ClientNode{}).Select("client_nodes.*").Joins("JOIN nodes ON nodes.id = client_nodes.node_id").Where("client_nodes.client_id IN ? AND client_nodes.active = ? AND nodes.assignment_mode = ?", clientIDs, true, model.NodeAssignmentWhole).Order("client_id, node_id").Find(&bindings).Error; err != nil {
+		return err
+	}
+	nodeIDs := []uint{}
+	seenNodes := map[uint]bool{}
+	for _, binding := range bindings {
+		if !seenNodes[binding.NodeId] {
+			seenNodes[binding.NodeId] = true
+			nodeIDs = append(nodeIDs, binding.NodeId)
+		}
+	}
+	var nodes []model.Node
+	if len(nodeIDs) > 0 {
+		if err := tx.Select("id", "applied_revision", "applied_snapshot").Where("id IN ?", nodeIDs).Find(&nodes).Error; err != nil {
+			return err
+		}
+	}
+	byNode := appliedNodeInboundIDs(nodes)
+	for _, binding := range bindings {
+		p := result[binding.ClientId]
+		p.Nodes = append(p.Nodes, binding.NodeId)
+		p.Inbounds = append(p.Inbounds, byNode[binding.NodeId]...)
+		result[binding.ClientId] = p
+	}
+	return nil
+}
+
+func canonicalNodeProjection(p NodeAssignmentProjection) NodeAssignmentProjection {
+	sort.Slice(p.Inbounds, func(i, j int) bool { return p.Inbounds[i] < p.Inbounds[j] })
+	unique := []uint{}
+	for _, in := range p.Inbounds {
+		if len(unique) == 0 || unique[len(unique)-1] != in {
+			unique = append(unique, in)
+		}
+	}
+	p.Inbounds = unique
+	return p
 }

@@ -70,14 +70,9 @@ func saveDNSProfile(tx *gorm.DB, action string, data json.RawMessage) (uint, err
 	if err := decodeJSON(data, &r, true); err != nil {
 		return 0, err
 	}
-	var old model.NodeDNSProfile
-	if r.Id != 0 {
-		if err := tx.First(&old, r.Id).Error; err != nil {
-			return r.Id, err
-		}
-		if old.Version != r.ExpectedVersion {
-			return r.Id, errors.New("dns_profile_version_conflict")
-		}
+	old, err := dnsProfileForMutation(tx, r.Id, r.ExpectedVersion)
+	if err != nil {
+		return r.Id, err
 	}
 	if action == "del" {
 		return r.Id, deleteDNSProfile(tx, old, r.Id)
@@ -534,4 +529,17 @@ func expectedDomainIP(tx *gorm.DB, node model.Node, old model.NodeDomainBinding,
 		return "", errors.New("node_expected_ip_required")
 	}
 	return ip.String(), nil
+}
+
+func dnsProfileForMutation(tx *gorm.DB, id uint, expected uint64) (model.NodeDNSProfile, error) {
+	var old model.NodeDNSProfile
+	if id != 0 {
+		if err := tx.First(&old, id).Error; err != nil {
+			return old, err
+		}
+		if old.Version != expected {
+			return old, errors.New("dns_profile_version_conflict")
+		}
+	}
+	return old, nil
 }

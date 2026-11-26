@@ -175,105 +175,11 @@ func (j *JsonService) getOutbounds(clientConfig json.RawMessage, inbounds []*mod
 		if err != nil {
 			return nil, nil, err
 		}
-		protocol, _ := outbound["type"].(string)
-
-		// Shadowsocks
-		if protocol == "shadowsocks" {
-			var userPass []string
-			var inbOptions map[string]interface{}
-			err = json.Unmarshal(inData.Options, &inbOptions)
-			if err != nil {
-				return nil, nil, err
-			}
-			method, _ := inbOptions["method"].(string)
-			if strings.HasPrefix(method, "2022") {
-				inbPass, _ := inbOptions["password"].(string)
-				userPass = append(userPass, inbPass)
-			}
-			// Two assertions chained: when the first fails it yields a nil
-			// map, and indexing that is fine, but the shape is worth reading
-			// in one step rather than trusting the chain.
-			var pass string
-			if cfg, ok := configs[util.ShadowsocksClientConfigKey(method)].(map[string]interface{}); ok {
-				pass, _ = cfg["password"].(string)
-			}
-			userPass = append(userPass, pass)
-			outbound["password"] = strings.Join(userPass, ":")
-		} else { // Other protocols
-			config, _ := configs[protocol].(map[string]interface{})
-			for key, value := range config {
-				if key == "name" || key == "alterId" {
-					continue
-				}
-				if key == "flow" {
-					if inData.TlsId == 0 {
-						continue
-					}
-					if tr, ok := outbound["transport"].(map[string]interface{}); ok {
-						if transportType, _ := tr["type"].(string); transportType != "" {
-							continue
-						}
-					}
-				}
-				outbound[key] = value
-			}
-		}
-
-		var addrs []map[string]interface{}
-		err = json.Unmarshal(inData.Addrs, &addrs)
-		if err != nil {
+		if err := applyClientOutboundConfig(inData, configs, outbound); err != nil {
 			return nil, nil, err
 		}
-		tag, _ := outbound["tag"].(string)
-		// A realm client finds the server through the realm, so the inbound's
-		// addresses have nothing to override.
-		_, viaRealm := outbound["realm"]
-		if len(addrs) == 0 || viaRealm {
-			applyDefaultHost(outbound)
-			tag = util.JoinRemark(clientRemark, tag)
-			takenTags[tag] = true
-			outbound["tag"] = tag
-			push(inData, outbound, tag)
-		} else {
-			for _, addr := range addrs {
-				// Copy original config
-				newOut := make(map[string]interface{}, len(outbound))
-				for key, value := range outbound {
-					newOut[key] = value
-				}
-				// Change and push copied config
-				server, _ := addr["server"].(string)
-				newOut["server"] = util.NormalizeHost(server)
-				port, _ := addr["server_port"].(float64)
-				newOut["server_port"] = int(port)
-
-				// Override TLS
-				if addrTls, ok := addr["tls"].(map[string]interface{}); ok {
-					// Copy the inbound's TLS too: every address shares that map,
-					// so writing into it would give all of them the last
-					// address's server_name.
-					inTls, _ := newOut["tls"].(map[string]interface{})
-					outTls := make(map[string]interface{}, len(inTls)+len(addrTls))
-					for key, value := range inTls {
-						outTls[key] = value
-					}
-					for key, value := range addrTls {
-						outTls[key] = value
-					}
-					newOut["tls"] = outTls
-				}
-				applyDefaultHost(newOut)
-
-				remark, _ := addr["remark"].(string)
-				// Multiple addresses share one inbound tag, so the name only
-				// needs disambiguating when the addresses don't already carry
-				// distinct remarks. Numbering every one of them renamed nodes
-				// that had no conflict to begin with.
-				newTag := uniqueOutboundTag(util.JoinRemark(clientRemark, tag+remark), takenTags)
-				takenTags[newTag] = true
-				newOut["tag"] = newTag
-				push(inData, newOut, newTag)
-			}
+		if err := expandOutboundAddresses(inData, outbound, clientRemark, takenTags, push); err != nil {
+			return nil, nil, err
 		}
 	}
 	return &outbounds, &outTags, nil
@@ -469,4 +375,117 @@ func (j *JsonService) pushMixed(outbounds *[]map[string]interface{}, outTags *[]
 	httpOut["tag"] = httpTag
 	*outbounds = append(*outbounds, socksOut, httpOut)
 	*outTags = append(*outTags, socksTag, httpTag)
+}
+
+func applyClientOutboundConfig(inData *model.Inbound, configs, outbound map[string]interface{}) error {
+	protocol, _ := outbound["type"].(string)
+
+	// Shadowsocks
+	if protocol == "shadowsocks" {
+		var userPass []string
+		var inbOptions map[string]interface{}
+		err := json.Unmarshal(inData.Options, &inbOptions)
+		if err != nil {
+			return err
+		}
+		method, _ := inbOptions["method"].(string)
+		if strings.HasPrefix(method, "2022") {
+			inbPass, _ := inbOptions["password"].(string)
+			userPass = append(userPass, inbPass)
+		}
+		// Two assertions chained: when the first fails it yields a nil
+		// map, and indexing that is fine, but the shape is worth reading
+		// in one step rather than trusting the chain.
+		var pass string
+		if cfg, ok := configs[util.ShadowsocksClientConfigKey(method)].(map[string]interface{}); ok {
+			pass, _ = cfg["password"].(string)
+		}
+		userPass = append(userPass, pass)
+		outbound["password"] = strings.Join(userPass, ":")
+	} else { // Other protocols
+		config, _ := configs[protocol].(map[string]interface{})
+		for key, value := range config {
+			if key == "name" || key == "alterId" {
+				continue
+			}
+			if key == "flow" {
+				if inData.TlsId == 0 {
+					continue
+				}
+				if tr, ok := outbound["transport"].(map[string]interface{}); ok {
+					if transportType, _ := tr["type"].(string); transportType != "" {
+						continue
+					}
+				}
+			}
+			outbound[key] = value
+		}
+	}
+
+	return nil
+}
+
+func outboundAtAddress(outbound, addr map[string]interface{}) map[string]interface{} {
+	// Copy original config
+	newOut := make(map[string]interface{}, len(outbound))
+	for key, value := range outbound {
+		newOut[key] = value
+	}
+	// Change and push copied config
+	server, _ := addr["server"].(string)
+	newOut["server"] = util.NormalizeHost(server)
+	port, _ := addr["server_port"].(float64)
+	newOut["server_port"] = int(port)
+
+	// Override TLS
+	if addrTls, ok := addr["tls"].(map[string]interface{}); ok {
+		// Copy the inbound's TLS too: every address shares that map,
+		// so writing into it would give all of them the last
+		// address's server_name.
+		inTls, _ := newOut["tls"].(map[string]interface{})
+		outTls := make(map[string]interface{}, len(inTls)+len(addrTls))
+		for key, value := range inTls {
+			outTls[key] = value
+		}
+		for key, value := range addrTls {
+			outTls[key] = value
+		}
+		newOut["tls"] = outTls
+	}
+	return newOut
+}
+
+func expandOutboundAddresses(inData *model.Inbound, outbound map[string]interface{}, clientRemark string, takenTags map[string]bool, push func(*model.Inbound, map[string]interface{}, string)) error {
+	var addrs []map[string]interface{}
+	err := json.Unmarshal(inData.Addrs, &addrs)
+	if err != nil {
+		return err
+	}
+	tag, _ := outbound["tag"].(string)
+	// A realm client finds the server through the realm, so the inbound's
+	// addresses have nothing to override.
+	_, viaRealm := outbound["realm"]
+	if len(addrs) == 0 || viaRealm {
+		applyDefaultHost(outbound)
+		tag = util.JoinRemark(clientRemark, tag)
+		takenTags[tag] = true
+		outbound["tag"] = tag
+		push(inData, outbound, tag)
+	} else {
+		for _, addr := range addrs {
+			newOut := outboundAtAddress(outbound, addr)
+			applyDefaultHost(newOut)
+
+			remark, _ := addr["remark"].(string)
+			// Multiple addresses share one inbound tag, so the name only
+			// needs disambiguating when the addresses don't already carry
+			// distinct remarks. Numbering every one of them renamed nodes
+			// that had no conflict to begin with.
+			newTag := uniqueOutboundTag(util.JoinRemark(clientRemark, tag+remark), takenTags)
+			takenTags[newTag] = true
+			newOut["tag"] = newTag
+			push(inData, newOut, newTag)
+		}
+	}
+	return nil
 }

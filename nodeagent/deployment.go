@@ -41,11 +41,9 @@ func (d Deployment) Validate() error {
 		access[user.Name] = true
 	}
 	var inbounds []struct {
-		Tag   string `json:"tag"`
-		Type  string `json:"type"`
-		Users []struct {
-			Name string `json:"name"`
-		} `json:"users"`
+		Tag   string                 `json:"tag"`
+		Type  string                 `json:"type"`
+		Users []legacyConfiguredUser `json:"users"`
 	}
 	if err := json.Unmarshal(config["inbounds"], &inbounds); err != nil {
 		return errors.New("config.inbounds must be an array")
@@ -61,12 +59,8 @@ func (d Deployment) Validate() error {
 		default:
 			return fmt.Errorf("unsupported node inbound type %q", inbound.Type)
 		}
-		seen := map[string]bool{}
-		for _, user := range inbound.Users {
-			if !access[user.Name] || seen[user.Name] {
-				return errors.New("configured user lacks access metadata or is duplicated")
-			}
-			seen[user.Name] = true
+		if err := validateLegacyConfiguredUsers(inbound.Users, access); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -117,4 +111,19 @@ func (d Deployment) Effective(now int64) ([]byte, error) {
 	}
 	config["inbounds"], _ = json.Marshal(inbounds)
 	return json.Marshal(config)
+}
+
+type legacyConfiguredUser struct {
+	Name string `json:"name"`
+}
+
+func validateLegacyConfiguredUsers(users []legacyConfiguredUser, access map[string]bool) error {
+	seen := map[string]bool{}
+	for _, user := range users {
+		if !access[user.Name] || seen[user.Name] {
+			return errors.New("configured user lacks access metadata or is duplicated")
+		}
+		seen[user.Name] = true
+	}
+	return nil
 }

@@ -73,19 +73,9 @@ func validateNodeBackupKey(path string, key []byte) error {
 		return err
 	}
 	defer sqlDB.Close()
-	var aead cipher.AEAD
-	if len(key) > 0 {
-		if len(key) != 32 {
-			return errors.New("invalid_node_backup_key")
-		}
-		block, e := aes.NewCipher(key)
-		if e != nil {
-			return e
-		}
-		aead, err = cipher.NewGCM(block)
-		if err != nil {
-			return err
-		}
+	aead, err := nodeBackupCipher(key)
+	if err != nil {
+		return err
 	}
 	for table, columns := range nodeCipherColumns {
 		if !candidate.Migrator().HasTable(table) {
@@ -95,33 +85,7 @@ func validateNodeBackupKey(path string, key []byte) error {
 			if !candidate.Migrator().HasColumn(table, column) {
 				continue
 			}
-			rows, err := candidate.Raw(fmt.Sprintf(`SELECT "%s" FROM "%s" WHERE "%s" <> ''`, column, table, column)).Rows()
-			if err != nil {
-				return err
-			}
-			for rows.Next() {
-				var sealed string
-				if err = rows.Scan(&sealed); err != nil {
-					rows.Close()
-					return err
-				}
-				if aead == nil {
-					rows.Close()
-					return errors.New("node_backup_key_required")
-				}
-				body, e := base64.StdEncoding.DecodeString(sealed)
-				if e != nil || len(body) < aead.NonceSize() {
-					rows.Close()
-					return errors.New("node_backup_key_mismatch")
-				}
-				if _, e = aead.Open(nil, body[:aead.NonceSize()], body[aead.NonceSize():], []byte("s-ui-node-provision-v1")); e != nil {
-					rows.Close()
-					return errors.New("node_backup_key_mismatch")
-				}
-			}
-			err = rows.Err()
-			rows.Close()
-			if err != nil {
+			if err := validateBackupCipherColumn(candidate, table, column, aead); err != nil {
 				return err
 			}
 		}
@@ -228,36 +192,9 @@ func readFullBackup(reader io.ReaderAt, size int64) ([]byte, []byte, error) {
 	if err != nil {
 		return nil, nil, errors.New("invalid_node_backup_archive")
 	}
-	files := map[string][]byte{}
-	var total uint64
-	for _, file := range archive.File {
-		if file.Name != backupDatabaseName && file.Name != backupKeyName && file.Name != backupManifestName {
-			return nil, nil, errors.New("invalid_node_backup_archive")
-		}
-		if _, exists := files[file.Name]; exists {
-			return nil, nil, errors.New("invalid_node_backup_archive")
-		}
-		limit := uint64(backupLimit)
-		if file.Name == backupKeyName {
-			limit = 32
-		}
-		if file.Name == backupManifestName {
-			limit = 4096
-		}
-		total += file.UncompressedSize64
-		if file.UncompressedSize64 > limit || total > backupLimit {
-			return nil, nil, errors.New("invalid_node_backup_archive")
-		}
-		stream, e := file.Open()
-		if e != nil {
-			return nil, nil, e
-		}
-		body, e := io.ReadAll(io.LimitReader(stream, int64(limit)+1))
-		stream.Close()
-		if e != nil || uint64(len(body)) > limit {
-			return nil, nil, errors.New("invalid_node_backup_archive")
-		}
-		files[file.Name] = body
+	files, err := readBackupArchiveFiles(archive)
+	if err != nil {
+		return nil, nil, err
 	}
 	var manifest nodeBackupManifest
 	if json.Unmarshal(files[backupManifestName], &manifest) != nil || manifest.Version != 1 || manifest.DatabaseSHA256 != backupHash(files[backupDatabaseName]) {
@@ -452,4 +389,86 @@ func copyBackupSequences(source, target *gorm.DB) error {
 		}
 	}
 	return nil
+}
+
+func nodeBackupCipher(key []byte) (cipher.AEAD, error) {
+	if len(key) == 0 {
+		return nil, nil
+	}
+	if len(key) != 32 {
+		return nil, errors.New("invalid_node_backup_key")
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+	return cipher.NewGCM(block)
+}
+
+func validateBackupCipherColumn(candidate *gorm.DB, table, column string, aead cipher.AEAD) error {
+	rows, err := candidate.Raw(fmt.Sprintf(`SELECT "%s" FROM "%s" WHERE "%s" <> ''`, column, table, column)).Rows()
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var sealed string
+		if err = rows.Scan(&sealed); err != nil {
+			rows.Close()
+			return err
+		}
+		if aead == nil {
+			rows.Close()
+			return errors.New("node_backup_key_required")
+		}
+		body, e := base64.StdEncoding.DecodeString(sealed)
+		if e != nil || len(body) < aead.NonceSize() {
+			rows.Close()
+			return errors.New("node_backup_key_mismatch")
+		}
+		if _, e = aead.Open(nil, body[:aead.NonceSize()], body[aead.NonceSize():], []byte("s-ui-node-provision-v1")); e != nil {
+			rows.Close()
+			return errors.New("node_backup_key_mismatch")
+		}
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func readBackupArchiveFiles(archive *zip.Reader) (map[string][]byte, error) {
+	files := map[string][]byte{}
+	var total uint64
+	for _, file := range archive.File {
+		if file.Name != backupDatabaseName && file.Name != backupKeyName && file.Name != backupManifestName {
+			return nil, errors.New("invalid_node_backup_archive")
+		}
+		if _, exists := files[file.Name]; exists {
+			return nil, errors.New("invalid_node_backup_archive")
+		}
+		limit := uint64(backupLimit)
+		if file.Name == backupKeyName {
+			limit = 32
+		}
+		if file.Name == backupManifestName {
+			limit = 4096
+		}
+		total += file.UncompressedSize64
+		if file.UncompressedSize64 > limit || total > backupLimit {
+			return nil, errors.New("invalid_node_backup_archive")
+		}
+		stream, e := file.Open()
+		if e != nil {
+			return nil, e
+		}
+		body, e := io.ReadAll(io.LimitReader(stream, int64(limit)+1))
+		stream.Close()
+		if e != nil || uint64(len(body)) > limit {
+			return nil, errors.New("invalid_node_backup_archive")
+		}
+		files[file.Name] = body
+	}
+	return files, nil
 }
