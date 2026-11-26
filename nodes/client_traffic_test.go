@@ -125,6 +125,7 @@ func TestClientTrafficRejectsForeignAndStaleNodeIdentities(t *testing.T) {
 
 func TestClientTrafficRollbackDoesNotConsumeTheCursor(t *testing.T) {
 	db, n, client := fixture(t)
+	addFixtureAssignment(t, db, n.Id)
 	sample := &nodeagent.TrafficSample{Process: "11111111-1111-4111-8111-111111111111", Users: map[string]nodeagent.UserTraffic{clientTrafficID(client): {Up: 100, Down: 200}}}
 	callback := "fixture-reject-client-usage"
 	if err := db.Callback().Update().Before("gorm:update").Register(callback, func(tx *gorm.DB) {

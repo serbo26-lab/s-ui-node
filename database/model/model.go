@@ -33,8 +33,7 @@ type Client struct {
 	Name     string          `json:"name" form:"name" gorm:"index"`
 	Config   json.RawMessage `json:"config,omitempty" form:"config"`
 	Inbounds json.RawMessage `json:"inbounds" form:"inbounds"`
-	// Applied remote listener IDs, independent of local inbound IDs.
-	// Nil on input means omitted; an explicit [] clears only remote assignments.
+	// Read-only projection of applied remote listener IDs.
 	NodeInbounds json.RawMessage `json:"nodeinbounds,omitempty" form:"nodeinbounds" gorm:"-"`
 	// Whole-node assignments are independent of local and remote inbound IDs.
 	Nodes             json.RawMessage `json:"nodes,omitempty" form:"nodes" gorm:"-"`

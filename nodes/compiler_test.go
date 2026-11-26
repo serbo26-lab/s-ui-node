@@ -158,6 +158,7 @@ func TestAccessEpochRequiresNewConfirmationWithoutChangingCustomerKeys(t *testin
 	if err := db.Save(&client).Error; err != nil {
 		t.Fatal(err)
 	}
+	requireNodeTestSuccess(t, db.First(&node, node.Id).Error)
 	acl, err := compileAccess(db, node, false, false)
 	requireNodeTestSuccess(t, err)
 	if len(acl.Clients) != 1 || acl.Clients[0].Name != "client/1/g2/n1" {

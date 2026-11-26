@@ -356,6 +356,7 @@ func prepareExistingLiveSelection(db *gorm.DB, r *ProvisionRequest) error {
 	if r.ExpectedVersion == nil || *r.ExpectedVersion != node.SettingsVersion {
 		return errors.New("node_settings_version_conflict")
 	}
+	r.TemplateId = node.TemplateId
 	return nil
 }
 

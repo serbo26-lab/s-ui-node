@@ -56,7 +56,30 @@ func TestLiveProvisionCreateIsIdempotentAndDoesNotStorePassword(t *testing.T) {
 	if node.AssignmentMode != model.NodeAssignmentWhole || node.AgentProtocol != 2 || node.TemplateTargetVersion != 1 {
 		t.Fatal("not live model")
 	}
+	ids, err := catalogMembers(db, node.TemplateId)
+	requireNodeTestSuccess(t, err)
+	if len(ids) != 1 {
+		t.Fatal("cloned protocol did not create an inbound template")
+	}
+	var preset model.NodeTemplate
+	requireNodeTestSuccess(t, db.First(&preset, ids[0]).Error)
+	if preset.Kind != inboundTemplate || preset.Scope != "private" || preset.OwnerNodeId != node.Id {
+		t.Fatal("preset does not belong to the cloned node")
+	}
+}
 
+func TestProvisionWithoutInboundsCreatesAnEmptyDeployment(t *testing.T) {
+	db, request := liveCreateFixture(t)
+	request.Protocols = nil
+	job, _, err := createLiveProvision(request, "unit")
+	requireNodeTestSuccess(t, err)
+	var node model.Node
+	requireNodeTestSuccess(t, db.First(&node, job.NodeId).Error)
+	spec, err := liveVersion(db, node)
+	requireNodeTestSuccess(t, err)
+	if !managedNodeModel(node) || len(spec.Entries) != 0 {
+		t.Fatal("empty installation created unexpected inbounds or lost its deployment")
+	}
 }
 
 func TestLiveProvisionPreflightIncludesEveryConnectionAndRejectsHostReservation(t *testing.T) {

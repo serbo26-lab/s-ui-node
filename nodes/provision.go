@@ -73,19 +73,25 @@ func normalizeProvision(r *ProvisionRequest) error {
 	if r.ReplaceHostKey && (r.Action != "recover" || r.Password == "") {
 		return errors.New("recovery_password_required")
 	}
-	var protocols []string
-	for _, kind := range r.Protocols {
+	protocols, err := normalizeProvisionProtocols(r.Protocols)
+	r.Protocols = protocols
+	return err
+}
+
+func normalizeProvisionProtocols(protocols []string) ([]string, error) {
+	if len(protocols) == 0 {
+		return protocols, nil
+	}
+	var unique []string
+	for _, kind := range protocols {
 		if !nodeagent.SupportsInbound(kind, true) {
-			return errors.New("unsupported_node_protocol")
+			return nil, errors.New("unsupported_node_protocol")
 		}
-		if !slices.Contains(protocols, kind) {
-			protocols = append(protocols, kind)
+		if !slices.Contains(unique, kind) {
+			unique = append(unique, kind)
 		}
 	}
-	if len(r.Protocols) > 0 {
-		r.Protocols = protocols
-	}
-	return nil
+	return unique, nil
 }
 
 func jobStage(job *model.NodeJob, stage, state, code string) {
