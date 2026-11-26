@@ -46,6 +46,18 @@ def _firewall_load():
         state = json.load(stream)
     if state.get('version') != 1 or not isinstance(state.get('owners'), dict) or not isinstance(state.get('rules'), dict):
         raise ValueError('invalid firewall ownership state')
+    for key, rule in state['rules'].items():
+        if not isinstance(rule, dict) or not isinstance(rule.get('port'), int) or isinstance(rule['port'], bool):
+            raise ValueError('invalid tracked firewall port')
+        if not isinstance(rule.get('permanent'), bool) or not isinstance(rule.get('owned'), bool):
+            raise ValueError('invalid tracked firewall ownership')
+        if key != _firewall_key(rule):
+            raise ValueError('invalid tracked firewall identity')
+        zone = rule.get('zone')
+        if not isinstance(zone, str) or (rule['backend'] == 'ufw' and zone != ''):
+            raise ValueError('invalid tracked firewall zone')
+        if rule['backend'] == 'firewalld':
+            _firewall_zone(zone)
     return state
 
 
@@ -74,7 +86,7 @@ def _firewall_key(rule):
 
 
 def _ufw_permission(rule, command):
-    endpoint = str(rule['port']) + '/' + rule['network']
+    endpoint = _firewall_endpoint(rule)
     for line in _firewall_run([command, 'show', 'added']).stdout.splitlines():
         parts = shlex.split(line)
         if parts[:2] != ['ufw', 'allow']:
@@ -89,10 +101,11 @@ def _ufw_permission(rule, command):
 
 
 def _firewalld_prefix(rule, backends):
+    zone = _firewall_zone(rule['zone'])
     if backends['firewalld_active']:
-        return [backends['firewall'], *(['--permanent'] if rule['permanent'] else []), '--zone=' + rule['zone']]
+        return [backends['firewall'], *(['--permanent'] if rule['permanent'] else []), '--zone=' + zone]
     if rule['permanent'] and backends['offline']:
-        return [backends['offline'], '--zone=' + rule['zone']]
+        return [backends['offline'], '--zone=' + zone]
     if rule['permanent']:
         raise RuntimeError('permanent firewall cleanup unavailable')
     return None
@@ -106,7 +119,7 @@ def _firewall_permission(rule, backends):
     prefix = _firewalld_prefix(rule, backends)
     if prefix is None:
         return False, True
-    endpoint = str(rule['port']) + '/' + rule['network']
+    endpoint = _firewall_endpoint(rule)
     query = _firewall_run([*prefix, '--query-port=' + endpoint], check=False)
     if query.returncode not in (0, 1):
         raise RuntimeError('firewall port query failed')
@@ -114,7 +127,7 @@ def _firewall_permission(rule, backends):
 
 
 def _firewall_change(rule, backends, add):
-    endpoint = str(rule['port']) + '/' + rule['network']
+    endpoint = _firewall_endpoint(rule)
     if rule['backend'] == 'ufw':
         if add:
             arguments = [backends['ufw'], 'allow', endpoint, 'comment', FIREWALL_COMMENT]
@@ -126,6 +139,20 @@ def _firewall_change(rule, backends, add):
     if prefix is not None:
         action = '--add-port=' if add else '--remove-port='
         _firewall_run([*prefix, action + endpoint])
+
+
+def _firewall_zone(zone):
+    if not isinstance(zone, str) or not re.fullmatch(r'[A-Za-z0-9_.-]+', zone):
+        raise ValueError('invalid firewall zone')
+    return zone
+
+
+def _firewall_endpoint(rule):
+    port = int(rule['port'])
+    if not 1 <= port <= 65535 or rule['network'] not in ('tcp', 'udp'):
+        raise ValueError('invalid firewall endpoint')
+    network = 'tcp' if rule['network'] == 'tcp' else 'udp'
+    return str(port) + '/' + network
 
 
 def _active_firewall_candidates(endpoints, backends):

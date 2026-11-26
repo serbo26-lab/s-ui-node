@@ -70,6 +70,26 @@ class Backend:
 
 
 class OwnershipChecks(unittest.TestCase):
+    def test_corrupt_persisted_rules_are_rejected_before_commands(self):
+        self.apply([(443, 'tcp')])
+        path = self.directory / 'firewall-state.json'
+        original = json.loads(path.read_text())
+        cases = [('port', '--malformed'), ('network', 'tcp;invalid'), ('zone', 'public --invalid')]
+        for field, value in cases:
+            with self.subTest(field=field):
+                state = json.loads(json.dumps(original))
+                next(iter(state['rules'].values()))[field] = value
+                path.write_text(json.dumps(state))
+                calls = len(self.backend.calls)
+                with self.assertRaises(ValueError):
+                    self.apply([])
+                self.assertEqual(len(self.backend.calls), calls)
+
+    def test_firewall_owner_requires_ascii_digits(self):
+        with self.assertRaises(ValueError):
+            self.apply([], owner='s-ui-node-1\u0660')
+        self.assertEqual(self.backend.calls, [])
+
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)

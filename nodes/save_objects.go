@@ -3,11 +3,12 @@ package nodes
 import (
 	"encoding/json"
 	"errors"
+	"strings"
+	"time"
+
 	"github.com/alireza0/s-ui/database"
 	"github.com/alireza0/s-ui/database/model"
 	"gorm.io/gorm"
-	"strings"
-	"time"
 )
 
 func parseSaveIdentity(object, action string, data json.RawMessage) (uint, nodeDeleteRequest, error) {

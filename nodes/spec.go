@@ -113,28 +113,13 @@ func sourcePath(path string) ([]string, error) {
 	}
 	parts := strings.Split(path[1:], "/")
 	for i, part := range parts {
-		for j := 0; j < len(part); j++ {
-			if part[j] == '~' {
-				if j+1 == len(part) || (part[j+1] != '0' && part[j+1] != '1') {
-					return nil, errors.New("invalid JSON pointer escape")
-				}
-				j++
-			}
+		decoded, err := decodeSourcePart(part)
+		if err != nil {
+			return nil, err
 		}
-		part = strings.ReplaceAll(strings.ReplaceAll(part, "~1", "/"), "~0", "~")
-		if part == "" || part == "-" {
-			return nil, errors.New("invalid source path")
-		}
-		if _, err := strconv.Atoi(part); err == nil {
-			return nil, errors.New("array index sources are not supported")
-		}
-		switch part {
-		case "users", "uuid", "api_token", "api_key", "ssh_password":
-			return nil, errors.New("source cannot replace connection identity or access")
-		case "type", "tag", "id", "node_id", "connection_key", "enable", "enabled_protocols":
-			if i == 0 {
-				return nil, errors.New("source cannot replace connection identity or access")
-			}
+		part = decoded
+		if err := validateSourcePart(part, i); err != nil {
+			return nil, err
 		}
 		parts[i] = part
 	}
@@ -151,14 +136,8 @@ func validateSource(path string, source ValueSource) error {
 	}
 	switch source.Kind {
 	case "literal":
-		var value interface{}
-		if err := decodeJSON(source.Value, &value, false); err != nil || secretLiteral(value) {
-			return errors.New("invalid or secret template literal")
-		}
-		if path == "/realm" {
-			if realm, ok := value.(map[string]any); ok && realm["token"] != nil {
-				return errClientOptions
-			}
+		if err := validateLiteralSource(path, source.Value); err != nil {
+			return err
 		}
 	case "node_parameter":
 		switch source.Name {
@@ -167,26 +146,8 @@ func validateSource(path string, source ValueSource) error {
 			return errors.New("unknown node parameter")
 		}
 	case "node_generated":
-		switch source.Purpose {
-		case "listen_port":
-			if path != listenPortPath {
-				return errors.New("invalid_listener_port_source")
-			}
-		case "hysteria2_obfs_password":
-			if path != "/obfs/password" {
-				return errors.New("invalid_obfs_password_source")
-			}
-		case "shadowsocks_key16", "shadowsocks_key32":
-			if path != "/password" {
-				return errors.New("invalid_shadowsocks_key_source")
-			}
-		case "snell_psk":
-			if path != "/psk" {
-				return errors.New("invalid_snell_key_source")
-			}
-		case "reality_private_key", "reality_short_id":
-		default:
-			return errors.New("unknown generated material purpose")
+		if err := validateGeneratedSource(path, source.Purpose); err != nil {
+			return err
 		}
 	case "node_certificate", "profile":
 		if strings.TrimSpace(source.Name) == "" {
@@ -198,21 +159,7 @@ func validateSource(path string, source ValueSource) error {
 	if source.Kind != "literal" && len(source.Value) > 0 {
 		return errors.New("resource source must not contain an inline value")
 	}
-	last := parts[len(parts)-1]
-	if last == "password" && source.Kind != "profile" && !(source.Kind == "node_generated" &&
-		(source.Purpose == "hysteria2_obfs_password" || source.Purpose == "shadowsocks_key16" || source.Purpose == "shadowsocks_key32")) {
-		return errors.New("secret values must use a profile reference")
-	}
-	if last == "psk" && (source.Kind != "node_generated" || source.Purpose != "snell_psk") {
-		return errors.New("Snell PSK must use per-node generated material")
-	}
-	if last == "private_key" && !(source.Kind == "node_generated" && source.Purpose == "reality_private_key" && path == "/tls/reality/private_key") {
-		return errors.New("private key must use per-node generated material")
-	}
-	if (last == "key" || last == "certificate" || last == "key_path" || last == "certificate_path") && source.Kind != "node_certificate" {
-		return errors.New("certificate material must use a node certificate binding")
-	}
-	return nil
+	return validateSecretSource(path, parts[len(parts)-1], source)
 }
 
 // NormalizeSpec allocates only missing logical IDs, never per-node material.
@@ -242,72 +189,8 @@ func NormalizeSpec(raw json.RawMessage, previous *TemplateSpec) (TemplateSpec, e
 	}
 	keys := map[string]bool{}
 	for i := range spec.Entries {
-		entry := &spec.Entries[i]
-		if entry.Key == "" {
-			id, err := uuid.NewV4()
-			if err != nil {
-				return spec, err
-			}
-			entry.Key = id.String()
-		}
-		if len(entry.Key) > 128 || strings.TrimSpace(entry.Key) != entry.Key || keys[entry.Key] || strings.TrimSpace(entry.Name) == "" {
-			return spec, errors.New("invalid or duplicate connection key/name")
-		}
-		keys[entry.Key] = true
-		if !nodeagent.SupportsInbound(entry.Protocol, true) {
-			return spec, errors.New("unsupported node protocol")
-		}
-		if old, ok := oldTypes[entry.Key]; ok && old != entry.Protocol {
-			return spec, errors.New("create a new connection to change protocol")
-		}
-		options, err := objectJSON(entry.Options)
-		if err != nil {
+		if err := normalizeSpecEntry(&spec.Entries[i], oldTypes, keys); err != nil {
 			return spec, err
-		}
-		if port, exists := options["listen_port"]; exists {
-			number, ok := port.(json.Number)
-			if !ok {
-				return spec, errors.New("listen_port must be numeric")
-			}
-			p, err := number.Int64()
-			if err != nil || p < 1 || p > 65535 {
-				return spec, errors.New("invalid listen_port")
-			}
-		} else if _, bound := entry.Sources[listenPortPath]; !bound {
-			return spec, errors.New("listen_port or its node source is required")
-		}
-		if secretLiteral(options) {
-			return spec, errors.New("template options must not contain inline users or secret material")
-		}
-		if err := proxyInboundSources(entry, options); err != nil {
-			return spec, err
-		}
-		if len(entry.ClientTLS) > 0 && string(entry.ClientTLS) != "null" {
-			client, err := objectJSON(entry.ClientTLS)
-			if err != nil || secretLiteral(client) || hasPrivateClientTLS(client) {
-				return spec, errors.New("invalid_template_client_tls")
-			}
-		}
-		if err := validateNodeClientOptions(*entry); err != nil {
-			return spec, err
-		}
-		for _, field := range []string{"id", "type", "tag", "node_id", "enable", "addrs", "out_json", "tls_id"} {
-			if _, ok := options[field]; ok {
-				return spec, errors.New("reserved template options field")
-			}
-		}
-		paths := make([]string, 0, len(entry.Sources))
-		for path, source := range entry.Sources {
-			if err := validateSource(path, source); err != nil {
-				return spec, fmt.Errorf("connection %s source %s: %w", entry.Key, path, err)
-			}
-			paths = append(paths, path)
-		}
-		sort.Strings(paths)
-		for j := 1; j < len(paths); j++ {
-			if strings.HasPrefix(paths[j], paths[j-1]+"/") {
-				return spec, errors.New("overlapping value sources")
-			}
 		}
 	}
 	if spec.Entries == nil {
@@ -429,13 +312,8 @@ func validateSpecOverrides(spec TemplateSpec, values []SpecOverride) (map[string
 		paths[v.ConnectionKey] = append(paths[v.ConnectionKey], v.Path)
 		overrides[v.ConnectionKey] = append(overrides[v.ConnectionKey], v)
 	}
-	for _, group := range paths {
-		sort.Strings(group)
-		for i := 1; i < len(group); i++ {
-			if strings.HasPrefix(group[i], group[i-1]+"/") {
-				return nil, errors.New("overlapping overrides")
-			}
-		}
+	if err := validateOverridePaths(paths); err != nil {
+		return nil, err
 	}
 	return overrides, nil
 }
@@ -465,93 +343,307 @@ func ResolveSpec(spec TemplateSpec, ctx ResolveContext) (TemplateSpec, error) {
 		if !entry.Enable {
 			continue
 		}
-		options, _ := objectJSON(entry.Options)
-		sources := map[string]ValueSource{}
-		removals := []string{}
-		for path, source := range entry.Sources {
-			sources[path] = source
-		}
-		for _, override := range overrides[entry.Key] {
-			// Replacing an object also replaces inherited descendants.
-			for path := range sources {
-				if path == override.Path || strings.HasPrefix(path, override.Path+"/") {
-					delete(sources, path)
-				}
-			}
-			if override.Operation == "remove" {
-				removals = append(removals, override.Path)
-			} else {
-				sources[override.Path] = override.Source
-			}
-		}
-		paths := make([]string, 0, len(sources))
-		for path := range sources {
-			paths = append(paths, path)
-		}
-		sort.Strings(paths)
-		for _, path := range paths {
-			value, err := resolveSource(entry.Key, path, sources[path], ctx)
-			if err != nil {
-				return result, fmt.Errorf("connection %s field %s: %w", entry.Key, path, err)
-			}
-			if sources[path].Kind == "node_certificate" && path == "/tls/certificate_binding" {
-				tls, _ := options["tls"].(map[string]interface{})
-				if tls == nil {
-					tls = map[string]interface{}{}
-					options["tls"] = tls
-				}
-				fields := value.(map[string]interface{})
-				for _, key := range []string{"certificate_path", "key_path"} {
-					tls[key] = fields[key]
-				}
-				if tls["server_name"] == nil {
-					tls["server_name"] = fields["server_name"]
-				}
-				continue
-			}
-			if err := setOption(options, path, value, false); err != nil {
-				return result, err
-			}
-		}
-		for _, path := range removals {
-			if err := setOption(options, path, nil, true); err != nil {
-				return result, err
-			}
-		}
-		port, ok := options["listen_port"].(json.Number)
-		if !ok {
-			return result, errors.New("resolved listen_port is missing or invalid")
-		}
-		p, err := port.Int64()
-		if err != nil || p < 1 || p > 65535 {
-			return result, errors.New("resolved listen_port is invalid")
-		}
-		transport, _ := options["transport"].(map[string]interface{})
-		tls, _ := options["tls"].(map[string]interface{})
-		if !nodeagent.SupportsTLS(entry.Protocol) {
-			if tls["enabled"] == true || entry.TLSProfileID != 0 {
-				return result, errors.New("this node inbound does not support TLS settings")
-			}
-			delete(options, "tls")
-		}
-		reality, _ := tls["reality"].(map[string]interface{})
-		transportType, _ := transport["type"].(string)
-		if nodeagent.RequiresRegularTLS(entry.Protocol, transportType) {
-			if tls["enabled"] != true || reality["enabled"] == true {
-				return result, errors.New("this node inbound needs regular TLS")
-			}
-		}
-		if entry.Protocol != "vless" && reality["enabled"] == true {
-			return result, errors.New("REALITY requires VLESS on this node")
-		}
-		entry.Options, err = json.Marshal(options)
-		if err != nil {
+		if err := resolveSpecEntry(entry, ctx, overrides[entry.Key]); err != nil {
 			return result, err
 		}
-		entry.Sources = nil
 	}
 	if err := validateRealityTargets(result.Entries, ctx.LocalAddresses); err != nil {
 		return result, err
 	}
 	return result, nil
+}
+
+func decodeSourcePart(part string) (string, error) {
+	for j := 0; j < len(part); j++ {
+		if part[j] == '~' {
+			if j+1 == len(part) || (part[j+1] != '0' && part[j+1] != '1') {
+				return "", errors.New("invalid JSON pointer escape")
+			}
+			j++
+		}
+	}
+	part = strings.ReplaceAll(strings.ReplaceAll(part, "~1", "/"), "~0", "~")
+	return part, nil
+}
+
+func validateSourcePart(part string, i int) error {
+	if part == "" || part == "-" {
+		return errors.New("invalid source path")
+	}
+	if _, err := strconv.Atoi(part); err == nil {
+		return errors.New("array index sources are not supported")
+	}
+	switch part {
+	case "users", "uuid", "api_token", "api_key", "ssh_password":
+		return errors.New("source cannot replace connection identity or access")
+	case "type", "tag", "id", "node_id", "connection_key", "enable", "enabled_protocols":
+		if i == 0 {
+			return errors.New("source cannot replace connection identity or access")
+		}
+	}
+	return nil
+}
+
+func normalizeSpecEntry(entry *SpecEntry, oldTypes map[string]string, keys map[string]bool) error {
+	if entry.Key == "" {
+		id, err := uuid.NewV4()
+		if err != nil {
+			return err
+		}
+		entry.Key = id.String()
+	}
+	if len(entry.Key) > 128 || strings.TrimSpace(entry.Key) != entry.Key || keys[entry.Key] || strings.TrimSpace(entry.Name) == "" {
+		return errors.New("invalid or duplicate connection key/name")
+	}
+	keys[entry.Key] = true
+	if !nodeagent.SupportsInbound(entry.Protocol, true) {
+		return errors.New("unsupported node protocol")
+	}
+	if old, ok := oldTypes[entry.Key]; ok && old != entry.Protocol {
+		return errors.New("create a new connection to change protocol")
+	}
+	options, err := objectJSON(entry.Options)
+	if err != nil {
+		return err
+	}
+	return validateEntryOptions(entry, options)
+}
+
+func validateEntryPort(options map[string]interface{}, sources map[string]ValueSource) error {
+	if port, exists := options["listen_port"]; exists {
+		number, ok := port.(json.Number)
+		if !ok {
+			return errors.New("listen_port must be numeric")
+		}
+		p, err := number.Int64()
+		if err != nil || p < 1 || p > 65535 {
+			return errors.New("invalid listen_port")
+		}
+	} else if _, bound := sources[listenPortPath]; !bound {
+		return errors.New("listen_port or its node source is required")
+	}
+	return nil
+}
+
+func validateEntryClientTLS(raw json.RawMessage) error {
+	if len(raw) > 0 && string(raw) != "null" {
+		client, err := objectJSON(raw)
+		if err != nil || secretLiteral(client) || hasPrivateClientTLS(client) {
+			return errors.New("invalid_template_client_tls")
+		}
+	}
+	return nil
+}
+
+func validateEntrySources(entry SpecEntry) error {
+	paths := make([]string, 0, len(entry.Sources))
+	for path, source := range entry.Sources {
+		if err := validateSource(path, source); err != nil {
+			return fmt.Errorf("connection %s source %s: %w", entry.Key, path, err)
+		}
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	for j := 1; j < len(paths); j++ {
+		if strings.HasPrefix(paths[j], paths[j-1]+"/") {
+			return errors.New("overlapping value sources")
+		}
+	}
+	return nil
+}
+
+func validateEntryOptions(entry *SpecEntry, options map[string]interface{}) error {
+	if err := validateEntryPort(options, entry.Sources); err != nil {
+		return err
+	}
+	if secretLiteral(options) {
+		return errors.New("template options must not contain inline users or secret material")
+	}
+	if err := proxyInboundSources(entry, options); err != nil {
+		return err
+	}
+	if err := validateEntryClientTLS(entry.ClientTLS); err != nil {
+		return err
+	}
+	if err := validateNodeClientOptions(*entry); err != nil {
+		return err
+	}
+	for _, field := range []string{"id", "type", "tag", "node_id", "enable", "addrs", "out_json", "tls_id"} {
+		if _, ok := options[field]; ok {
+			return errors.New("reserved template options field")
+		}
+	}
+	return validateEntrySources(*entry)
+}
+
+func validateLiteralSource(path string, raw json.RawMessage) error {
+	var value interface{}
+	if err := decodeJSON(raw, &value, false); err != nil || secretLiteral(value) {
+		return errors.New("invalid or secret template literal")
+	}
+	if path == "/realm" {
+		if realm, ok := value.(map[string]any); ok && realm["token"] != nil {
+			return errClientOptions
+		}
+	}
+	return nil
+}
+
+func validateGeneratedSource(path, purpose string) error {
+	switch purpose {
+	case "listen_port":
+		if path != listenPortPath {
+			return errors.New("invalid_listener_port_source")
+		}
+	case "hysteria2_obfs_password":
+		if path != "/obfs/password" {
+			return errors.New("invalid_obfs_password_source")
+		}
+	case "shadowsocks_key16", "shadowsocks_key32":
+		if path != "/password" {
+			return errors.New("invalid_shadowsocks_key_source")
+		}
+	case "snell_psk":
+		if path != "/psk" {
+			return errors.New("invalid_snell_key_source")
+		}
+	case "reality_private_key", "reality_short_id":
+	default:
+		return errors.New("unknown generated material purpose")
+	}
+	return nil
+}
+
+func validateSecretSource(path, last string, source ValueSource) error {
+	if last == "password" && source.Kind != "profile" && !(source.Kind == "node_generated" &&
+		(source.Purpose == "hysteria2_obfs_password" || source.Purpose == "shadowsocks_key16" || source.Purpose == "shadowsocks_key32")) {
+		return errors.New("secret values must use a profile reference")
+	}
+	if last == "psk" && (source.Kind != "node_generated" || source.Purpose != "snell_psk") {
+		return errors.New("Snell PSK must use per-node generated material")
+	}
+	if last == "private_key" && !(source.Kind == "node_generated" && source.Purpose == "reality_private_key" && path == "/tls/reality/private_key") {
+		return errors.New("private key must use per-node generated material")
+	}
+	if (last == "key" || last == "certificate" || last == "key_path" || last == "certificate_path") && source.Kind != "node_certificate" {
+		return errors.New("certificate material must use a node certificate binding")
+	}
+	return nil
+}
+
+func validateOverridePaths(paths map[string][]string) error {
+	for _, group := range paths {
+		sort.Strings(group)
+		for i := 1; i < len(group); i++ {
+			if strings.HasPrefix(group[i], group[i-1]+"/") {
+				return errors.New("overlapping overrides")
+			}
+		}
+	}
+	return nil
+}
+
+func resolvedEntrySources(inherited map[string]ValueSource, overrides []SpecOverride) (map[string]ValueSource, []string) {
+	sources := map[string]ValueSource{}
+	removals := []string{}
+	for path, source := range inherited {
+		sources[path] = source
+	}
+	for _, override := range overrides {
+		// Replacing an object also replaces inherited descendants.
+		for path := range sources {
+			if path == override.Path || strings.HasPrefix(path, override.Path+"/") {
+				delete(sources, path)
+			}
+		}
+		if override.Operation == "remove" {
+			removals = append(removals, override.Path)
+		} else {
+			sources[override.Path] = override.Source
+		}
+	}
+	return sources, removals
+}
+
+func validateResolvedOptions(entry SpecEntry, options map[string]interface{}) error {
+	port, ok := options["listen_port"].(json.Number)
+	if !ok {
+		return errors.New("resolved listen_port is missing or invalid")
+	}
+	p, err := port.Int64()
+	if err != nil || p < 1 || p > 65535 {
+		return errors.New("resolved listen_port is invalid")
+	}
+	transport, _ := options["transport"].(map[string]interface{})
+	tls, _ := options["tls"].(map[string]interface{})
+	if !nodeagent.SupportsTLS(entry.Protocol) {
+		if tls["enabled"] == true || entry.TLSProfileID != 0 {
+			return errors.New("this node inbound does not support TLS settings")
+		}
+		delete(options, "tls")
+	}
+	reality, _ := tls["reality"].(map[string]interface{})
+	transportType, _ := transport["type"].(string)
+	if nodeagent.RequiresRegularTLS(entry.Protocol, transportType) {
+		if tls["enabled"] != true || reality["enabled"] == true {
+			return errors.New("this node inbound needs regular TLS")
+		}
+	}
+	if entry.Protocol != "vless" && reality["enabled"] == true {
+		return errors.New("REALITY requires VLESS on this node")
+	}
+	return nil
+}
+
+func applyCertificateFields(options map[string]interface{}, value interface{}) {
+	tls, _ := options["tls"].(map[string]interface{})
+	if tls == nil {
+		tls = map[string]interface{}{}
+		options["tls"] = tls
+	}
+	fields := value.(map[string]interface{})
+	for _, key := range []string{"certificate_path", "key_path"} {
+		tls[key] = fields[key]
+	}
+	if tls["server_name"] == nil {
+		tls["server_name"] = fields["server_name"]
+	}
+}
+
+func resolveSpecEntry(entry *SpecEntry, ctx ResolveContext, overrides []SpecOverride) error {
+	options, _ := objectJSON(entry.Options)
+	sources, removals := resolvedEntrySources(entry.Sources, overrides)
+	paths := make([]string, 0, len(sources))
+	for path := range sources {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	for _, path := range paths {
+		value, err := resolveSource(entry.Key, path, sources[path], ctx)
+		if err != nil {
+			return fmt.Errorf("connection %s field %s: %w", entry.Key, path, err)
+		}
+		if sources[path].Kind == "node_certificate" && path == "/tls/certificate_binding" {
+			applyCertificateFields(options, value)
+			continue
+		}
+		if err := setOption(options, path, value, false); err != nil {
+			return err
+		}
+	}
+	for _, path := range removals {
+		if err := setOption(options, path, nil, true); err != nil {
+			return err
+		}
+	}
+	if err := validateResolvedOptions(*entry, options); err != nil {
+		return err
+	}
+	body, err := json.Marshal(options)
+	entry.Options = body
+	if err != nil {
+		return err
+	}
+	entry.Sources = nil
+	return nil
 }
