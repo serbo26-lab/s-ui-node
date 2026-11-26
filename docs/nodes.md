@@ -58,12 +58,8 @@ manual deployment operation.
 
 Node inbounds have `node_id`, `tag`, `type`, `enable`, `options` (server protocol
 options) and `client_tls` (public client TLS options). Supported types are
-VLESS/TUIC/Hysteria2. Real traffic has been checked for all three with strict
-TLS. The original automated standalone Windows sing-box probe timed out;
-the Linux probe passed. On 2026-11-12 the user reported successful TUIC tests
-in three networks, including the development network. A general Windows/network
-restriction is not established. The automated timeout's cause remains unknown;
-the user's client engine/version was not reported.
+VLESS/TUIC/Hysteria2 on this legacy path. The complete schema 1 catalog is
+listed in [nodes-model.md](nodes-model.md).
 Users/type/runtime tag are owned by the compiler. Inbound IDs remain fixed when
 editing; moving one to another node requires creating a new record. Tags may
 repeat on different nodes. An existing inbound cannot change protocol in place.
@@ -188,9 +184,10 @@ retries deployment, not forced certificate renewal. Full per-provider job/error
 history and manual force-renew are not implemented; details remain in protected
 agent logs.
 
-SSH installation, updating/rollback, and two-remote-node acceptance remain
-later stages. DNS/challenge routing and firewall policy still need review for
-the chosen deployment.
+For the current SSH installer, managed DNS/certificates, agent updates and
+firewall ownership, use [node-installer.md](node-installer.md) and
+[node-resources.md](node-resources.md). The provider details above describe
+the retained legacy configuration path.
 
 The Nodes screen manages nodes, templates and node inbounds, with confirmed,
 pending, offline and error states. Narrow screens use lists with visible actions.

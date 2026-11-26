@@ -5,8 +5,9 @@ a VPS through the [SSH installer](nodes-quickstart.md). Open the node from its
 card to manage its server access, recovery, and configuration. Existing legacy
 records keep their working assignments and appear with a migration notice.
 
-1. In **Inbound templates**, create a VLESS, TUIC or Hysteria2 inbound using
-   the protocol, Listen, Transport, Multiplex and TLS editors. Select a stable
+1. In **Inbound templates**, create one of the supported client proxy inbounds
+   listed in [nodes-model.md](nodes-model.md), using its protocol, Listen,
+   Transport, Multiplex and TLS editors where applicable. Select a stable
    per-node port or an explicit port, and the node domain or a manual SNI.
    Certificates and REALITY keys belong to each node, not to the template.
 2. Open a converted node. Set its domain and certificate under **Server**,

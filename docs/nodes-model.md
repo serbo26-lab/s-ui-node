@@ -21,7 +21,7 @@ controlled transition.
 - A whole-node assignment includes all enabled connections of that node.
 - New connections are published only from confirmed applied state.
 - Credentials already stored for the client are preserved; missing credentials
-  for VLESS, TUIC and Hysteria2 are prepared when assigning a whole node.
+  for the enabled agent capabilities are prepared when assigning a whole node.
 - Removing/re-adding a node retains and increments its grant generation.
 - Changes enqueue durable access intent. The v2 access worker runs independently
   of structural compilation and provisioning jobs.
@@ -101,8 +101,9 @@ corruption is an error and never triggers fallback to the old v1 ACL.
 
 Back up the complete agent state directory, including `state-v2.json` and
 certificate files. Replacing the OS without the v2 state changes the epoch and
-requires the forthcoming explicit installer recovery workflow. Automated
-downgrade, new-model OS recovery and IP handover are not implemented by R2.
+requires explicit [installer recovery](node-installer.md). Recovery and IP
+handover use pinned SSH and a fresh bootstrap receipt; automatic downgrade
+to a prior agent remains unsupported.
 Do not downgrade to the old agent against an obsolete `last-good.json`.
 
 ## Template versions
@@ -118,7 +119,11 @@ For schema 1, submit `name` and a `spec` object; edits also require `id` and
   `options` and optional `sources`;
 - a numeric `listen_port`, or a source bound to `/listen_port`.
 
-Protocols are limited to `vless`, `tuic` and `hysteria2`. A key's protocol cannot
+Supported client proxy inbounds are `vless`, `tuic`, `hysteria2`, `vmess`,
+`trojan`, `anytls`, `shadowsocks`, `snell`, `shadowtls`, `hysteria`, `naive`,
+`http`, `socks` and `mixed`, subject to the installed agent capabilities.
+Protocol-specific transport and TLS options follow the pinned sing-box core.
+REALITY is available for VLESS, not QUIC protocols. A key's protocol cannot
 change, including after the entry was removed in an intervening version.
 Server keys, certificates and client users are not inline template literals.
 
@@ -154,8 +159,9 @@ queues durable structural work. Binding a node reads the latest version inside
 its transaction. Per-node `template_target_version`,
 `materialized_template_version` and `applied_template_version` distinguish saved,
 resolved and acknowledged state. Runtime revisions remain independent from
-template versions. The old installer rejects live nodes until the new installer
-workflow is integrated; it cannot overwrite them using protocol presets.
+template versions. The model 2 [installer](node-installer.md) supports live
+nodes; the old installer rejects them instead of overwriting their selection
+with protocol presets.
 
 Materialization resolves node parameters and explicit overrides, allocates
 stable REALITY material and optional ports, and persists it before delivery.
@@ -163,8 +169,9 @@ Generated values use the external panel state key and are bound to node/key/
 purpose. TCP and UDP reservations are separate and use the installation IP, or
 management hostname for manually managed nodes. Aliases of the same host and
 ports occupied by unrelated services still require installer-side inspection.
-Missing certificate/profile resources keep last-good; the new resource managers
-are a later stage, and resource names are never treated as certificate contents.
+Missing certificate/profile resources keep last-good. Independent
+[resource workers](node-resources.md) prepare and confirm the requested
+material; resource names are never treated as certificate contents.
 
 Renaming/reordering a connection preserves its NodeInbound ID and server tag.
 Removed entries become retired records; their overrides are archived, not

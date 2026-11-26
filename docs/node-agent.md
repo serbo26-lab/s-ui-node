@@ -85,9 +85,11 @@ Each rebuilt instance has a fresh cancellable context. Stopping it cancels its
 asynchronous certificate-provider jobs, so a retired ACME job cannot continue
 using a closed DNS/HTTP manager. Hot user changes keep the provider context.
 
-ACME runs on the agent with persistent private storage under `--state`, separate
-from management TLS. See [nodes.md](nodes.md) for path rules, public certificate
-diagnostics, subscription readiness and the limits of the renewal tests.
+Certificate resources are separate from management TLS. HTTP-01 issuance and
+remote file validation run on the agent; managed DNS-01 issuance runs on the
+panel so the DNS credential stays there. See [node-resources.md](node-resources.md)
+for resource methods, path rules and subscription readiness. Legacy builtin
+providers remain a compatibility path.
 
 `state-v2.json` contains last-good structure, latest durable access and applied
 access, with a checksum. Updates use a temporary 0600 file in a 0700 directory,
@@ -97,17 +99,18 @@ after the applied checkpoint succeeds. Failure never restores an older ACL.
 On first v2 start only, the same state directory's `last-good.json` can be
 imported with exact v1 scope/credentials/expiry. An existing malformed v2 state
 is an error; the agent never falls back to obsolete v1 permissions. Back up the
-whole state directory and upgrade the panel before the agent. Automated
-downgrade and OS-reinstall recovery for the new epoch model remain later work.
+whole state directory and upgrade the panel before the agent. Managed agents
+follow the panel's pinned sing-box version and update through the saved SSH
+identity. OS-reinstall recovery uses the explicit [installer](node-installer.md)
+workflow; automatic downgrade remains unsupported.
 
 There is no heartbeat deadline that shuts down the VPN. Known absolute user
 expiries are checked locally once per second. A new central revocation while the
 controller is unreachable can only arrive after reconnection. Per-client traffic
 is counted towards the shared panel quota after the controller receives it.
 
-The v2 Linux checks include real VLESS traffic, existing-session closure,
-explicit re-enable and agent-manager restart, plus injected structural/runtime/
-checkpoint failures and mTLS panel integration. The new model's TUIC/Hysteria2
-session lifecycle, real blocked ACME provider, full host reboot, hard power loss
-and installer recovery require subsequent server acceptance. Earlier prototype
-checks do not establish these properties for v2.
+The automated checks cover access/session revocation, restart recovery,
+structural/runtime/checkpoint failures and mTLS integration. Graceful restarts
+and forced power loss have different guarantees; the traffic ledger can lose
+bytes since its latest durable checkpoint. See [maintenance](nodes-maintenance.md)
+for shared-quota and offline behavior.

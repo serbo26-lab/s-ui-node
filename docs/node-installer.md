@@ -15,8 +15,7 @@ POST form field `data` contains JSON:
   "ssh_port": 22,
   "ssh_user": "root",
   "password": "<bootstrap password>",
-  "protocols": ["vless", "tuic", "hysteria2"],
-  "template_id": 0,
+  "inbound_template_ids": [1, 2],
   "domain": {
     "mode": "managed",
     "profile_id": 1,
@@ -26,6 +25,10 @@ POST form field `data` contains JSON:
   }
 }
 ```
+
+The UI selects reusable inbound templates by `inbound_template_ids`; an empty
+selection creates a node without VPN listeners. The optional `protocols` and
+`template_id` fields remain API compatibility paths.
 
 The request key contains 16–96 letters, digits, underscores or hyphens. The same
 key and intent return the original job; a different intent conflicts. An explicit
@@ -41,7 +44,7 @@ Job checkpoints precede remote mutations. Password is not persisted; an unfinish
 first login may need re-entry. Later stages resume with the encrypted dedicated
 key. A committed job verifies its recorded identity before continuing.
 
-Stages: `ssh`, `inspect`, `ssh_key`, `upload`, `retire`,
+Stages: `ssh`, `preflight`, `dependencies`, `inspect`, `ssh_key`, `upload`, `retire`,
 `install`, `register`, `verify`, `certificate`, `ready`.
 A real key-only login and all planned listeners are checked before fencing the
 old service. Only suffix-owned services, paths and key markers are changed.
@@ -69,8 +72,22 @@ may be excluded. The coherent SQLite snapshot preserves sequence high-water valu
 
 `POST .../importdb` accepts multipart field `db` containing SQLite or ZIP.
 Archive/key validation precedes the live DB swap. A durable restore journal rolls
-back an incomplete DB/key pair or validates a completed pair at startup. Newer
-live-agent access revisions reject an old panel backup.
+back an incomplete DB/key pair or validates a completed pair at startup. Before
+replacing an existing panel database, `node_backup_state_stale` rejects a backup
+that forgets newer settings, structural/access/certificate intent or a different
+node registration already known to that panel. A later acknowledgement of the
+same desired intent does not invalidate the copy. The current database/key
+remain installed when validation fails.
+
+Each download reads a new coherent database snapshot; it includes the latest
+committed node settings, template targets, desired/applied access, resources
+and traffic cursors even while remote application is pending. It cannot include
+changes made after that snapshot. Save a new full backup after changing access.
+
+On a new panel without local history, a reachable agent still rejects an older
+access revision. Do not reset its epoch or edit revision numbers to force a
+restore. Recover from a sufficiently recent full backup or reconcile the
+authoritative checkpoints as an explicit operator recovery.
 
 Actionable errors include `node_settings_version_conflict`,
 `node_listener_port_occupied`, `ssh_key_verification_failed`,

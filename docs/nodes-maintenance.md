@@ -1,5 +1,18 @@
 # Node maintenance
 
+## Backup and restore
+
+Download a new full backup after changing node settings or client access.
+Every download uses a fresh coherent database snapshot, including pending node
+settings, template versions, access, certificate resources and traffic cursors.
+The ZIP also carries the node recovery key; do not publish it.
+
+Before replacing an existing database, the panel rejects an older or conflicting
+node checkpoint with `node_backup_state_stale`. This preserves the current
+database and key. A later agent acknowledgement of the same saved intent does
+not count as a conflict. See [installer backup](node-installer.md#backup) for
+restore checks and recovery on a replacement panel without local history.
+
 ## Control certificates
 
 For nodes managed by the SSH installer (model 2), the panel checks the control
