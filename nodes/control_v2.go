@@ -107,6 +107,9 @@ func getStatusV2(ctx context.Context, client *http.Client, node model.Node) (nod
 	if err := recordV2Health(node, status); err != nil {
 		return status, err
 	}
+	if status.Error == errTrafficAccounting.Error() {
+		return status, errTrafficAccounting
+	}
 	if err := recordClientActivity(database.GetDB(), node, status.Traffic, time.Now()); err != nil {
 		logger.Warning("could not record node client activity")
 	}

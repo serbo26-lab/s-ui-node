@@ -392,7 +392,7 @@ func inspectChangedListeners(ctx context.Context, db *gorm.DB, node model.Node) 
 }
 
 func listenerFailureCode(failure error) string {
-	for _, code := range []error{errListenerOccupied, errListenerReserved, errAutoPortsExhausted, errPortInspection, errRealityHandshakeLoop, errNodeDetour, errNodeFirewall} {
+	for _, code := range []error{errListenerOccupied, errListenerReserved, errAutoPortsExhausted, errPortInspection, errRealityHandshakeLoop, errNodeDetour, errNodeFirewall, errTrafficAccounting} {
 		if errors.Is(failure, code) {
 			return code.Error()
 		}

@@ -1,6 +1,7 @@
 package nodes
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"time"
@@ -11,6 +12,8 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
+
+var errTrafficAccounting = errors.New("traffic_accounting_failed")
 
 func clientTrafficID(client model.Client) string {
 	return fmt.Sprintf("%d:%d", client.Id, client.CreatedAt)

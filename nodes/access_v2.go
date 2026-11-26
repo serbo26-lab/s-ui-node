@@ -259,7 +259,7 @@ func ReconcileAccess(ctx context.Context, id uint) (failure error) {
 		if failure != nil {
 			code := "access_delivery_failed"
 			switch failure.Error() {
-			case "access_state_rollback_detected", "access_state_rollback_or_conflict_detected", "agent_epoch_changed_recovery_required":
+			case "access_state_rollback_detected", "access_state_rollback_or_conflict_detected", "agent_epoch_changed_recovery_required", "traffic_accounting_failed":
 				code = failure.Error()
 			}
 			_ = db.Transaction(func(tx *gorm.DB) error {

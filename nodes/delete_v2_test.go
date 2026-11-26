@@ -22,6 +22,7 @@ func TestV2NodeDeletionRemovesGrantsAndControlState(t *testing.T) {
 	rows := []interface{}{
 		&model.ClientNode{NodeId: node.Id, ClientId: client.Id, Active: true},
 		&model.NodeAccessState{NodeId: node.Id, DesiredRevision: 2},
+		&model.NodeClientTraffic{NodeId: node.Id, ClientId: client.Id, Ledger: "11111111-1111-4111-8111-111111111111", Up: 10, Down: 20},
 		&model.NodeTask{NodeId: node.Id, Kind: "access"},
 		&model.NodeOverride{NodeId: node.Id, ConnectionKey: "one", Path: "/listen_port"},
 		&model.NodeGeneratedMaterial{NodeId: node.Id, ConnectionKey: "one", Purpose: "key"},

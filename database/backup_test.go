@@ -42,6 +42,7 @@ func seedEveryTable(t *testing.T) {
 		&model.NodeJob{Id: "fixture-job", NodeId: 1, State: "complete", Events: json.RawMessage(`[]`)},
 		&model.NodeAutomation{Id: 1, DomainSuffix: "nodes.example.com", DNSToken: "fixture-encrypted-token"},
 		&model.ClientNode{ClientId: 1, NodeId: 1, Active: true, Generation: 3},
+		&model.NodeClientTraffic{NodeId: 1, ClientId: 1, Ledger: "11111111-1111-4111-8111-111111111111", Up: 10, Down: 20},
 		&model.NodeTemplateVersion{TemplateId: 1, Version: 1, SchemaVersion: 1, Digest: "fixture-digest", Payload: json.RawMessage(`{"schema_version":1,"config":{},"entries":[]}`)},
 		&model.NodeOverride{NodeId: 1, ConnectionKey: "fixture-entry", Path: "/tls/server_name", Operation: "set", Source: json.RawMessage(`{"kind":"node_parameter","name":"primary_domain"}`)},
 		&model.NodeGeneratedMaterial{NodeId: 1, ConnectionKey: "fixture-entry", Purpose: "reality_private_key", EncryptedValue: "fixture-ciphertext"},
