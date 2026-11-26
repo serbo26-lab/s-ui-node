@@ -192,9 +192,6 @@ func (files restoreFiles) installDatabase(suppliedKey []byte, replaceKey bool) e
 	if err := validateNodeBackupKey(files.path(tempName), selectedKey); err != nil {
 		return err
 	}
-	if err := validateNodeRestoreState(files.path(tempName)); err != nil {
-		return err
-	}
 	fallback := fmt.Sprintf("%s.backup-%d", files.database, time.Now().UnixNano())
 	journal := backupPairJournal{Version: 1, Fallback: fallback, OldKey: keyErr == nil}
 	if replaceKey {

@@ -7,11 +7,11 @@ Every download uses a fresh coherent database snapshot, including pending node
 settings, template versions, access, certificate resources and traffic cursors.
 The ZIP also carries the node recovery key; do not publish it.
 
-Before replacing an existing database, the panel rejects an older or conflicting
-node checkpoint with `node_backup_state_stale`. This preserves the current
-database and key. A later agent acknowledgement of the same saved intent does
-not count as a conflict. See [installer backup](node-installer.md#backup) for
-restore checks and recovery on a replacement panel without local history.
+Restoring a valid backup replaces the panel's saved state with the archived
+state. Higher node revisions in the destination database do not block import.
+An older supported database is migrated to the current panel version; the full
+ZIP carries the key needed on a fresh panel. See
+[installer backup](node-installer.md#backup) for integrity and key checks.
 
 ## Control certificates
 

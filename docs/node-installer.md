@@ -72,15 +72,14 @@ may be excluded. The coherent SQLite snapshot preserves sequence high-water valu
 
 `POST .../importdb` accepts multipart field `db` containing SQLite or ZIP.
 Archive/key validation precedes the live DB swap. A durable restore journal rolls
-back an incomplete DB/key pair or validates a completed pair at startup. Before
-replacing an existing panel database, `node_backup_state_stale` rejects a backup
-that forgets newer settings, structural/access/certificate intent or a different
-node registration already known to that panel. A later acknowledgement of the
-same desired intent does not invalidate the copy. The current database/key
-remain installed when validation fails.
+back an incomplete DB/key pair or validates a completed pair at startup.
+Import does not compare node revisions against the destination database:
+restoration deliberately installs the archived state. Supported older database
+versions follow the normal S-UI migration chain, including on a fresh panel.
 
-Each download reads a new coherent database snapshot; it includes the latest
-committed node settings, template targets, desired/applied access, resources
+Each download disables HTTP caching and reads a new coherent database snapshot;
+it includes the latest committed node settings, template targets,
+desired/applied access, resources
 and traffic cursors even while remote application is pending. It cannot include
 changes made after that snapshot. Save a new full backup after changing access.
 

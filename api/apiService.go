@@ -291,6 +291,7 @@ func (a *ApiService) Upgrade(c *gin.Context) {
 }
 
 func (a *ApiService) GetDb(c *gin.Context) {
+	c.Header("Cache-Control", "no-store")
 	exclude := c.Query("exclude")
 	if c.Query("format") == "archive" {
 		body, err := database.GetFullBackup(exclude)
