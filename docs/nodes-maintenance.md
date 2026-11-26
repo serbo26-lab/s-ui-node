@@ -49,3 +49,23 @@ current access list. Supported inbounds continue to use in-place updates.
 
 A rejected certificate activation retains the active certificate. A successful
 retry clears that activation error without hiding a newer resource error.
+
+## Removing a reinstalled server
+
+Disable the old node record first. If the OS was reinstalled or the agent was
+stopped manually, its shutdown acknowledgement cannot arrive. The delete dialog
+offers a separate confirmation for that case. Confirm only after stopping the
+old server: removing a record cannot stop a disconnected agent.
+
+This confirmation does not bypass active installation/resource jobs, unfinished
+retirement of another server or DNS ownership checks. Deletion removes the
+saved SSH identity, grants and control state. Adding the same address later
+creates a fresh identity and does not inherit the deleted node's assignments.
+
+## Client Last online
+
+Node agents sample authenticated user traffic every second, including while
+the panel is unreachable. The panel merges that activity into the existing
+client Last online timestamp when communication resumes. Older observations
+cannot move the timestamp backwards. User activity is recorded independently
+of traffic-chart settings and does not add remote traffic to local quota.

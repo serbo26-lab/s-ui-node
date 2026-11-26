@@ -325,7 +325,7 @@ func Save(object, action string, data json.RawMessage, actor string) error {
 				if len(installation.PreviousTarget) > 0 {
 					return errors.New("old_server_retirement_pending")
 				}
-				if !disableConfirmed(value) {
+				if !disableConfirmed(value) && (value.Enable || !deleteRequest.ServerAlreadyStopped) {
 					return errors.New("node_disable_pending_delete")
 				}
 				if !deleteRequest.DNSAlreadyRemoved {
@@ -611,7 +611,7 @@ func Save(object, action string, data json.RawMessage, actor string) error {
 			}
 		}
 		obj, _ := json.Marshal(map[string]uint{"id": id})
-		if deleteRequest.DNSAlreadyRemoved {
+		if deleteRequest.DNSAlreadyRemoved || deleteRequest.ServerAlreadyStopped {
 			obj, _ = json.Marshal(deleteRequest)
 		}
 		return tx.Create(&model.Changes{DateTime: time.Now().Unix(), Actor: actor, Key: object, Action: action, Obj: obj}).Error

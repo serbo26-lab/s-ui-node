@@ -130,6 +130,7 @@ func (r *CoreRuntime) apply(config []byte, rollback bool) error {
 	if r.core.IsRunning() && r.core.GetCtx().Err() == nil && sameExceptUsers(previous, config) {
 		if err := r.updateUsers(config); err == nil {
 			r.config = append([]byte(nil), config...)
+			r.pruneActivity()
 			return nil
 		} else if !errors.Is(err, errHotUsersUnsupported) {
 			// A multi-inbound update can fail after one success; rebuild the
@@ -153,6 +154,7 @@ func (r *CoreRuntime) apply(config []byte, rollback bool) error {
 		return err
 	}
 	r.config = append([]byte(nil), config...)
+	r.pruneActivity()
 	return nil
 }
 

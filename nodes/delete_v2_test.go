@@ -63,6 +63,35 @@ func TestV2NodeDeletionRemovesGrantsAndControlState(t *testing.T) {
 	}
 }
 
+func TestNodeDeletionAfterReinstallRequiresDisabledNodeAndExplicitConfirmation(t *testing.T) {
+	db, node, _ := fixture(t)
+	request := json.RawMessage(`{"id":1,"server_already_stopped":true}`)
+	if err := DeleteNode(t.Context(), request, "unit"); err == nil || err.Error() != "node_disable_pending_delete" {
+		t.Fatal("manual stop confirmation bypassed the enabled-node guard", err)
+	}
+	if err := db.Model(&node).Update("enable", false).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := DeleteNode(t.Context(), json.RawMessage(`1`), "unit"); err == nil || err.Error() != "node_disable_pending_delete" {
+		t.Fatal("unacknowledged node disappeared without confirmation", err)
+	}
+	if err := DeleteNode(t.Context(), request, "unit"); err != nil {
+		t.Fatal(err)
+	}
+	var remaining int64
+	if err := db.Model(&model.Node{}).Where("id = ?", node.Id).Count(&remaining).Error; err != nil || remaining != 0 {
+		t.Fatal("confirmed deleted OS node remains", err)
+	}
+	var audit model.Changes
+	if err := db.Where("key = ? AND action = ?", "nodes", "del").Last(&audit).Error; err != nil {
+		t.Fatal(err)
+	}
+	var recorded nodeDeleteRequest
+	if json.Unmarshal(audit.Obj, &recorded) != nil || !recorded.ServerAlreadyStopped {
+		t.Fatal("manual stop confirmation was not audited")
+	}
+}
+
 func TestV2NodeDeletionWaitsForOldHostAndProvisioning(t *testing.T) {
 	db, node, _ := fixture(t)
 	node.Enable = false

@@ -38,7 +38,8 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	manager := nodeagent.NewManagerV2(*nodeID, nodeagent.FileStoreV2{Directory: *state}, nodeagent.NewCoreRuntimeWithState(*state))
+	runtime := nodeagent.NewCoreRuntimeWithState(*state)
+	manager := nodeagent.NewManagerV2(*nodeID, nodeagent.FileStoreV2{Directory: *state}, runtime)
 	manager.RequireBootstrap(*bootstrap)
 	if err := manager.Restore(nodeagent.FileStore{Directory: *state}); err != nil {
 		log.Fatal(err)
@@ -56,6 +57,7 @@ func main() {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
+				runtime.SampleTraffic()
 				if err := manager.Refresh(); err != nil {
 					log.Print("could not apply known expiry")
 				}
