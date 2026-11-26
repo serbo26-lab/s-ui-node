@@ -38,17 +38,8 @@ func wholeNodeSelection(tx *gorm.DB, client *model.Client) ([]uint, error) {
 	if err != nil {
 		return nil, err
 	}
-	if client.Id != 0 && client.NodeInbounds != nil {
-		var inProgress int64
-		if err := tx.Model(&model.ClientNodeInbound{}).Joins("JOIN node_inbounds AS ni ON ni.id = client_node_inbounds.node_inbound_id").Joins("JOIN nodes ON nodes.id = ni.node_id").Where("client_id = ? AND nodes.assignment_mode = ?", client.Id, model.NodeAssignmentActivating).Count(&inProgress).Error; err != nil {
-			return nil, err
-		}
-		if inProgress > 0 {
-			echo, err := nodeIDList(client.NodeInbounds)
-			if err != nil || !reflect.DeepEqual(echo, projection) {
-				return nil, errors.New("migration_in_progress")
-			}
-		}
+	if err := validateMigrationEcho(tx, client, projection); err != nil {
+		return nil, err
 	}
 	selected := previous
 	if client.Nodes != nil {
@@ -56,17 +47,8 @@ func wholeNodeSelection(tx *gorm.DB, client *model.Client) ([]uint, error) {
 		if err != nil {
 			return nil, err
 		}
-		if legacy {
-			return nil, errors.New("remote_assignment_migration_required")
-		}
-		if len(selected) > 0 {
-			var count int64
-			if err := tx.Model(&model.Node{}).Where("id IN ? AND assignment_mode = ?", selected, model.NodeAssignmentWhole).Count(&count).Error; err != nil {
-				return nil, err
-			}
-			if count != int64(len(selected)) {
-				return nil, errors.New("unknown_node_or_assignment_migration_required")
-			}
+		if err := validateWholeNodeSelection(tx, selected, legacy); err != nil {
+			return nil, err
 		}
 	}
 	var canonicalRows int64
@@ -139,4 +121,36 @@ func DeleteClientAssignments(tx *gorm.DB, ids []uint) error {
 		return nil
 	}
 	return tx.Where("client_id IN ?", ids).Delete(&model.ClientNodeInbound{}).Error
+}
+
+func validateMigrationEcho(tx *gorm.DB, client *model.Client, projection []uint) error {
+	if client.Id != 0 && client.NodeInbounds != nil {
+		var inProgress int64
+		if err := tx.Model(&model.ClientNodeInbound{}).Joins("JOIN node_inbounds AS ni ON ni.id = client_node_inbounds.node_inbound_id").Joins("JOIN nodes ON nodes.id = ni.node_id").Where("client_id = ? AND nodes.assignment_mode = ?", client.Id, model.NodeAssignmentActivating).Count(&inProgress).Error; err != nil {
+			return err
+		}
+		if inProgress > 0 {
+			echo, err := nodeIDList(client.NodeInbounds)
+			if err != nil || !reflect.DeepEqual(echo, projection) {
+				return errors.New("migration_in_progress")
+			}
+		}
+	}
+	return nil
+}
+
+func validateWholeNodeSelection(tx *gorm.DB, selected []uint, legacy bool) error {
+	if legacy {
+		return errors.New("remote_assignment_migration_required")
+	}
+	if len(selected) > 0 {
+		var count int64
+		if err := tx.Model(&model.Node{}).Where("id IN ? AND assignment_mode = ?", selected, model.NodeAssignmentWhole).Count(&count).Error; err != nil {
+			return err
+		}
+		if count != int64(len(selected)) {
+			return errors.New("unknown_node_or_assignment_migration_required")
+		}
+	}
+	return nil
 }

@@ -99,42 +99,9 @@ func saveVersionedTemplate(tx *gorm.DB, value *model.NodeTemplate, old model.Nod
 	}
 	// A retired key keeps its protocol identity even after a version in which
 	// the entry is absent. Restoring history must not reuse a VLESS key for TUIC.
-	prior := &TemplateSpec{}
-	if old.Id != 0 {
-		var history []model.NodeTemplateVersion
-		if err := tx.Where(whereTemplateID, old.Id).Order("version").Find(&history).Error; err != nil {
-			return false, err
-		}
-		for _, version := range history {
-			if version.SchemaVersion == 1 {
-				var previous TemplateSpec
-				if err := json.Unmarshal(version.Payload, &previous); err != nil {
-					return false, err
-				}
-				prior.Entries = append(prior.Entries, previous.Entries...)
-			} else {
-				var previous struct {
-					Blueprints []Blueprint `json:"blueprints"`
-				}
-				if err := json.Unmarshal(version.Payload, &previous); err != nil {
-					return false, err
-				}
-				for _, entry := range previous.Blueprints {
-					prior.Entries = append(prior.Entries, SpecEntry{Key: entry.Key, Protocol: entry.Type})
-				}
-			}
-		}
-		if old.Version == 0 {
-			var previous []Blueprint
-			if len(old.Blueprints) > 0 {
-				if err := json.Unmarshal(old.Blueprints, &previous); err != nil {
-					return false, err
-				}
-			}
-			for _, entry := range previous {
-				prior.Entries = append(prior.Entries, SpecEntry{Key: entry.Key, Protocol: entry.Type})
-			}
-		}
+	prior, err := priorTemplateProtocols(tx, old)
+	if err != nil {
+		return false, err
 	}
 	spec, err := NormalizeSpec(request.Spec, prior)
 	if err != nil {
@@ -148,45 +115,13 @@ func saveVersionedTemplate(tx *gorm.DB, value *model.NodeTemplate, old model.Nod
 			return false, err
 		}
 	}
-	if old.Id != 0 {
-		value.Kind = old.Kind
-	}
-	if value.Kind == inboundTemplate {
-		if len(spec.Entries) != 1 {
-			return false, errors.New("one_inbound_per_template")
-		}
-		if old.Id != 0 {
-			previous, err := templateSpec(tx, old)
-			if err != nil {
-				return false, err
-			}
-			if len(previous.Entries) != 1 || previous.Entries[0].Key != spec.Entries[0].Key {
-				return false, errors.New("node_inbound_template_key_immutable")
-			}
-		}
-		value.Name, value.Protocol = spec.Entries[0].Name, spec.Entries[0].Protocol
+	if err := updateInboundTemplateIdentity(tx, value, old, spec); err != nil {
+		return false, err
 	}
 	value.SchemaVersion = 1
 	value.Version = old.Version
-	if old.Id != 0 {
-		value.Scope, value.OwnerNodeId, value.ParentTemplateId = old.Scope, old.OwnerNodeId, old.ParentTemplateId
-	}
-	if value.Scope == "" {
-		value.Scope = "shared"
-	}
-	if value.Scope != "shared" && value.Scope != "private" {
-		return false, errors.New("invalid_template_scope")
-	}
-	if value.Scope == "private" {
-		var owner model.Node
-		if value.OwnerNodeId == 0 {
-			return false, errors.New("private_template_owner_required")
-		}
-		if err := tx.First(&owner, value.OwnerNodeId).Error; err != nil {
-			return false, err
-		}
-	} else {
-		value.OwnerNodeId = 0
+	if err := updateTemplateScope(tx, value, old); err != nil {
+		return false, err
 	}
 	// Old materialized nodes keep their exact base until the controlled rollout.
 	if old.Id != 0 {
@@ -240,4 +175,98 @@ func ReadTemplateVersion(id uint, version uint64) (TemplateVersionView, error) {
 		view.Spec = append(json.RawMessage(nil), row.Payload...)
 	}
 	return view, nil
+}
+
+func priorTemplateProtocols(tx *gorm.DB, old model.NodeTemplate) (*TemplateSpec, error) {
+	prior := &TemplateSpec{}
+	if old.Id != 0 {
+		var history []model.NodeTemplateVersion
+		if err := tx.Where(whereTemplateID, old.Id).Order("version").Find(&history).Error; err != nil {
+			return nil, err
+		}
+		for _, version := range history {
+			if err := appendPriorTemplateProtocols(prior, version); err != nil {
+				return nil, err
+			}
+		}
+		if old.Version == 0 {
+			var previous []Blueprint
+			if len(old.Blueprints) > 0 {
+				if err := json.Unmarshal(old.Blueprints, &previous); err != nil {
+					return nil, err
+				}
+			}
+			for _, entry := range previous {
+				prior.Entries = append(prior.Entries, SpecEntry{Key: entry.Key, Protocol: entry.Type})
+			}
+		}
+	}
+	return prior, nil
+}
+
+func appendPriorTemplateProtocols(prior *TemplateSpec, version model.NodeTemplateVersion) error {
+	if version.SchemaVersion == 1 {
+		var previous TemplateSpec
+		if err := json.Unmarshal(version.Payload, &previous); err != nil {
+			return err
+		}
+		prior.Entries = append(prior.Entries, previous.Entries...)
+	} else {
+		var previous struct {
+			Blueprints []Blueprint `json:"blueprints"`
+		}
+		if err := json.Unmarshal(version.Payload, &previous); err != nil {
+			return err
+		}
+		for _, entry := range previous.Blueprints {
+			prior.Entries = append(prior.Entries, SpecEntry{Key: entry.Key, Protocol: entry.Type})
+		}
+	}
+	return nil
+}
+
+func updateInboundTemplateIdentity(tx *gorm.DB, value *model.NodeTemplate, old model.NodeTemplate, spec TemplateSpec) error {
+	if old.Id != 0 {
+		value.Kind = old.Kind
+	}
+	if value.Kind == inboundTemplate {
+		if len(spec.Entries) != 1 {
+			return errors.New("one_inbound_per_template")
+		}
+		if old.Id != 0 {
+			previous, err := templateSpec(tx, old)
+			if err != nil {
+				return err
+			}
+			if len(previous.Entries) != 1 || previous.Entries[0].Key != spec.Entries[0].Key {
+				return errors.New("node_inbound_template_key_immutable")
+			}
+		}
+		value.Name, value.Protocol = spec.Entries[0].Name, spec.Entries[0].Protocol
+	}
+	return nil
+}
+
+func updateTemplateScope(tx *gorm.DB, value *model.NodeTemplate, old model.NodeTemplate) error {
+	if old.Id != 0 {
+		value.Scope, value.OwnerNodeId, value.ParentTemplateId = old.Scope, old.OwnerNodeId, old.ParentTemplateId
+	}
+	if value.Scope == "" {
+		value.Scope = "shared"
+	}
+	if value.Scope != "shared" && value.Scope != "private" {
+		return errors.New("invalid_template_scope")
+	}
+	if value.Scope == "private" {
+		var owner model.Node
+		if value.OwnerNodeId == 0 {
+			return errors.New("private_template_owner_required")
+		}
+		if err := tx.First(&owner, value.OwnerNodeId).Error; err != nil {
+			return err
+		}
+	} else {
+		value.OwnerNodeId = 0
+	}
+	return nil
 }

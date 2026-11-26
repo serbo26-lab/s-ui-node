@@ -141,27 +141,8 @@ func (r *CertificateManager) Configure(request CertificateRequest) error {
 	if request.NodeID != r.nodeID || request.Epoch != r.epoch || request.Revision == 0 {
 		return ErrConflict
 	}
-	if request.Domain == "" || !strings.Contains(request.Domain, ".") || strings.ContainsAny(request.Domain, "/*\\ \t\r\n") || net.ParseIP(request.Domain) != nil {
-		return errors.New("invalid_certificate_domain")
-	}
-	switch request.Method {
-	case "install":
-		if _, err := nodecert.Validate(request.Bundle, request.Domain, r.roots, time.Now()); err != nil {
-			return err
-		}
-	case "http01":
-		if _, err := nodecert.Directory(request.CA); err != nil {
-			return err
-		}
-		if net.ParseIP(request.ExpectedIP) == nil {
-			return errors.New("http01_expected_ip_required")
-		}
-	case "remote_paths":
-		if !filepath.IsAbs(request.CertificatePath) || !filepath.IsAbs(request.KeyPath) {
-			return errors.New("certificate_paths_must_be_absolute_on_node")
-		}
-	default:
-		return errors.New("unsupported_certificate_method")
+	if err := r.validateRequest(request); err != nil {
+		return err
 	}
 	r.mu.Lock()
 	current := r.state.Config
@@ -316,21 +297,10 @@ func (r *CertificateManager) reconcile() {
 	}
 	ctx, cancel := context.WithTimeout(r.ctx, r.timeout)
 	r.jobCancel = cancel
-	if request.Method == "http01" && r.state.AccountKey == "" {
-		key, err := nodecert.NewAccountKey()
-		if err != nil {
-			r.mu.Unlock()
-			cancel()
-			return
-		}
-		next := r.state
-		next.AccountKey = key
-		if r.save(next) != nil {
-			r.mu.Unlock()
-			cancel()
-			return
-		}
-		r.state = next
+	if err := r.ensureAccountKey(request); err != nil {
+		r.mu.Unlock()
+		cancel()
+		return
 	}
 	account := r.state.AccountKey
 	r.mu.Unlock()
@@ -346,17 +316,7 @@ func (r *CertificateManager) reconcile() {
 		bundle = nodecert.Bundle{Certificate: string(cert), Key: string(key)}
 	}
 	if request.Method == "http01" {
-		addresses, lookupErr := r.lookup(ctx, request.Domain)
-		expected := net.ParseIP(request.ExpectedIP)
-		if lookupErr != nil || len(addresses) == 0 {
-			err = errors.New("http01_dns_not_resolved")
-		} else {
-			for _, address := range addresses {
-				if !address.IP.Equal(expected) {
-					err = errors.New("http01_dns_address_mismatch")
-				}
-			}
-		}
+		err = r.verifyHTTP01Address(ctx, request)
 		if err == nil {
 			solver := &nodecert.HTTP01{Address: r.httpAddress}
 			defer solver.Close()
@@ -430,4 +390,62 @@ func (r *CertificateManager) Close() {
 		r.jobCancel()
 	}
 	r.mu.Unlock()
+}
+
+func (r *CertificateManager) validateRequest(request CertificateRequest) error {
+	if request.Domain == "" || !strings.Contains(request.Domain, ".") || strings.ContainsAny(request.Domain, "/*\\ \t\r\n") || net.ParseIP(request.Domain) != nil {
+		return errors.New("invalid_certificate_domain")
+	}
+	switch request.Method {
+	case "install":
+		if _, err := nodecert.Validate(request.Bundle, request.Domain, r.roots, time.Now()); err != nil {
+			return err
+		}
+	case "http01":
+		if _, err := nodecert.Directory(request.CA); err != nil {
+			return err
+		}
+		if net.ParseIP(request.ExpectedIP) == nil {
+			return errors.New("http01_expected_ip_required")
+		}
+	case "remote_paths":
+		if !filepath.IsAbs(request.CertificatePath) || !filepath.IsAbs(request.KeyPath) {
+			return errors.New("certificate_paths_must_be_absolute_on_node")
+		}
+	default:
+		return errors.New("unsupported_certificate_method")
+	}
+	return nil
+}
+
+// The caller holds r.mu while updating durable account state.
+func (r *CertificateManager) ensureAccountKey(request CertificateRequest) error {
+	if request.Method == "http01" && r.state.AccountKey == "" {
+		key, err := nodecert.NewAccountKey()
+		if err != nil {
+			return err
+		}
+		next := r.state
+		next.AccountKey = key
+		if err := r.save(next); err != nil {
+			return err
+		}
+		r.state = next
+	}
+	return nil
+}
+
+func (r *CertificateManager) verifyHTTP01Address(ctx context.Context, request CertificateRequest) error {
+	addresses, lookupErr := r.lookup(ctx, request.Domain)
+	expected := net.ParseIP(request.ExpectedIP)
+	if lookupErr != nil || len(addresses) == 0 {
+		return errors.New("http01_dns_not_resolved")
+	} else {
+		for _, address := range addresses {
+			if !address.IP.Equal(expected) {
+				return errors.New("http01_dns_address_mismatch")
+			}
+		}
+	}
+	return nil
 }

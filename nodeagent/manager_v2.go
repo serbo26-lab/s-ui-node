@@ -83,49 +83,13 @@ func (m *ManagerV2) Restore(legacy Store) error {
 		return err
 	}
 	if state == nil {
-		id, err := uuid.NewV4()
+		state, err = m.createInitialState(legacy)
 		if err != nil {
 			return err
 		}
-		created := StateV2{NodeID: m.nodeID, Epoch: id.String()}
-		created.Access = AccessSnapshot{NodeID: m.nodeID, Epoch: created.Epoch, Clients: []Grant{}}
-		if legacy != nil {
-			d, err := legacy.Load()
-			if err != nil {
-				return err
-			}
-			if d != nil {
-				if d.NodeID != m.nodeID {
-					return ErrConflict
-				}
-				s, a, err := ImportV1(*d, created.Epoch)
-				if err != nil {
-					return err
-				}
-				created.Spec = &s
-				created.Access = a
-			}
-		}
-		if err := m.store.SaveV2(created); err != nil {
-			return err
-		}
-		state = &created
 	}
-	if state.NodeID != m.nodeID || state.Epoch == "" || state.Access.NodeID != m.nodeID || state.Access.Epoch != state.Epoch {
-		return ErrConflict
-	}
-	if state.Spec != nil {
-		if err := state.Spec.Validate(); err != nil {
-			return err
-		}
-		if state.Spec.NodeID != m.nodeID || state.Spec.Epoch != state.Epoch {
-			return ErrConflict
-		}
-	}
-	if state.Access.Revision > 0 {
-		if err := state.Access.Validate(); err != nil {
-			return err
-		}
+	if err := m.validateRestoredState(state); err != nil {
+		return err
 	}
 	m.mu.Lock()
 	m.state = cloneState(*state)
@@ -199,66 +163,13 @@ func (m *ManagerV2) applyCurrent(candidate *Structure) error {
 		}
 	}()
 	for {
-		m.mu.Lock()
-		state := cloneState(m.state)
-		m.mu.Unlock()
-		spec := state.Spec
-		if candidate != nil {
-			spec = candidate
-		}
-		var body []byte
-		var err error
-		if spec == nil {
-			err = m.runtime.Close()
-		} else {
-			body, err = Compose(*spec, state.Access, m.clock().Unix())
-			if err == nil {
-				err = m.runtime.Validate(body)
-			}
-			if err == nil && (!bytes.Equal(body, m.effective) || !m.runtime.Running()) {
-				err = m.applySafe(body, state.Access)
-			}
-		}
+		retry, err := m.applyCurrentRevision(candidate, &trial)
 		if err != nil {
 			return err
 		}
-		if accounting, ok := m.runtime.(interface{ SetTrafficAccess(AccessSnapshot) }); ok {
-			accounting.SetTrafficAccess(state.Access)
+		if !retry {
+			return nil
 		}
-		if trial {
-			if err := m.resources.FinishTrial(true); err != nil {
-				return err
-			}
-			trial = false
-		}
-		m.effective = append([]byte(nil), body...)
-		m.mu.Lock()
-		if state.Access.Digest() != m.state.Access.Digest() {
-			m.mu.Unlock()
-			continue
-		}
-		next := cloneState(m.state)
-		next.Spec = spec
-		applied := next.Access
-		next.AppliedAccess = &applied
-		if digestV2(next) != digestV2(m.state) {
-			if err := m.store.SaveV2(next); err != nil {
-				m.mu.Unlock()
-				return err
-			}
-		}
-		m.state = next
-		m.running = spec != nil && m.runtime.Running()
-		m.effective = append([]byte(nil), body...)
-		m.lastError = ""
-		m.mu.Unlock()
-		if reporter, ok := m.runtime.(interface{ Certificates() []CertificateStatus }); ok {
-			certs := reporter.Certificates()
-			m.mu.Lock()
-			m.certificates = certs
-			m.mu.Unlock()
-		}
-		return nil
 	}
 }
 
@@ -402,4 +313,129 @@ func (m *ManagerV2) Close() error {
 	m.running = false
 	m.mu.Unlock()
 	return err
+}
+
+func (m *ManagerV2) createInitialState(legacy Store) (*StateV2, error) {
+	id, err := uuid.NewV4()
+	if err != nil {
+		return nil, err
+	}
+	created := StateV2{NodeID: m.nodeID, Epoch: id.String()}
+	created.Access = AccessSnapshot{NodeID: m.nodeID, Epoch: created.Epoch, Clients: []Grant{}}
+	if err := m.importLegacyState(legacy, &created); err != nil {
+		return nil, err
+	}
+	if err := m.store.SaveV2(created); err != nil {
+		return nil, err
+	}
+	return &created, nil
+}
+
+func (m *ManagerV2) importLegacyState(legacy Store, created *StateV2) error {
+	if legacy != nil {
+		d, err := legacy.Load()
+		if err != nil {
+			return err
+		}
+		if d != nil {
+			if d.NodeID != m.nodeID {
+				return ErrConflict
+			}
+			s, a, err := ImportV1(*d, created.Epoch)
+			if err != nil {
+				return err
+			}
+			created.Spec = &s
+			created.Access = a
+		}
+	}
+	return nil
+}
+
+func (m *ManagerV2) validateRestoredState(state *StateV2) error {
+	if state.NodeID != m.nodeID || state.Epoch == "" || state.Access.NodeID != m.nodeID || state.Access.Epoch != state.Epoch {
+		return ErrConflict
+	}
+	if state.Spec != nil {
+		if err := state.Spec.Validate(); err != nil {
+			return err
+		}
+		if state.Spec.NodeID != m.nodeID || state.Spec.Epoch != state.Epoch {
+			return ErrConflict
+		}
+	}
+	if state.Access.Revision > 0 {
+		if err := state.Access.Validate(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (m *ManagerV2) applyStateRuntime(spec *Structure, access AccessSnapshot) ([]byte, error) {
+	var body []byte
+	var err error
+	if spec == nil {
+		err = m.runtime.Close()
+	} else {
+		body, err = Compose(*spec, access, m.clock().Unix())
+		if err == nil {
+			err = m.runtime.Validate(body)
+		}
+		if err == nil && (!bytes.Equal(body, m.effective) || !m.runtime.Running()) {
+			err = m.applySafe(body, access)
+		}
+	}
+	return body, err
+}
+
+func (m *ManagerV2) applyCurrentRevision(candidate *Structure, trial *bool) (bool, error) {
+	m.mu.Lock()
+	state := cloneState(m.state)
+	m.mu.Unlock()
+	spec := state.Spec
+	if candidate != nil {
+		spec = candidate
+	}
+	body, err := m.applyStateRuntime(spec, state.Access)
+	if err != nil {
+		return false, err
+	}
+	if accounting, ok := m.runtime.(interface{ SetTrafficAccess(AccessSnapshot) }); ok {
+		accounting.SetTrafficAccess(state.Access)
+	}
+	if *trial {
+		if err := m.resources.FinishTrial(true); err != nil {
+			return false, err
+		}
+		*trial = false
+	}
+	m.effective = append([]byte(nil), body...)
+	m.mu.Lock()
+	if state.Access.Digest() != m.state.Access.Digest() {
+		m.mu.Unlock()
+		return true, nil
+	}
+	next := cloneState(m.state)
+	next.Spec = spec
+	applied := next.Access
+	next.AppliedAccess = &applied
+	if digestV2(next) != digestV2(m.state) {
+		if err := m.store.SaveV2(next); err != nil {
+			m.mu.Unlock()
+			return false, err
+		}
+	}
+	m.state = next
+	m.running = spec != nil && m.runtime.Running()
+	m.effective = append([]byte(nil), body...)
+	m.lastError = ""
+	m.mu.Unlock()
+	if reporter, ok := m.runtime.(interface{ Certificates() []CertificateStatus }); ok {
+		certs := reporter.Certificates()
+		m.mu.Lock()
+		m.certificates = certs
+		m.mu.Unlock()
+	}
+	return false, nil
 }
