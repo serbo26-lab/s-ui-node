@@ -123,9 +123,6 @@ func managedCertificatesReady(node model.Node, protocols []string) bool {
 	if !node.Enable {
 		return true
 	}
-	if !node.Enable {
-		return true
-	}
 	expected := 0
 	for _, p := range protocols {
 		if p != "vless" {

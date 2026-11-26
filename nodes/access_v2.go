@@ -115,13 +115,7 @@ func ReconcileAccess(ctx context.Context, id uint) (failure error) {
 	if node.AgentProtocol != 2 {
 		return nil
 	}
-	if err := db.Transaction(func(tx *gorm.DB) error {
-		var current model.Node
-		if err := tx.First(&current, id).Error; err != nil {
-			return err
-		}
-		return tx.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "node_id"}, {Name: "kind"}}, DoNothing: true}).Create(&model.NodeTask{NodeId: id, Kind: "access", Generation: 1, State: "queued"}).Error
-	}); err != nil {
+	if err := ensureAccessTask(db, id); err != nil {
 		return err
 	}
 	var task model.NodeTask
@@ -382,4 +376,14 @@ func grantProtocolCredential(kind, name string, raw json.RawMessage) (json.RawMe
 		}
 	}
 	return raw, generated, true, nil
+}
+
+func ensureAccessTask(db *gorm.DB, id uint) error {
+	return db.Transaction(func(tx *gorm.DB) error {
+		var current model.Node
+		if err := tx.First(&current, id).Error; err != nil {
+			return err
+		}
+		return tx.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "node_id"}, {Name: "kind"}}, DoNothing: true}).Create(&model.NodeTask{NodeId: id, Kind: "access", Generation: 1, State: "queued"}).Error
+	})
 }

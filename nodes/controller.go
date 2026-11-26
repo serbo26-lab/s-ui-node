@@ -169,38 +169,9 @@ func Reconcile(ctx context.Context, id uint) (failure error) {
 		if err := ensureNodeFirewall(ctx, db, node, desired, false); err != nil {
 			return err
 		}
-		body, _ := json.Marshal(desired.Deployment)
-		put, err := http.NewRequestWithContext(ctx, http.MethodPut, node.Address+"/v1/deployment", bytes.NewReader(body))
+		status, err = sendLegacyDeployment(ctx, db, node, desired, client, &stage, status)
 		if err != nil {
 			return err
-		}
-		put.Header.Set("Content-Type", "application/json")
-		stage = "deployment_unreachable"
-		response, err = client.Do(put)
-		if err != nil {
-			return err
-		}
-		err = json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&status)
-		response.Body.Close()
-		stage = "deployment_rejected"
-		if response.StatusCode != 200 {
-			if response.StatusCode == http.StatusUnprocessableEntity {
-				if saveErr := db.Model(&model.Node{}).Where("id = ? AND desired_revision = ?", id, desired.Deployment.Revision).Update("rejected_revision", desired.Deployment.Revision).Error; saveErr != nil {
-					return saveErr
-				}
-				if cleanupErr := confirmLegacyNodeFirewall(ctx, db, node, status); cleanupErr != nil {
-					stage = errNodeFirewall.Error()
-					return cleanupErr
-				}
-			}
-			return fmt.Errorf("node rejected deployment: HTTP %d", response.StatusCode)
-		}
-		stage = "ack_mismatch"
-		if err != nil || status.Revision != desired.Deployment.Revision || status.Digest != desired.Deployment.Digest() || !status.Running {
-			return errors.New("node did not confirm the expected revision")
-		}
-		if status.NodeID != uint64(node.Id) || status.Protocol != nodeagent.ProtocolVersion {
-			return errors.New("node acknowledgement identity does not match")
 		}
 	}
 	stage = errNodeFirewall.Error()
@@ -262,4 +233,41 @@ func prepareDesired(db *gorm.DB, node model.Node, status nodeagent.Status) (Snap
 		return nil
 	})
 	return desired, err
+}
+
+func sendLegacyDeployment(ctx context.Context, db *gorm.DB, node model.Node, desired Snapshot, client *http.Client, stage *string, status nodeagent.Status) (nodeagent.Status, error) {
+	body, _ := json.Marshal(desired.Deployment)
+	put, err := http.NewRequestWithContext(ctx, http.MethodPut, node.Address+"/v1/deployment", bytes.NewReader(body))
+	if err != nil {
+		return status, err
+	}
+	put.Header.Set("Content-Type", "application/json")
+	*stage = "deployment_unreachable"
+	response, err := client.Do(put)
+	if err != nil {
+		return status, err
+	}
+	err = json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&status)
+	response.Body.Close()
+	*stage = "deployment_rejected"
+	if response.StatusCode != 200 {
+		if response.StatusCode == http.StatusUnprocessableEntity {
+			if saveErr := db.Model(&model.Node{}).Where("id = ? AND desired_revision = ?", node.Id, desired.Deployment.Revision).Update("rejected_revision", desired.Deployment.Revision).Error; saveErr != nil {
+				return status, saveErr
+			}
+			if cleanupErr := confirmLegacyNodeFirewall(ctx, db, node, status); cleanupErr != nil {
+				*stage = errNodeFirewall.Error()
+				return status, cleanupErr
+			}
+		}
+		return status, fmt.Errorf("node rejected deployment: HTTP %d", response.StatusCode)
+	}
+	*stage = "ack_mismatch"
+	if err != nil || status.Revision != desired.Deployment.Revision || status.Digest != desired.Deployment.Digest() || !status.Running {
+		return status, errors.New("node did not confirm the expected revision")
+	}
+	if status.NodeID != uint64(node.Id) || status.Protocol != nodeagent.ProtocolVersion {
+		return status, errors.New("node acknowledgement identity does not match")
+	}
+	return status, nil
 }

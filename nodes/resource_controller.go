@@ -97,76 +97,14 @@ func ReconcileResources(parent context.Context, id uint) (failure error) {
 		return err
 	}
 	phase := "domain"
-	defer func() {
-		if failure == nil || errors.Is(failure, context.Canceled) || safeResourceError(failure) == "certificate_target_changed" {
-			return
-		}
-		code := safeResourceError(failure)
-		_ = db.Transaction(func(tx *gorm.DB) error {
-			var current model.Node
-			if err := tx.First(&current, id).Error; err != nil {
-				return err
-			}
-			if current.ManagementGeneration != node.ManagementGeneration || current.ControlEpoch != node.ControlEpoch {
-				return nil
-			}
-			if phase == "domain" {
-				// Keep a recently verified name usable across transient DNS failures.
-				// Changed targets and answers pointing to a different address must fail.
-				if (errors.Is(failure, errDNSLookupFailed) || errors.Is(failure, errDNSAddressNotResolved)) &&
-					domain.State == "ready" && domain.AppliedFQDN == domain.FQDN &&
-					time.Since(time.Unix(domain.CheckedAt, 0)) < dnsRecheckGrace {
-					return nil
-				}
-				return tx.Model(&model.NodeDomainBinding{}).Where("node_id = ? AND generation = ?", id, domain.Generation).Updates(map[string]interface{}{"state": "failed", "last_error": code, "checked_at": time.Now().Unix()}).Error
-			}
-			return tx.Model(&model.NodeCertificateBinding{}).Where(whereNodeID, id).Update("last_error", code).Error
-		})
-	}()
-	if domain.Mode == "managed" {
-		var profile model.NodeDNSProfile
-		if err := db.First(&profile, domain.ProfileId).Error; err != nil {
-			return err
-		}
-		kind := "AAAA"
-		if netIPIsV4(domain.ExpectedIP) {
-			kind = "A"
-		}
-		if _, err := ensureResourceRecord(ctx, id, profile, domain.ZoneId, domain.FQDN, kind, domain.ExpectedIP); err != nil {
-			return err
-		}
+	defer func() { recordResourceFailure(db, node, domain, phase, failure) }()
+	if err := prepareResourceDomain(ctx, db, id, domain); err != nil {
+		return err
 	}
 	if err := verifyDomainAddress(ctx, domain.FQDN, domain.ExpectedIP); err != nil {
 		return err
 	}
-	if err := db.Transaction(func(tx *gorm.DB) error {
-		var current model.NodeDomainBinding
-		if err := tx.First(&current, whereNodeID, id).Error; err != nil {
-			return err
-		}
-		if current.Generation != domain.Generation {
-			return errors.New("domain_target_changed")
-		}
-		changed := current.State != "ready" || current.AppliedFQDN != domain.FQDN
-		if err := tx.Model(&current).Updates(map[string]interface{}{"state": "ready", "last_error": "", "checked_at": time.Now().Unix(), "applied_fqdn": domain.FQDN}).Error; err != nil {
-			return err
-		}
-		var target model.Node
-		if err := tx.First(&target, id).Error; err != nil {
-			return err
-		}
-		if target.LinkAddress != domain.FQDN {
-			changed = true
-			if err := tx.Model(&target).Update("link_address", domain.FQDN).Error; err != nil {
-				return err
-			}
-			target.LinkAddress = domain.FQDN
-		}
-		if changed {
-			return queueNodeStructure(tx, &target)
-		}
-		return nil
-	}); err != nil {
+	if err := db.Transaction(func(tx *gorm.DB) error { return acknowledgeDomain(tx, id, domain) }); err != nil {
 		return err
 	}
 	phase = "certificate"
@@ -248,4 +186,77 @@ func CleanupNodeDNS(ctx context.Context, id, recordID uint, actor string) error 
 	}
 	body, _ := json.Marshal(map[string]uint{"node_id": id, "record_id": recordID})
 	return db.Create(&model.Changes{DateTime: time.Now().Unix(), Actor: actor, Key: "node-dns", Action: "cleanup", Obj: body}).Error
+}
+
+func recordResourceFailure(db *gorm.DB, node model.Node, domain model.NodeDomainBinding, phase string, failure error) {
+	if failure == nil || errors.Is(failure, context.Canceled) || safeResourceError(failure) == "certificate_target_changed" {
+		return
+	}
+	code := safeResourceError(failure)
+	_ = db.Transaction(func(tx *gorm.DB) error {
+		var current model.Node
+		if err := tx.First(&current, node.Id).Error; err != nil {
+			return err
+		}
+		if current.ManagementGeneration != node.ManagementGeneration || current.ControlEpoch != node.ControlEpoch {
+			return nil
+		}
+		if phase == "domain" {
+			// Keep a recently verified name usable across transient DNS failures.
+			// Changed targets and answers pointing to a different address must fail.
+			if (errors.Is(failure, errDNSLookupFailed) || errors.Is(failure, errDNSAddressNotResolved)) &&
+				domain.State == "ready" && domain.AppliedFQDN == domain.FQDN &&
+				time.Since(time.Unix(domain.CheckedAt, 0)) < dnsRecheckGrace {
+				return nil
+			}
+			return tx.Model(&model.NodeDomainBinding{}).Where("node_id = ? AND generation = ?", node.Id, domain.Generation).Updates(map[string]interface{}{"state": "failed", "last_error": code, "checked_at": time.Now().Unix()}).Error
+		}
+		return tx.Model(&model.NodeCertificateBinding{}).Where(whereNodeID, node.Id).Update("last_error", code).Error
+	})
+}
+
+func prepareResourceDomain(ctx context.Context, db *gorm.DB, id uint, domain model.NodeDomainBinding) error {
+	if domain.Mode == "managed" {
+		var profile model.NodeDNSProfile
+		if err := db.First(&profile, domain.ProfileId).Error; err != nil {
+			return err
+		}
+		kind := "AAAA"
+		if netIPIsV4(domain.ExpectedIP) {
+			kind = "A"
+		}
+		if _, err := ensureResourceRecord(ctx, id, profile, domain.ZoneId, domain.FQDN, kind, domain.ExpectedIP); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func acknowledgeDomain(tx *gorm.DB, id uint, domain model.NodeDomainBinding) error {
+	var current model.NodeDomainBinding
+	if err := tx.First(&current, whereNodeID, id).Error; err != nil {
+		return err
+	}
+	if current.Generation != domain.Generation {
+		return errors.New("domain_target_changed")
+	}
+	changed := current.State != "ready" || current.AppliedFQDN != domain.FQDN
+	if err := tx.Model(&current).Updates(map[string]interface{}{"state": "ready", "last_error": "", "checked_at": time.Now().Unix(), "applied_fqdn": domain.FQDN}).Error; err != nil {
+		return err
+	}
+	var target model.Node
+	if err := tx.First(&target, id).Error; err != nil {
+		return err
+	}
+	if target.LinkAddress != domain.FQDN {
+		changed = true
+		if err := tx.Model(&target).Update("link_address", domain.FQDN).Error; err != nil {
+			return err
+		}
+		target.LinkAddress = domain.FQDN
+	}
+	if changed {
+		return queueNodeStructure(tx, &target)
+	}
+	return nil
 }

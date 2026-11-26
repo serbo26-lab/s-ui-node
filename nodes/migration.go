@@ -130,54 +130,20 @@ func PrepareNodeMigration(request PrepareMigrationRequest, actor string) (model.
 		if request.ReportDigest == "" || report.Digest != request.ReportDigest {
 			return errors.New("migration_report_conflict")
 		}
-		decisions := map[uint]string{}
-		for _, decision := range request.Decisions {
-			if decision.ClientId == 0 || decisions[decision.ClientId] != "" || (decision.Action != "assign_node" && decision.Action != "remove") {
-				return errors.New("invalid_migration_decision")
-			}
-			decisions[decision.ClientId] = decision.Action
-		}
-		canonical := []MigrationDecision{}
-		for _, client := range report.Clients {
-			action := decisions[client.ClientId]
-			if action == "" {
-				if !client.Complete {
-					return errors.New("partial_assignment_decision_required")
-				}
-				action = "assign_node"
-			}
-			canonical = append(canonical, MigrationDecision{ClientId: client.ClientId, Action: action})
-			delete(decisions, client.ClientId)
-		}
-		if len(decisions) > 0 {
-			return errors.New("unknown_migration_client")
+		canonical, err := canonicalMigrationDecisions(report, request.Decisions)
+		if err != nil {
+			return err
 		}
 		body, _ := json.Marshal(canonical)
-		if report.Mode == model.NodeAssignmentPrepared {
-			if err := tx.First(&migration, whereNodeID, request.NodeId).Error; err != nil {
-				return err
-			}
-			if migration.ReportDigest == report.Digest && string(migration.Decisions) == string(body) {
-				return nil
-			}
-		} else {
-			var count int64
-			if err := tx.Model(&model.ClientNode{}).Where(whereNodeID, request.NodeId).Count(&count).Error; err != nil {
-				return err
-			}
-			if count > 0 {
-				return errors.New("unexpected_prepared_grants_require_review")
-			}
+		unchanged, err := checkPreparedMigration(tx, request, report, body, &migration)
+		if err != nil || unchanged {
+			return err
 		}
 		if err := tx.Where(whereNodeID, request.NodeId).Delete(&model.ClientNode{}).Error; err != nil {
 			return err
 		}
-		for _, decision := range canonical {
-			if decision.Action == "assign_node" {
-				if err := tx.Create(&model.ClientNode{ClientId: decision.ClientId, NodeId: request.NodeId, Active: true, Generation: 1}).Error; err != nil {
-					return err
-				}
-			}
+		if err := createMigrationGrants(tx, request.NodeId, canonical); err != nil {
+			return err
 		}
 		migration = model.NodeAssignmentMigration{NodeId: request.NodeId, ReportDigest: report.Digest, State: "prepared", Decisions: body, Created: time.Now().Unix()}
 		if err := tx.Save(&migration).Error; err != nil {
@@ -190,4 +156,61 @@ func PrepareNodeMigration(request PrepareMigrationRequest, actor string) (model.
 		return tx.Create(&model.Changes{DateTime: time.Now().Unix(), Actor: actor, Key: "nodes", Action: "preparemigration", Obj: obj}).Error
 	})
 	return migration, err
+}
+
+func canonicalMigrationDecisions(report MigrationReport, requested []MigrationDecision) ([]MigrationDecision, error) {
+	decisions := map[uint]string{}
+	for _, decision := range requested {
+		if decision.ClientId == 0 || decisions[decision.ClientId] != "" || (decision.Action != "assign_node" && decision.Action != "remove") {
+			return nil, errors.New("invalid_migration_decision")
+		}
+		decisions[decision.ClientId] = decision.Action
+	}
+	canonical := []MigrationDecision{}
+	for _, client := range report.Clients {
+		action := decisions[client.ClientId]
+		if action == "" {
+			if !client.Complete {
+				return nil, errors.New("partial_assignment_decision_required")
+			}
+			action = "assign_node"
+		}
+		canonical = append(canonical, MigrationDecision{ClientId: client.ClientId, Action: action})
+		delete(decisions, client.ClientId)
+	}
+	if len(decisions) > 0 {
+		return nil, errors.New("unknown_migration_client")
+	}
+	return canonical, nil
+}
+
+func checkPreparedMigration(tx *gorm.DB, request PrepareMigrationRequest, report MigrationReport, body []byte, migration *model.NodeAssignmentMigration) (bool, error) {
+	if report.Mode == model.NodeAssignmentPrepared {
+		if err := tx.First(migration, whereNodeID, request.NodeId).Error; err != nil {
+			return false, err
+		}
+		if migration.ReportDigest == report.Digest && string(migration.Decisions) == string(body) {
+			return true, nil
+		}
+	} else {
+		var count int64
+		if err := tx.Model(&model.ClientNode{}).Where(whereNodeID, request.NodeId).Count(&count).Error; err != nil {
+			return false, err
+		}
+		if count > 0 {
+			return false, errors.New("unexpected_prepared_grants_require_review")
+		}
+	}
+	return false, nil
+}
+
+func createMigrationGrants(tx *gorm.DB, nodeID uint, canonical []MigrationDecision) error {
+	for _, decision := range canonical {
+		if decision.Action == "assign_node" {
+			if err := tx.Create(&model.ClientNode{ClientId: decision.ClientId, NodeId: nodeID, Active: true, Generation: 1}).Error; err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }

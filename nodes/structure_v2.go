@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"time"
 
 	"github.com/alireza0/s-ui/database"
@@ -34,13 +35,8 @@ func prepareStructure(db *gorm.DB, node model.Node, status nodeagent.StatusV2, o
 		if err != nil {
 			return err
 		}
-		for _, inbound := range fresh.Inbounds {
-			if nodeagent.ProxyInbound(inbound.Type) && !proxyInboundsAvailable(tx, current, status) {
-				return errAgentProtocolsPending
-			}
-			if nodeagent.ExtendedInbound(inbound.Type) && !extendedInboundsAvailable(tx, current, status) {
-				return errAgentProtocolsPending
-			}
+		if err := validateStructureProtocols(tx, current, status, fresh); err != nil {
+			return err
 		}
 		fingerprint, err := snapshotFingerprint(fresh)
 		if err != nil {
@@ -127,29 +123,8 @@ func reconcileStructureV2(ctx context.Context, node model.Node) (failure error) 
 		return err
 	}
 	if status.SpecRevision != spec.Revision || status.SpecDigest != spec.Digest() || !status.Running {
-		var current model.Node
-		db.First(&current, node.Id)
-		if current.RejectedRevision == spec.Revision && status.Running {
-			return errors.New("structural_revision_rejected")
-		}
-		if err := ensureNodeFirewall(ctx, db, node, snapshot, false); err != nil {
-			return err
-		}
-		status, err = putV2(ctx, client, node, "/v2/spec", spec)
+		status, err = deliverStructure(ctx, db, node, snapshot, spec, client, status)
 		if err != nil {
-			if errors.Is(err, errV2Rejected) {
-				observed, readErr := getStatusV2(ctx, client, node)
-				if readErr != nil {
-					return readErr
-				}
-				if observed.BootstrapPending {
-					return errAgentBootstrapPending
-				}
-				db.Model(&model.Node{}).Where("id = ? AND desired_revision = ? AND management_generation = ?", node.Id, spec.Revision, node.ManagementGeneration).Update("rejected_revision", spec.Revision)
-				if cleanupErr := confirmNodeFirewall(ctx, db, node, observed); cleanupErr != nil {
-					return cleanupErr
-				}
-			}
 			return err
 		}
 	}
@@ -240,4 +215,46 @@ func observeStructureTransaction(tx *gorm.DB, node model.Node, status nodeagent.
 		}
 	}
 	return nil
+}
+
+func validateStructureProtocols(tx *gorm.DB, current model.Node, status nodeagent.StatusV2, fresh Snapshot) error {
+	for _, inbound := range fresh.Inbounds {
+		if nodeagent.ProxyInbound(inbound.Type) && !proxyInboundsAvailable(tx, current, status) {
+			return errAgentProtocolsPending
+		}
+		if nodeagent.ExtendedInbound(inbound.Type) && !extendedInboundsAvailable(tx, current, status) {
+			return errAgentProtocolsPending
+		}
+	}
+	return nil
+}
+
+func deliverStructure(ctx context.Context, db *gorm.DB, node model.Node, snapshot Snapshot, spec nodeagent.Structure, client *http.Client, status nodeagent.StatusV2) (nodeagent.StatusV2, error) {
+	var err error
+	var current model.Node
+	db.First(&current, node.Id)
+	if current.RejectedRevision == spec.Revision && status.Running {
+		return status, errors.New("structural_revision_rejected")
+	}
+	if err := ensureNodeFirewall(ctx, db, node, snapshot, false); err != nil {
+		return status, err
+	}
+	status, err = putV2(ctx, client, node, "/v2/spec", spec)
+	if err != nil {
+		if errors.Is(err, errV2Rejected) {
+			observed, readErr := getStatusV2(ctx, client, node)
+			if readErr != nil {
+				return status, readErr
+			}
+			if observed.BootstrapPending {
+				return status, errAgentBootstrapPending
+			}
+			db.Model(&model.Node{}).Where("id = ? AND desired_revision = ? AND management_generation = ?", node.Id, spec.Revision, node.ManagementGeneration).Update("rejected_revision", spec.Revision)
+			if cleanupErr := confirmNodeFirewall(ctx, db, node, observed); cleanupErr != nil {
+				return status, cleanupErr
+			}
+		}
+		return status, err
+	}
+	return status, nil
 }

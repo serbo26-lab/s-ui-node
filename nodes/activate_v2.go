@@ -21,55 +21,7 @@ func ensureMigrationCredentials(tx *gorm.DB, nodeID uint) error {
 		return err
 	}
 	for _, grant := range grants {
-		var client model.Client
-		if err := tx.First(&client, grant.ClientId).Error; err != nil {
-			return err
-		}
-		var config map[string]map[string]interface{}
-		if json.Unmarshal(client.Config, &config) != nil {
-			return errors.New("invalid_migration_client_config")
-		}
-		if config == nil {
-			config = map[string]map[string]interface{}{}
-		}
-		for _, kind := range []string{"vless", "tuic", "hysteria2"} {
-			user := config[kind]
-			if user == nil {
-				user = map[string]interface{}{"name": client.Name}
-				config[kind] = user
-			}
-			if kind == "vless" || kind == "tuic" {
-				if value, exists := user["uuid"]; !exists || value == "" {
-					id, err := uuid.NewV4()
-					if err != nil {
-						return err
-					}
-					user["uuid"] = id.String()
-				}
-			}
-			if kind == "tuic" || kind == "hysteria2" {
-				if value, exists := user["password"]; !exists || value == "" {
-					buf := make([]byte, 24)
-					if _, err := rand.Read(buf); err != nil {
-						return err
-					}
-					user["password"] = base64.RawURLEncoding.EncodeToString(buf)
-				}
-			}
-		}
-		credentials := map[string]json.RawMessage{}
-		for _, kind := range []string{"vless", "tuic", "hysteria2"} {
-			credentials[kind], _ = json.Marshal(config[kind])
-		}
-		probe := nodeagent.AccessSnapshot{NodeID: uint64(nodeID), Epoch: "validation", Revision: 1, Clients: []nodeagent.Grant{{Name: userName(client), All: true, Credentials: credentials}}}
-		if err := probe.Validate(); err != nil {
-			return errors.New("invalid_existing_migration_credentials")
-		}
-		body, err := json.Marshal(config)
-		if err != nil {
-			return err
-		}
-		if err := tx.Model(&client).Update("config", json.RawMessage(body)).Error; err != nil {
+		if err := ensureMigrationClientCredentials(tx, nodeID, grant.ClientId); err != nil {
 			return err
 		}
 	}
@@ -81,51 +33,7 @@ func ensureMigrationCredentials(tx *gorm.DB, nodeID uint) error {
 func ActivateNodeMigration(ctx context.Context, request PrepareMigrationRequest, actors ...string) (model.NodeAssignmentMigration, error) {
 	var migration model.NodeAssignmentMigration
 	err := database.GetDB().Transaction(func(tx *gorm.DB) error {
-		var node model.Node
-		if err := tx.First(&node, request.NodeId).Error; err != nil {
-			return err
-		}
-		if err := tx.First(&migration, whereNodeID, node.Id).Error; err != nil {
-			return err
-		}
-		if request.ReportDigest == "" || migration.ReportDigest != request.ReportDigest {
-			return errors.New("migration_report_conflict")
-		}
-		if migration.State == "complete" || migration.State == "activating" {
-			return nil
-		}
-		if node.AgentProtocol != 2 || node.ControlEpoch == "" {
-			return errors.New("agent_v2_upgrade_required")
-		}
-		if node.AssignmentMode != model.NodeAssignmentPrepared || migration.State != "prepared" {
-			return errors.New("migration_is_not_prepared")
-		}
-		report, err := migrationReport(tx, node.Id)
-		if err != nil {
-			return err
-		}
-		if report.Digest != request.ReportDigest {
-			return errors.New("migration_report_conflict")
-		}
-		if err := ensureMigrationCredentials(tx, node.Id); err != nil {
-			return err
-		}
-		if err := tx.Model(&node).Update("assignment_mode", model.NodeAssignmentActivating).Error; err != nil {
-			return err
-		}
-		migration.State = "activating"
-		if err := tx.Save(&migration).Error; err != nil {
-			return err
-		}
-		actor := "MigrationJob"
-		if len(actors) > 0 {
-			actor = actors[0]
-		}
-		obj, _ := json.Marshal(map[string]interface{}{"id": node.Id, "report_digest": request.ReportDigest})
-		if err := tx.Create(&model.Changes{DateTime: time.Now().Unix(), Actor: actor, Key: "nodes", Action: "activatemigration", Obj: obj}).Error; err != nil {
-			return err
-		}
-		return database.QueueNodeTasks(tx, []uint{node.Id}, "access")
+		return activateMigrationTransaction(tx, request, actors, &migration)
 	})
 	if err != nil {
 		return migration, err
@@ -163,4 +71,122 @@ func finishMigration(tx *gorm.DB, node model.Node, status nodeagent.StatusV2) er
 		return err
 	}
 	return tx.Model(&model.NodeAssignmentMigration{}).Where("node_id = ? AND state = ?", node.Id, "activating").Update("state", "complete").Error
+}
+
+func ensureMigrationClientCredentials(tx *gorm.DB, nodeID, clientID uint) error {
+	var client model.Client
+	if err := tx.First(&client, clientID).Error; err != nil {
+		return err
+	}
+	var config map[string]map[string]interface{}
+	if json.Unmarshal(client.Config, &config) != nil {
+		return errors.New("invalid_migration_client_config")
+	}
+	if config == nil {
+		config = map[string]map[string]interface{}{}
+	}
+	for _, kind := range []string{"vless", "tuic", "hysteria2"} {
+		if err := ensureMigrationProtocol(config, kind, client.Name); err != nil {
+			return err
+		}
+	}
+	credentials := map[string]json.RawMessage{}
+	for _, kind := range []string{"vless", "tuic", "hysteria2"} {
+		credentials[kind], _ = json.Marshal(config[kind])
+	}
+	probe := nodeagent.AccessSnapshot{NodeID: uint64(nodeID), Epoch: "validation", Revision: 1, Clients: []nodeagent.Grant{{Name: userName(client), All: true, Credentials: credentials}}}
+	if err := probe.Validate(); err != nil {
+		return errors.New("invalid_existing_migration_credentials")
+	}
+	body, err := json.Marshal(config)
+	if err != nil {
+		return err
+	}
+	if err := tx.Model(&client).Update("config", json.RawMessage(body)).Error; err != nil {
+		return err
+	}
+	return nil
+}
+
+func ensureMigrationProtocol(config map[string]map[string]interface{}, kind, name string) error {
+	user := config[kind]
+	if user == nil {
+		user = map[string]interface{}{"name": name}
+		config[kind] = user
+	}
+	if kind == "vless" || kind == "tuic" {
+		if value, exists := user["uuid"]; !exists || value == "" {
+			id, err := uuid.NewV4()
+			if err != nil {
+				return err
+			}
+			user["uuid"] = id.String()
+		}
+	}
+	if kind == "tuic" || kind == "hysteria2" {
+		if value, exists := user["password"]; !exists || value == "" {
+			buf := make([]byte, 24)
+			if _, err := rand.Read(buf); err != nil {
+				return err
+			}
+			user["password"] = base64.RawURLEncoding.EncodeToString(buf)
+		}
+	}
+	return nil
+}
+
+func activateMigrationTransaction(tx *gorm.DB, request PrepareMigrationRequest, actors []string, migration *model.NodeAssignmentMigration) error {
+	var node model.Node
+	if err := tx.First(&node, request.NodeId).Error; err != nil {
+		return err
+	}
+	if err := tx.First(migration, whereNodeID, node.Id).Error; err != nil {
+		return err
+	}
+	complete, err := validateMigrationActivation(node, *migration, request)
+	if err != nil || complete {
+		return err
+	}
+	report, err := migrationReport(tx, node.Id)
+	if err != nil {
+		return err
+	}
+	if report.Digest != request.ReportDigest {
+		return errors.New("migration_report_conflict")
+	}
+	if err := ensureMigrationCredentials(tx, node.Id); err != nil {
+		return err
+	}
+	if err := tx.Model(&node).Update("assignment_mode", model.NodeAssignmentActivating).Error; err != nil {
+		return err
+	}
+	migration.State = "activating"
+	if err := tx.Save(migration).Error; err != nil {
+		return err
+	}
+	actor := "MigrationJob"
+	if len(actors) > 0 {
+		actor = actors[0]
+	}
+	obj, _ := json.Marshal(map[string]interface{}{"id": node.Id, "report_digest": request.ReportDigest})
+	if err := tx.Create(&model.Changes{DateTime: time.Now().Unix(), Actor: actor, Key: "nodes", Action: "activatemigration", Obj: obj}).Error; err != nil {
+		return err
+	}
+	return database.QueueNodeTasks(tx, []uint{node.Id}, "access")
+}
+
+func validateMigrationActivation(node model.Node, migration model.NodeAssignmentMigration, request PrepareMigrationRequest) (bool, error) {
+	if request.ReportDigest == "" || migration.ReportDigest != request.ReportDigest {
+		return false, errors.New("migration_report_conflict")
+	}
+	if migration.State == "complete" || migration.State == "activating" {
+		return true, nil
+	}
+	if node.AgentProtocol != 2 || node.ControlEpoch == "" {
+		return false, errors.New("agent_v2_upgrade_required")
+	}
+	if node.AssignmentMode != model.NodeAssignmentPrepared || migration.State != "prepared" {
+		return false, errors.New("migration_is_not_prepared")
+	}
+	return false, nil
 }
