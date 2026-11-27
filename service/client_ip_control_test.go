@@ -2,10 +2,13 @@ package service
 
 import (
 	"encoding/json"
+	"errors"
+	"strings"
 	"testing"
 
 	ipmodel "github.com/alireza0/s-ui/antiabuse/model"
 	"github.com/alireza0/s-ui/database/model"
+	"github.com/mattn/go-sqlite3"
 
 	"gorm.io/gorm"
 )
@@ -24,7 +27,7 @@ func saveIPClient(t *testing.T, db *gorm.DB, action string, value any) error {
 
 func ipClientPayload() map[string]any {
 	return map[string]any{"name": "client", "enable": true, "config": map[string]any{},
-		"inbounds": []uint{}, "nodes": []uint{}, "ip_control": map[string]any{"limit": 5}}
+		"inbounds": []uint{}, "nodes": []uint{}, "links": []any{}, "ip_control": map[string]any{"limit": 5}}
 }
 
 func getIPClient(t *testing.T) model.Client {
@@ -68,8 +71,8 @@ func TestClientPolicyFailureRollsBackClient(t *testing.T) {
 	if err := db.Exec("CREATE TRIGGER reject_ip_policy BEFORE INSERT ON ip_control_clients BEGIN SELECT RAISE(ABORT, 'rejected'); END").Error; err != nil {
 		t.Fatal(err)
 	}
-	if err := saveIPClient(t, db, "new", ipClientPayload()); err == nil {
-		t.Fatal("policy persistence failure ignored")
+	if err := saveIPClient(t, db, "new", ipClientPayload()); err == nil || !strings.Contains(err.Error(), "rejected") {
+		t.Fatalf("policy persistence failure not reported: %v", err)
 	}
 	var count int64
 	if err := db.Model(&model.Client{}).Count(&count).Error; err != nil || count != 0 {
@@ -112,8 +115,10 @@ func TestConfigSaveReportsCommitFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := (&ConfigService{}).Save("clients", "new", body, "", "admin", "localhost"); err == nil {
-		t.Fatal("failed commit returned success")
+	_, err = (&ConfigService{}).Save("clients", "new", body, "", "admin", "localhost")
+	var sqliteError sqlite3.Error
+	if !errors.As(err, &sqliteError) || sqliteError.ExtendedCode != sqlite3.ErrConstraintForeignKey {
+		t.Fatalf("deferred commit failure not reported: %v", err)
 	}
 	var count int64
 	if err := db.Model(&ipmodel.ClientRule{}).Count(&count).Error; err != nil || count != 0 {

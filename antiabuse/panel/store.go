@@ -131,11 +131,11 @@ func DeleteClientPolicies(tx *gorm.DB, ids []uint) error {
 
 func (s *Store) GroupNames() ([]string, error) {
 	var clients []string
-	if err := s.db.Table("clients").Distinct("group").Where("`group` <> ''").Pluck("group", &clients).Error; err != nil {
+	if err := s.db.Table("clients").Distinct("`group`").Where("`group` <> ''").Pluck("`group`", &clients).Error; err != nil {
 		return nil, err
 	}
 	var saved []string
-	if err := s.db.Model(&ipmodel.GroupRule{}).Pluck("group", &saved).Error; err != nil {
+	if err := s.db.Model(&ipmodel.GroupRule{}).Pluck("`group`", &saved).Error; err != nil {
 		return nil, err
 	}
 	return uniqueGroups(clients, saved), nil
