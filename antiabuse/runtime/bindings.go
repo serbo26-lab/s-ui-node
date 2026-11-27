@@ -34,7 +34,10 @@ func (r *Runtime) conflictingBindings(incomplete []string) []string {
 		}
 		for client := range clients {
 			if client != current {
-				incomplete = append(incomplete, client, current)
+				incomplete = append(incomplete, current)
+				if client != "" {
+					incomplete = append(incomplete, client)
+				}
 			}
 		}
 	}

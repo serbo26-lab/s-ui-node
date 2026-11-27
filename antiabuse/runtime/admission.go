@@ -170,7 +170,7 @@ func (f *Flow) resolve() *entry {
 		return nil
 	}
 	client := f.bindClient()
-	if client == nil {
+	if client == nil || *client == "" {
 		return nil
 	}
 	address := netip.Addr{}
@@ -210,8 +210,9 @@ func (f *Flow) bindClient() *string {
 	if client := f.client.Load(); client != nil {
 		return client
 	}
-	id := f.runtime.users.Load().users[f.identity]
-	if id == "" {
+	users := f.runtime.users.Load()
+	id := users.users[f.identity]
+	if id == "" && !users.ready {
 		return nil
 	}
 	f.mu.Lock()

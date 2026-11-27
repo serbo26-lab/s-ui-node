@@ -29,7 +29,10 @@ type entry struct {
 	refs     int
 }
 
-type bindings struct{ users map[Identity]string }
+type bindings struct {
+	users map[Identity]string
+	ready bool
+}
 
 type Runtime struct {
 	profile engine.Profile
@@ -94,10 +97,10 @@ func (r *Runtime) SetUsers(users map[Identity]string) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if maps.Equal(r.users.Load().users, copyUsers) {
+	if old := r.users.Load(); old.ready && maps.Equal(old.users, copyUsers) {
 		return
 	}
-	r.users.Store(&bindings{users: copyUsers})
+	r.users.Store(&bindings{users: copyUsers, ready: true})
 	r.table.Store(nil)
 	r.challenge = ""
 	r.reservations = map[entryKey]int64{}

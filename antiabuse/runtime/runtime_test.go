@@ -68,6 +68,46 @@ func TestClosedFlowCannotRenewActivityFromLateCallbacks(t *testing.T) {
 	}
 }
 
+func TestUnidentifiedLiveLoginDoesNotAcquireAReplacementAccount(t *testing.T) {
+	r, _ := newRuntime(t)
+	identity := Identity{Inbound: "in", User: "unidentified"}
+	flow, err := r.Open(identity, func() netip.Addr { return sourceA })
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(flow.Close)
+	r.SetUsers(map[Identity]string{identity: "replacement"})
+	flow.Activity(1)
+	report := r.Report("local").Snapshot
+	if len(report.Entries) != 0 || len(report.IncompleteClients) != 1 || report.IncompleteClients[0] != "replacement" {
+		t.Fatal("unidentified established flow was charged to a later account", report)
+	}
+	flow.Close()
+	if len(r.Report("local").Snapshot.IncompleteClients) != 0 {
+		t.Fatal("closed unidentified flow retained incomplete coverage")
+	}
+}
+
+func TestInitialBindingSnapshotCanIdentifyAnExistingFlow(t *testing.T) {
+	r, err := New(engine.DefaultProfile(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.SetEnabled(true)
+	identity := Identity{Inbound: "in", User: "user"}
+	flow, err := r.Open(identity, func() netip.Addr { return sourceA })
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(flow.Close)
+	r.SetUsers(map[Identity]string{identity: "client"})
+	flow.Activity(1)
+	report := r.Report("local").Snapshot
+	if len(report.Entries) != 1 || report.Entries[0].Client != "client" || len(report.IncompleteClients) != 0 {
+		t.Fatal("initial identity snapshot did not attach to startup traffic", report)
+	}
+}
+
 func openFlow(t *testing.T, r *Runtime, source netip.Addr) *Flow {
 	t.Helper()
 	f, err := r.Open(Identity{Inbound: "in", User: "user"}, func() netip.Addr { return source })
