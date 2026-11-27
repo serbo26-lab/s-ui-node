@@ -264,7 +264,7 @@ func (c *Controller) worker(ctx context.Context, w *work, source string, target 
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 	for {
-		if delivered := c.exchange(ctx, w, source, target); delivered && !w.config.Enabled {
+		if c.exchange(ctx, w, source, target) && !w.config.Enabled {
 			return
 		}
 		select {

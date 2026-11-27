@@ -66,7 +66,7 @@ jobs:
 
       - name: Install frontend dependencies
         if: steps.node-modules.outputs.cache-hit != 'true'
-        run: npm ci
+        run: npm ci --ignore-scripts
         working-directory: frontend
 
       - name: Save node_modules
@@ -145,9 +145,9 @@ jobs:
           # The module proxy records the full commit of a pseudo-version and
           # has no rate limit; the unauthenticated GitHub API answered 403
           # once the shared runner IPs used up their quota.
-          FULL=$(curl -fsSL "https://proxy.golang.org/github.com/sagernet/cronet-go/@v/${VERSION}.info" | jq -r '.Origin.Hash // empty' || true)
+          FULL=$(curl --proto '=https' --proto-redir '=https' -fsSL "https://proxy.golang.org/github.com/sagernet/cronet-go/@v/${VERSION}.info" | jq -r '.Origin.Hash // empty' || true)
           if [ -z "$FULL" ]; then
-            FULL=$(curl -fsSL -H "Authorization: Bearer ${GH_TOKEN}" \
+            FULL=$(curl --proto '=https' --proto-redir '=https' -fsSL -H "Authorization: Bearer ${GH_TOKEN}" \
               "https://api.github.com/repos/SagerNet/cronet-go/commits/${SHORT}" | jq -r '.sha')
           fi
           [ -n "$FULL" ] && [ "$FULL" != "null" ] || { echo "could not resolve cronet-go commit ${SHORT}" >&2; exit 1; }
@@ -263,4 +263,3 @@ jobs:
           name: s-ui-linux-${{ matrix.platform }}
           path: ./s-ui-linux-${{ matrix.platform }}.tar.gz
           retention-days: 30
-
