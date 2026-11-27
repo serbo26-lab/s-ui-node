@@ -7,7 +7,9 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"io"
@@ -26,8 +28,98 @@ import (
 	ipruntime "github.com/alireza0/s-ui/antiabuse/runtime"
 	"github.com/alireza0/s-ui/core"
 	"github.com/alireza0/s-ui/core/connectionpolicy"
+	"github.com/sagernet/quic-go"
+	"github.com/sagernet/quic-go/http3"
 	M "github.com/sagernet/sing/common/metadata"
 )
+
+func TestNaiveHTTP3TracksLiveQUICMigration(t *testing.T) {
+	runtime, err := ipruntime.New(engine.DefaultProfile(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime.SetUsers(map[ipruntime.Identity]string{{Inbound: "access", User: "user"}: "client"})
+	runtime.SetEnabled(true)
+	serverTLS, _ := testTLS(t)
+	port := unusedPort(t)
+	server := core.NewCoreWithContext(connectionpolicy.WithGuard(context.Background(), runtime))
+	runCore(t, server, []any{map[string]any{"type": "naive", "tag": "access", "listen": "127.0.0.1", "listen_port": port,
+		"network": "udp", "tls": serverTLS, "users": []any{map[string]any{"username": "user", "password": "test-only"}}}},
+		[]any{map[string]any{"type": "direct", "tag": "direct"}})
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM([]byte(serverTLS["certificate"].(string))) {
+		t.Fatal("test certificate invalid")
+	}
+	pathTransport := func(address string) *quic.Transport {
+		t.Helper()
+		socket, err := net.ListenPacket("udp", net.JoinHostPort(address, "0"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		transport := &quic.Transport{Conn: socket}
+		t.Cleanup(func() { _ = transport.Close(); _ = socket.Close() })
+		return transport
+	}
+	initial := pathTransport("127.0.0.1")
+	var connection *quic.Conn
+	transport := &http3.Transport{TLSClientConfig: &tls.Config{RootCAs: pool, ServerName: "test.example", MinVersion: tls.VersionTLS13},
+		Dial: func(ctx context.Context, address string, config *tls.Config, quicConfig *quic.Config) (*quic.Conn, error) {
+			remote, err := net.ResolveUDPAddr("udp", address)
+			if err != nil {
+				return nil, err
+			}
+			connection, err = initial.DialEarly(ctx, remote, config, quicConfig)
+			return connection, err
+		}}
+	t.Cleanup(func() { _ = transport.Close() })
+	echo, _ := echoServer(t)
+	reader, writer := io.Pipe()
+	t.Cleanup(func() { _ = writer.Close(); _ = reader.Close() })
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	t.Cleanup(cancel)
+	request, err := http.NewRequestWithContext(ctx, http.MethodConnect, "https://127.0.0.1:"+strconv.Itoa(int(port)), reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("-connect-authority", echo)
+	request.Header.Set("Padding", "test")
+	request.Header.Set("Proxy-Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte("user:test-only")))
+	request.Header.Set("X-Forwarded-For", "192.0.2.99")
+	response, err := (&http.Client{Transport: transport}).Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = response.Body.Close() })
+	if response.StatusCode != http.StatusOK {
+		t.Fatal("HTTP3 CONNECT failed", response.StatusCode)
+	}
+	if _, err := writer.Write([]byte{0, 1, 0, 42}); err != nil {
+		t.Fatal(err)
+	}
+	assertPaddingEcho(t, response.Body)
+	assertPhysicalReport(t, runtime)
+	path, err := connection.AddPath(pathTransport("127.0.0.2"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := path.Probe(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := path.Switch(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.Write([]byte{0, 1, 0, 42}); err != nil {
+		t.Fatal(err)
+	}
+	assertPaddingEcho(t, response.Body)
+	state := runtime.Report("local").Snapshot
+	for _, entry := range state.Entries {
+		if entry.Address == netip.MustParseAddr("127.0.0.2") && entry.ActivityAge != nil {
+			return
+		}
+	}
+	t.Fatalf("migrated useful stream retained its old source: %+v", state)
+}
 
 func testTLS(t *testing.T) (map[string]any, map[string]any) {
 	t.Helper()

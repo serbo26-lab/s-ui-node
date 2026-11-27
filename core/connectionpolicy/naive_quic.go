@@ -17,6 +17,7 @@ import (
 	E "github.com/sagernet/sing/common/exceptions"
 	M "github.com/sagernet/sing/common/metadata"
 	"github.com/sagernet/sing/common/ntp"
+	"github.com/sagernet/sing/service"
 )
 
 func (h *naiveInbound) startHTTP3(ctx context.Context) (io.Closer, error) {
@@ -42,9 +43,10 @@ func (h *naiveInbound) startHTTP3(ctx context.Context) (io.Closer, error) {
 		return nil, err
 	}
 	server := &http3.Server{Handler: h.handler,
-		ConnContext: func(ctx context.Context, conn *quic.Conn) context.Context {
+		ConnContext: func(connCtx context.Context, conn *quic.Conn) context.Context {
 			conn.SetCongestionControl(congestionControl(conn))
-			return WithSource(log.ContextWithNewID(ctx), func() netip.Addr { return M.SocksaddrFromNet(conn.RemoteAddr()).Addr })
+			connCtx = service.ContextWith[Guard](connCtx, service.FromContext[Guard](ctx))
+			return WithSource(log.ContextWithNewID(connCtx), func() netip.Addr { return M.SocksaddrFromNet(conn.RemoteAddr()).Addr })
 		},
 	}
 	go func() {

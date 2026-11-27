@@ -35,6 +35,10 @@ func Forwarded(peer netip.Addr, headers []string, proxies []netip.Prefix) netip.
 	if len(headers) == 0 || len(headers) > MaxProxies {
 		return netip.Addr{}
 	}
+	return forwardedChain(peer, headers, proxies)
+}
+
+func forwardedChain(peer netip.Addr, headers []string, proxies []netip.Prefix) netip.Addr {
 	current, hops := peer, 0
 	for i := len(headers) - 1; i >= 0; i-- {
 		parts := strings.Split(headers[i], ",")
