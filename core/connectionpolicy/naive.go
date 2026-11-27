@@ -44,23 +44,26 @@ func newNaiveInbound(ctx context.Context, router adapter.Router, logger log.Cont
 	// stays unopened; the outer server binds the peer before parsing headers.
 	handlerOptions := options
 	handlerOptions.TLS, handlerOptions.Network = nil, N.NetworkTCP
-	inner, err := naive.NewInbound(ctx, router, logger, tag, handlerOptions)
-	if err != nil {
-		return nil, err
-	}
-	handler := inner.(http.Handler)
+	var handler http.Handler
 	if managedAuthentication(ctx) && len(options.Users) == 0 {
 		handler = http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 			writer.WriteHeader(http.StatusProxyAuthRequired)
 		})
+	} else {
+		inner, err := naive.NewInbound(ctx, router, logger, tag, handlerOptions)
+		if err != nil {
+			return nil, err
+		}
+		handler = inner.(http.Handler)
 	}
 	h := &naiveInbound{Adapter: inbound.NewAdapter(C.TypeNaive, tag), logger: logger,
 		handler: &peerHandler{inner: handler}, options: options}
 	if options.TLS != nil {
-		h.tls, err = tls.NewServer(ctx, logger, common.PtrValueOrDefault(options.TLS))
+		config, err := tls.NewServer(ctx, logger, common.PtrValueOrDefault(options.TLS))
 		if err != nil {
 			return nil, err
 		}
+		h.tls = config
 	}
 	h.listener = listener.New(listener.Options{Context: ctx, Logger: logger, Listen: options.ListenOptions})
 	return h, nil
