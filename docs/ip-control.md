@@ -36,6 +36,14 @@ continue to apply independently.
 The node's ordinary status advertises `ip_control_version`. An unsupported or
 unreachable node produces incomplete coverage for its assigned clients.
 
+Established flows keep their client identity when a login is reassigned.
+Ambiguous live logins suspend restrictions for the affected accounts until the
+older flows close.
+
+Client-managed HTTP, mixed, SOCKS and Naive inbounds remain authenticated when
+the last enabled client is removed, including when IP control is off. Standalone
+core configurations retain their native anonymous mode.
+
 ## HTTP source addresses
 
 Direct connections use the network peer. Client-supplied forwarding headers do
@@ -52,6 +60,7 @@ header with a verified client address. X-Real-IP and other vendor-specific
 headers are not trusted implicitly. Missing or malformed evidence from a trusted
 proxy makes that client's observations incomplete; a shared proxy address is
 not counted as a verified client address. Catch-all trusted networks are rejected.
+Changing the trust policy clears earlier source evidence and starts fresh confirmation.
 
 ## Storage and API
 
@@ -60,7 +69,7 @@ stored in the panel's SQLite database. They use ordinary panel backup and
 restore. Live addresses, observations and admission leases are memory-only;
 restoring a backup starts a new control session.
 
-Authenticated API routes:
+Authenticated API routes, relative to the panel's configured base path:
 
 | Method | Route | Content |
 | --- | --- | --- |

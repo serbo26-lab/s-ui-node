@@ -8,6 +8,6 @@ import (
 	"io"
 )
 
-func (h *naiveInbound) startHTTP3(context.Context) (io.Closer, error) {
+func (*naiveInbound) startHTTP3(context.Context) (io.Closer, error) {
 	return nil, errors.New("QUIC is not included in this build")
 }
