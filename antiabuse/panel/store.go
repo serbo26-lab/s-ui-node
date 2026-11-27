@@ -13,6 +13,8 @@ import (
 	"gorm.io/gorm/clause"
 )
 
+const groupColumn = "`group`"
+
 var ErrConflict = errors.New("ip_control_conflict")
 var ErrInvalid = errors.New("ip_control_invalid")
 
@@ -65,7 +67,7 @@ func (s *Store) Configuration() (Configuration, error) {
 		if err := tx.First(&row, 1).Error; err != nil {
 			return err
 		}
-		return tx.Order("`group`").Find(&groups).Error
+		return tx.Order(groupColumn).Find(&groups).Error
 	})
 	if err != nil {
 		return Configuration{}, err
@@ -131,11 +133,11 @@ func DeleteClientPolicies(tx *gorm.DB, ids []uint) error {
 
 func (s *Store) GroupNames() ([]string, error) {
 	var clients []string
-	if err := s.db.Table("clients").Distinct("`group`").Where("`group` <> ''").Pluck("`group`", &clients).Error; err != nil {
+	if err := s.db.Table("clients").Distinct(groupColumn).Where("`group` <> ''").Pluck(groupColumn, &clients).Error; err != nil {
 		return nil, err
 	}
 	var saved []string
-	if err := s.db.Model(&ipmodel.GroupRule{}).Pluck("`group`", &saved).Error; err != nil {
+	if err := s.db.Model(&ipmodel.GroupRule{}).Pluck(groupColumn, &saved).Error; err != nil {
 		return nil, err
 	}
 	return uniqueGroups(clients, saved), nil

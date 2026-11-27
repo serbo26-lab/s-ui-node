@@ -11,6 +11,7 @@ import (
 	"github.com/alireza0/s-ui/database/model"
 	"github.com/alireza0/s-ui/logger"
 	"github.com/alireza0/s-ui/util/common"
+	"gorm.io/gorm"
 )
 
 var (
@@ -382,41 +383,7 @@ func (s *ConfigService) Save(obj string, act string, data json.RawMessage, initU
 	if tx.Error != nil {
 		return nil, tx.Error
 	}
-	defer func() {
-		// A panic leaves err nil, which would otherwise commit a half-applied
-		// transaction while gin tells the operator the save failed.
-		if r := recover(); r != nil {
-			tx.Rollback()
-			panic(r)
-		}
-		if err != nil {
-			tx.Rollback()
-			return
-		}
-		if cErr := tx.Commit().Error; cErr != nil {
-			err = cErr
-			objs = nil
-			logger.Error("failed to commit config save: ", cErr)
-			return
-		}
-		if restartWith != nil {
-			// Detached: a restart takes seconds and this is an HTTP handler.
-			// The recover is required -- a panic here is outside gin's reach.
-			go func() {
-				defer func() {
-					if r := recover(); r != nil {
-						logger.Error("panic while restarting core with new config: ", r)
-					}
-				}()
-				_ = s.restartCoreWithConfig(restartWith)
-			}()
-			return
-		}
-		// Try to start core if it is not running
-		if !corePtr.IsRunning() {
-			s.StartCore()
-		}
-	}()
+	defer s.finishSave(tx, &objs, &err, &restartWith)
 
 	switch obj {
 	case "clients":
@@ -522,4 +489,40 @@ func (s *ConfigService) GetChanges(actor string, chngKey string, count string) [
 		logger.Warning(err)
 	}
 	return chngs
+}
+
+func (s *ConfigService) finishSave(tx *gorm.DB, objects *[]string, saveError *error, restartWith *json.RawMessage) {
+	// A panic leaves err nil, which would otherwise commit a half-applied
+	// transaction while gin tells the operator the save failed.
+	if r := recover(); r != nil {
+		tx.Rollback()
+		panic(r)
+	}
+	if *saveError != nil {
+		tx.Rollback()
+		return
+	}
+	if cErr := tx.Commit().Error; cErr != nil {
+		*saveError = cErr
+		*objects = nil
+		logger.Error("failed to commit config save: ", cErr)
+		return
+	}
+	if *restartWith != nil {
+		// Detached: a restart takes seconds and this is an HTTP handler.
+		// The recover is required -- a panic here is outside gin's reach.
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					logger.Error("panic while restarting core with new config: ", r)
+				}
+			}()
+			_ = s.restartCoreWithConfig(*restartWith)
+		}()
+		return
+	}
+	// Try to start core if it is not running
+	if !corePtr.IsRunning() {
+		s.StartCore()
+	}
 }
