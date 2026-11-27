@@ -228,6 +228,9 @@ func (f *Flow) bindClient() *string {
 }
 
 func (f *Flow) Permit() bool {
+	if f.closed.Load() {
+		return false
+	}
 	if !f.runtime.enabled.Load() {
 		return true
 	}
