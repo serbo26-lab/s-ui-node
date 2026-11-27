@@ -27,6 +27,7 @@ type StatusV2 struct {
 	Protocol              int                        `json:"protocol"`
 	ExtendedInbounds      bool                       `json:"extended_inbounds,omitempty"`
 	ProxyInbounds         bool                       `json:"proxy_inbounds,omitempty"`
+	IPControlVersion      uint32                     `json:"ip_control_version,omitempty"`
 	SingBoxVersion        string                     `json:"sing_box_version,omitempty"`
 	AgentDigest           string                     `json:"agent_digest,omitempty"`
 	NodeID                uint64                     `json:"node_id"`
@@ -289,6 +290,7 @@ func (m *ManagerV2) Status() StatusV2 {
 	s.SingBoxVersion, s.AgentDigest = SingBoxVersion(), ExecutableDigest()
 	s.ExtendedInbounds = true
 	s.ProxyInbounds = true
+	s.IPControlVersion = ipControlVersion(m.runtime)
 	if m.resources != nil {
 		status := m.resources.Status()
 		s.CertificateResource = &status

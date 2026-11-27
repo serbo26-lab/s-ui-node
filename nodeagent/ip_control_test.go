@@ -5,7 +5,19 @@ import (
 	"testing"
 
 	ipruntime "github.com/alireza0/s-ui/antiabuse/runtime"
+	"github.com/alireza0/s-ui/antiabuse/wire"
 )
+
+func TestStatusAdvertisesOnlyImplementedIPControl(t *testing.T) {
+	runtime := NewCoreRuntime()
+	t.Cleanup(func() { _ = runtime.Close() })
+	if status := NewManagerV2(1, nil, runtime).Status(); status.IPControlVersion != wire.Version {
+		t.Fatal("implemented IP control missing from ordinary status")
+	}
+	if status := NewManagerV2(1, nil, nil).Status(); status.IPControlVersion != 0 {
+		t.Fatal("unimplemented IP control advertised")
+	}
+}
 
 func TestIPBindingsUseProtocolCredentialsAndRejectAmbiguousNames(t *testing.T) {
 	for _, test := range []struct{ protocol, method, key, user string }{

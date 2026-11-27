@@ -33,6 +33,9 @@ client. Nodes do not make independent decisions while the panel is unavailable;
 previous decisions expire within 15 seconds. Enable, traffic quota and expiry
 continue to apply independently.
 
+The node's ordinary status advertises `ip_control_version`. An unsupported or
+unreachable node produces incomplete coverage for its assigned clients.
+
 ## HTTP source addresses
 
 Direct connections use the network peer. Client-supplied forwarding headers do

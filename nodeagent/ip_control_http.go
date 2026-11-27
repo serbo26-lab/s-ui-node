@@ -14,7 +14,7 @@ import (
 func registerIPControl(mux *http.ServeMux, manager *ManagerV2) {
 	for _, path := range []string{wire.ConfigPath, wire.StatePath, wire.DecisionPath} {
 		mux.HandleFunc(path, func(writer http.ResponseWriter, request *http.Request) {
-			runtime, ok := manager.runtime.(interface{ IPControlSession() *ipagent.Session })
+			runtime, ok := manager.runtime.(ipControlRuntime)
 			if !ok || runtime.IPControlSession() == nil {
 				http.Error(writer, "IP control unavailable", http.StatusNotImplemented)
 				return

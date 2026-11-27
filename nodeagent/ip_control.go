@@ -11,6 +11,15 @@ import (
 	"github.com/alireza0/s-ui/antiabuse/wire"
 )
 
+type ipControlRuntime interface{ IPControlSession() *ipagent.Session }
+
+func ipControlVersion(runtime SafeRuntime) uint32 {
+	if control, ok := runtime.(ipControlRuntime); ok && control.IPControlSession() != nil {
+		return wire.Version
+	}
+	return 0
+}
+
 func (r *CoreRuntime) initializeIPControl() {
 	r.ipOnce.Do(func() {
 		var err error
