@@ -282,15 +282,7 @@ func nativeProxyOptions(t *testing.T, name string) (map[string]any, map[string]a
 		user["auth_str"], client["auth_str"] = "test-only", "test-only"
 		server["up_mbps"], server["down_mbps"], client["up_mbps"], client["down_mbps"] = 100, 100, 100, 100
 	case "shadowsocks":
-		method, password := "aes-128-gcm", "test-only"
-		if name == "shadowsocks-2022" {
-			method, password = "2022-blake3-aes-128-gcm", "ZmVkY2JhOTg3NjU0MzIxMA=="
-			server["password"] = "MDEyMzQ1Njc4OWFiY2RlZg=="
-			client["password"] = "MDEyMzQ1Njc4OWFiY2RlZg==:" + password
-		} else {
-			client["password"] = password
-		}
-		server["method"], client["method"], user["password"] = method, method, password
+		configureShadowsocksTest(server, client, user, name)
 	}
 	if kind == "trojan" || kind == "anytls" || kind == "hysteria2" || kind == "tuic" {
 		user["password"], client["password"] = "test-only", "test-only"
@@ -315,6 +307,18 @@ func nativeProxyOptions(t *testing.T, name string) (map[string]any, map[string]a
 		}
 	}
 	return server, client
+}
+
+func configureShadowsocksTest(server, client, user map[string]any, name string) {
+	method, password := "aes-128-gcm", "test-only"
+	if name == "shadowsocks-2022" {
+		method, password = "2022-blake3-aes-128-gcm", "ZmVkY2JhOTg3NjU0MzIxMA=="
+		server["password"] = "MDEyMzQ1Njc4OWFiY2RlZg=="
+		client["password"] = "MDEyMzQ1Njc4OWFiY2RlZg==:" + password
+	} else {
+		client["password"] = password
+	}
+	server["method"], client["method"], user["password"] = method, method, password
 }
 
 func TestShadowTLSDetourKeepsFinalClientSource(t *testing.T) {
