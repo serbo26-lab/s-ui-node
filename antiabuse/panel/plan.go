@@ -90,19 +90,23 @@ func (p plan) fingerprint(now time.Time) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func (p plan) policies(now time.Time) (map[string]engine.Policy, map[ipruntime.Identity]string, []string) {
+func (p plan) policies(now time.Time) (map[string]engine.Policy, map[ipruntime.Identity]string, []string, map[string]string) {
 	groups, individual, inbounds, sources := p.policyIndexes()
 	policies := map[string]engine.Policy{}
+	limitSources := map[string]string{}
 	users := map[ipruntime.Identity]string{}
 	unresolved := map[string]bool{}
 	for _, client := range p.clients {
-		if !client.Enable || client.Expiry > 0 && client.Expiry <= now.Unix() {
-			continue
-		}
 		var override *uint32
 		if row, ok := individual[client.ID]; ok && row.CreatedAt == client.CreatedAt {
 			limit := row.Limit
 			override = &limit
+		}
+		policy := engine.Policy{Limit: engine.EffectiveLimit(client.Group, override, groups)}
+		policies[client.key()] = policy
+		limitSources[client.key()] = limitSource(client.Group, override, groups)
+		if !client.Enable || client.Expiry > 0 && client.Expiry <= now.Unix() {
+			continue
 		}
 		participant := slices.Clone(sources[client.ID])
 		local, valid := localBindings(client, inbounds, users, unresolved)
@@ -112,14 +116,25 @@ func (p plan) policies(now time.Time) (map[string]engine.Policy, map[ipruntime.I
 		if !valid {
 			unresolved[client.key()] = true
 		}
-		policies[client.key()] = engine.Policy{Limit: engine.EffectiveLimit(client.Group, override, groups), Sources: participant}
+		policy.Sources = participant
+		policies[client.key()] = policy
 	}
 	var incomplete []string
 	for id := range unresolved {
 		incomplete = append(incomplete, id)
 	}
 	slices.Sort(incomplete)
-	return policies, users, incomplete
+	return policies, users, incomplete, limitSources
+}
+
+func limitSource(group string, override *uint32, groups map[string]uint32) string {
+	if override != nil {
+		return "client"
+	}
+	if _, exists := groups[group]; exists {
+		return "group"
+	}
+	return "default"
 }
 
 func (p plan) policyIndexes() (map[string]uint32, map[uint]ipmodel.ClientRule, map[uint]model.Inbound, map[uint][]string) {

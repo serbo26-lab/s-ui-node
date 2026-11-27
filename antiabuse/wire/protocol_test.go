@@ -8,6 +8,32 @@ import (
 
 var identity = Identity{NodeID: 1, Epoch: "epoch", AccessRevision: 1}
 
+func TestDecisionRejectsAmbiguousOrUnboundedRules(t *testing.T) {
+	valid := Decision{Version: Version, Identity: identity, Scope: "scope", ConfigRevision: 1,
+		Boot: "boot", Sequence: 1, Challenge: "challenge", Revision: 1,
+		Rules: []Rule{{Client: "client", Limit: 1, Complete: true, Allowed: []netip.Prefix{netip.MustParsePrefix("192.0.2.1/32")}}}}
+	if err := valid.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	duplicate := valid
+	duplicate.Rules = []Rule{valid.Rules[0], valid.Rules[0]}
+	if duplicate.Validate() == nil {
+		t.Fatal("duplicate client decision accepted")
+	}
+	for _, prefix := range []string{"0.0.0.0/0", "192.0.2.0/24", "2001:db8::1/128", "::ffff:192.0.2.1/128"} {
+		invalid := valid
+		invalid.Rules = []Rule{{Client: "client", Allowed: []netip.Prefix{netip.MustParsePrefix(prefix)}}}
+		if invalid.Validate() == nil {
+			t.Fatal("non-normalized source prefix accepted")
+		}
+	}
+	oversized := valid
+	oversized.Rules = []Rule{{Client: "client", Allowed: make([]netip.Prefix, MaxEntries+1)}}
+	if oversized.Validate() == nil {
+		t.Fatal("unbounded address decision accepted")
+	}
+}
+
 func header() Header {
 	return Header{Version: Version, Identity: identity, Scope: "scope", ConfigRevision: 1,
 		Boot: "boot", Sequence: 1, Challenge: "challenge", Complete: true, Total: 2}

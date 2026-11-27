@@ -32,7 +32,7 @@ func registerIPControlRoutes(group *gin.RouterGroup) {
 		value, err := ipController(ctx).Configuration()
 		jsonObj(ctx, value, err)
 	})
-	routes.PUT("/settings", saveIPControlSettings)
+	routes.POST("/settings", saveIPControlSettings)
 	routes.GET("/groups", func(ctx *gin.Context) {
 		value, err := ipController(ctx).GroupNames()
 		jsonObj(ctx, value, err)

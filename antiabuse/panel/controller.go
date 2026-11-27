@@ -28,23 +28,28 @@ type Transport interface {
 }
 
 type ClientStatus struct {
-	ClientID    uint   `json:"client_id"`
-	Limit       uint32 `json:"limit"`
-	Available   bool   `json:"available"`
-	ActiveCount *int   `json:"active_count"`
-	Checking    bool   `json:"checking"`
-	UpdatedAt   int64  `json:"updated_at"`
-	Denied      int    `json:"denied"`
-	Applied     bool   `json:"applied"`
+	LimitSource       string `json:"limit_source"`
+	RequestedRevision uint64 `json:"requested_revision"`
+	AppliedRevision   uint64 `json:"applied_revision"`
+	ClientID          uint   `json:"client_id"`
+	Limit             uint32 `json:"limit"`
+	Available         bool   `json:"available"`
+	ActiveCount       *int   `json:"active_count"`
+	Checking          bool   `json:"checking"`
+	UpdatedAt         int64  `json:"updated_at"`
+	Denied            int    `json:"denied"`
+	Applied           bool   `json:"applied"`
 }
 
 type work struct {
-	key      string
-	scope    string
-	config   Configuration
-	policies map[string]engine.Policy
-	clients  map[string]uint
-	targets  map[string]target
+	revision     uint64
+	limitSources map[string]string
+	key          string
+	scope        string
+	config       Configuration
+	policies     map[string]engine.Policy
+	clients      map[string]uint
+	targets      map[string]target
 }
 
 type target struct {
@@ -71,28 +76,29 @@ type statusView struct {
 // Controller's engine and worker lifecycle have one owner. Remote I/O runs
 // independently; a stalled peer cannot hold the local sampling loop.
 type Controller struct {
-	store     *Store
-	now       func() time.Time
-	local     *ipruntime.Runtime
-	ready     func() bool
-	transport Transport
-	view      atomic.Pointer[work]
-	status    atomic.Pointer[statusView]
-	dirty     atomic.Bool
-	wake      chan struct{}
-	results   chan observationResult
-	acks      chan applicationResult
-	slots     chan struct{}
-	engine    *engine.Engine
-	profile   engine.Profile
-	scope     string
-	revision  uint64
-	workers   map[string]context.CancelFunc
-	wg        sync.WaitGroup
-	applied   map[string]string
-	expected  map[string]string
-	lastEvent map[string]string
-	lastPrune time.Time
+	store          *Store
+	now            func() time.Time
+	local          *ipruntime.Runtime
+	ready          func() bool
+	transport      Transport
+	view           atomic.Pointer[work]
+	status         atomic.Pointer[statusView]
+	dirty          atomic.Bool
+	wake           chan struct{}
+	results        chan observationResult
+	acks           chan applicationResult
+	slots          chan struct{}
+	engine         *engine.Engine
+	profile        engine.Profile
+	scope          string
+	revision       uint64
+	policyRevision uint64
+	workers        map[string]context.CancelFunc
+	wg             sync.WaitGroup
+	applied        map[string]string
+	expected       map[string]string
+	lastEvent      map[string]string
+	lastPrune      time.Time
 }
 
 func NewController(store *Store, local *ipruntime.Runtime, transport Transport, ready func() bool) (*Controller, error) {
@@ -122,7 +128,7 @@ func (c *Controller) Start(parent context.Context) context.CancelFunc {
 }
 
 func (c *Controller) run(ctx context.Context) {
-	c.scope, c.revision = rand.Text(), 0
+	c.scope, c.revision, c.policyRevision = rand.Text(), 0, 0
 	c.engine, c.profile = nil, engine.Profile{}
 	c.local.SetEnabled(false)
 	c.workers = map[string]context.CancelFunc{}
@@ -195,7 +201,7 @@ func (c *Controller) refresh(ctx context.Context) error {
 		}
 		c.profile = profile
 	}
-	policies, users, incomplete := p.policies(c.now())
+	policies, users, incomplete, limitSources := p.policies(c.now())
 	if err := c.local.Configure(profile); err != nil {
 		return err
 	}
@@ -203,14 +209,21 @@ func (c *Controller) refresh(ctx context.Context) error {
 	c.local.SetIncomplete(incomplete)
 	c.local.SetEnabled(p.config.Enabled)
 	c.engine.SetPolicies(policies)
-	w := &work{key: key, scope: c.scope, config: p.config, policies: policies,
+	c.policyRevision++
+	w := &work{revision: c.policyRevision, limitSources: limitSources, key: key, scope: c.scope, config: p.config, policies: policies,
 		clients: map[string]uint{}, targets: p.targets()}
 	for _, client := range p.clients {
 		w.clients[client.key()] = client.ID
 	}
 	c.view.Store(w)
 	c.applied, c.expected = map[string]string{}, map[string]string{}
-	c.status.Store(&statusView{enabled: p.config.Enabled, updated: c.now(), clients: map[uint]ClientStatus{}})
+	initial := &statusView{enabled: p.config.Enabled, updated: c.now(), clients: map[uint]ClientStatus{}}
+	for key, policy := range policies {
+		initial.clients[w.clients[key]] = ClientStatus{
+			ClientID: w.clients[key], Limit: policy.Limit, LimitSource: limitSources[key], RequestedRevision: w.revision,
+		}
+	}
+	c.status.Store(initial)
 	c.resetWorkers(ctx, w)
 	return nil
 }
@@ -237,7 +250,7 @@ func (c *Controller) resetWorkers(ctx context.Context, w *work) {
 		cancel()
 	}
 	c.workers = map[string]context.CancelFunc{}
-	if !w.config.Enabled || c.transport == nil {
+	if c.transport == nil {
 		return
 	}
 	for source, target := range w.targets {
@@ -251,7 +264,9 @@ func (c *Controller) worker(ctx context.Context, w *work, source string, target 
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 	for {
-		c.exchange(ctx, w, source, target)
+		if delivered := c.exchange(ctx, w, source, target); delivered && !w.config.Enabled {
+			return
+		}
 		select {
 		case <-ctx.Done():
 			return
@@ -260,12 +275,12 @@ func (c *Controller) worker(ctx context.Context, w *work, source string, target 
 	}
 }
 
-func (c *Controller) exchange(parent context.Context, w *work, source string, target target) {
+func (c *Controller) exchange(parent context.Context, w *work, source string, target target) bool {
 	select {
 	case c.slots <- struct{}{}:
 		defer func() { <-c.slots }()
 	case <-parent.Done():
-		return
+		return false
 	}
 	ctx, cancel := context.WithTimeout(parent, 12*time.Second)
 	defer cancel()
@@ -274,15 +289,18 @@ func (c *Controller) exchange(parent context.Context, w *work, source string, ta
 	if err == nil {
 		defer peer.Close()
 		config := wire.Configuration{Version: wire.Version, Identity: target.identity, Scope: w.scope,
-			Revision: w.config.Revision, Enabled: true, Profile: wire.Profile{
+			Revision: w.config.Revision, Enabled: w.config.Enabled, Profile: wire.Profile{
 				ActivitySeconds: w.config.ActivitySeconds, TransitionSeconds: w.config.TransitionSeconds,
 				ConfirmationSeconds: uint32(w.config.Profile().Confirmation / time.Second)}}
 		result.header, result.entries, result.requested, result.err = peer.Observe(ctx, config)
 	}
+	if !w.config.Enabled {
+		return result.err == nil
+	}
 	select {
 	case c.results <- result:
 	case <-ctx.Done():
-		return
+		return false
 	}
 	select {
 	case decision := <-result.answer:
@@ -296,6 +314,7 @@ func (c *Controller) exchange(parent context.Context, w *work, source string, ta
 		}
 	case <-ctx.Done():
 	}
+	return result.err == nil
 }
 
 func (c *Controller) respond(ctx context.Context, result observationResult) {
@@ -367,7 +386,7 @@ func (c *Controller) evaluate(w *work) map[string][]wire.Rule {
 	slices.Sort(keys)
 	for _, id := range keys {
 		result := c.engine.Evaluate(id, now)
-		status := ClientStatus{ClientID: w.clients[id], Limit: result.Limit, Available: result.Complete,
+		status := ClientStatus{ClientID: w.clients[id], LimitSource: w.limitSources[id], RequestedRevision: w.revision, Limit: result.Limit, Available: result.Complete,
 			Checking: result.Checking, UpdatedAt: now.Unix(), Denied: len(result.Denied)}
 		if result.Complete {
 			count := result.Active
@@ -394,6 +413,9 @@ func (c *Controller) evaluate(w *work) map[string][]wire.Rule {
 	for id, policy := range w.policies {
 		row := view.clients[w.clients[id]]
 		row.Applied = row.Available && c.isApplied(policy.Sources)
+		if row.Applied {
+			row.AppliedRevision = w.revision
+		}
 		view.clients[row.ClientID] = row
 	}
 	c.status.Store(view)
@@ -413,7 +435,7 @@ func (c *Controller) Status(ids []uint) (bool, []ClientStatus) {
 		row.ClientID = id
 		if !fresh || !view.enabled {
 			row.Available, row.ActiveCount = false, nil
-			row.Applied, row.Checking = false, false
+			row.Applied, row.Checking, row.AppliedRevision = false, false, 0
 		}
 		rows = append(rows, row)
 	}

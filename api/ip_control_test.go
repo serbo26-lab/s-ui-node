@@ -85,13 +85,13 @@ func TestIPControlTokenAPIValidatesAndSavesConfiguration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !call("PUT", "settings", string(body)).Success {
+	if !call("POST", "settings", string(body)).Success {
 		t.Fatal("valid settings rejected")
 	}
-	if call("PUT", "settings", string(body)).Success {
+	if call("POST", "settings", string(body)).Success {
 		t.Fatal("stale form overwrote current settings")
 	}
-	if call("PUT", "settings", `{"unknown":true}`).Success {
+	if call("POST", "settings", `{"unknown":true}`).Success {
 		t.Fatal("unknown setting accepted")
 	}
 	if !call("GET", "clients?ids=1,2", "").Success {
