@@ -22,8 +22,8 @@ func WithGuard(ctx context.Context, guard Guard) context.Context {
 
 type sourceKey struct{}
 
-// WithSource carries the physical peer independently of routing metadata. A
-// provider may follow a QUIC connection's current verified remote address.
+// WithSource carries a verified client address independently of routing metadata.
+// A provider may follow a QUIC connection's current authenticated peer.
 func WithSource(ctx context.Context, source func() netip.Addr) context.Context {
 	return context.WithValue(ctx, sourceKey{}, source)
 }

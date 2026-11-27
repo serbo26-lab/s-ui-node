@@ -32,6 +32,10 @@ jobs:
           go test -c -tags "$tags" -ldflags "$flags" -o checks/engine.test ./antiabuse/engine
           printf '%s\n' "$GITHUB_SHA" > checks/commit.txt
           sha256sum checks/*.test > checks/SHA256SUMS
+      - name: Check node build profile
+        run: |
+          . ./build-tags.sh
+          go test -tags "$(tags_for agent)" ./core/connectionpolicy
       - uses: actions/upload-artifact@v7
         with:
           name: ip-control-checks

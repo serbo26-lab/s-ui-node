@@ -104,15 +104,15 @@ func (s *httpTransport) Close() error {
 	return common.Close(s.server, s.V2RayServerTransport)
 }
 
-type physicalPeer interface{ PhysicalPeer() netip.Addr }
+type verifiedSource interface{ SourceAddress() netip.Addr }
 
 type peerConn struct {
 	net.Conn
 	address netip.Addr
 }
 
-func (c *peerConn) PhysicalPeer() netip.Addr { return c.address }
-func (c *peerConn) Upstream() any            { return c.Conn }
+func (c *peerConn) SourceAddress() netip.Addr { return c.address }
+func (c *peerConn) Upstream() any             { return c.Conn }
 
 type sourceHandler struct {
 	handler adapter.V2RayServerTransportHandler
@@ -133,8 +133,8 @@ func (h *sourceHandler) NewConnectionEx(ctx context.Context, conn net.Conn, sour
 }
 
 func connectionSource(conn net.Conn) func() netip.Addr {
-	if marked, ok := common.Cast[physicalPeer](conn); ok {
-		return marked.PhysicalPeer
+	if marked, ok := common.Cast[verifiedSource](conn); ok {
+		return marked.SourceAddress
 	}
 	if grpc, ok := common.Cast[*v2raygrpc.GRPCConn](conn); ok {
 		if stream, ok := grpc.GunService.(interface{ Context() context.Context }); ok {
