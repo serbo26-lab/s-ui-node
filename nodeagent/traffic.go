@@ -130,6 +130,7 @@ func (r *CoreRuntime) SetTrafficAccess(access AccessSnapshot) {
 	defer r.mu.Unlock()
 	r.collectTraffic()
 	r.trafficAliases = trafficAliases(access)
+	r.updateIPControl(access)
 }
 
 func (r *CoreRuntime) TrafficAccountingError() string {

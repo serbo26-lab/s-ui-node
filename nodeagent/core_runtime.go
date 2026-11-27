@@ -10,7 +10,10 @@ import (
 	"path/filepath"
 	"sync"
 
+	ipagent "github.com/alireza0/s-ui/antiabuse/agent"
+	ipruntime "github.com/alireza0/s-ui/antiabuse/runtime"
 	"github.com/alireza0/s-ui/core"
+	"github.com/alireza0/s-ui/core/connectionpolicy"
 	"github.com/alireza0/s-ui/nodecert"
 	"github.com/gofrs/uuid/v5"
 	"github.com/sagernet/sing-box/option"
@@ -20,6 +23,9 @@ var errHotUsersUnsupported = errors.New("inbound_user_update_unsupported")
 
 // CoreRuntime reuses S-UI's core, never the panel's global ConfigService/corePtr.
 type CoreRuntime struct {
+	ipOnce              sync.Once
+	ipRuntime           *ipruntime.Runtime
+	ipSession           *ipagent.Session
 	mu                  sync.Mutex
 	core                *core.Core
 	config              []byte
@@ -43,7 +49,9 @@ func (r *CoreRuntime) SetCertificateResolver(resolve func(string) (nodecert.Meta
 func NewCoreRuntime() *CoreRuntime { r := &CoreRuntime{}; r.freshCore(); return r }
 
 func (r *CoreRuntime) freshCore() {
+	r.initializeIPControl()
 	ctx, cancel := context.WithCancel(context.Background())
+	ctx = connectionpolicy.WithGuard(ctx, r.ipRuntime)
 	r.core = core.NewCoreWithContext(ctx)
 	r.cancelMu.Lock()
 	r.cancel = cancel

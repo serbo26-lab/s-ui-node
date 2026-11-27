@@ -9,6 +9,7 @@ import (
 
 func HandlerV2(manager *ManagerV2) http.Handler {
 	mux := http.NewServeMux()
+	registerIPControl(mux, manager)
 	status := func(w http.ResponseWriter, r *http.Request) { statusV2(manager, w, r) }
 	mux.HandleFunc("/v2/status", status)
 	mux.HandleFunc("/v2/certificate", func(w http.ResponseWriter, r *http.Request) { certificateV2(manager, w, r) })
