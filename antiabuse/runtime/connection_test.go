@@ -78,6 +78,37 @@ func TestStreamCloseInterruptsBlockedWriterBeforeClosingProtocolState(t *testing
 	}
 }
 
+func TestStreamCloseSettlesCachedReadBeforeClosingProtocolState(t *testing.T) {
+	r, _ := newRuntime(t)
+	left, right := net.Pipe()
+	t.Cleanup(func() { _ = right.Close() })
+	buffer := buf.As([]byte{42})
+	raw := bufio.NewCachedConn(left, buffer)
+	buffer.Release()
+	conn, err := r.Connection(context.Background(), raw, adapter.InboundContext{Inbound: "in", User: "user", Source: M.SocksaddrFrom(sourceA, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		var data [1]byte
+		for {
+			if _, err := conn.Read(data[:]); err != nil {
+				return
+			}
+		}
+	}()
+	if err := conn.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("close did not interrupt the cached reader")
+	}
+}
+
 func TestCounterUnwrapCannotBypassExistingStreamGuard(t *testing.T) {
 	r, c := newRuntime(t)
 	left, right := net.Pipe()

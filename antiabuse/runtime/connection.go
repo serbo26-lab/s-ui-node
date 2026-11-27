@@ -47,6 +47,7 @@ func (r *Runtime) PacketConnection(ctx context.Context, conn N.PacketConn, metad
 type stream struct {
 	N.ExtendedConn
 	flow      *Flow
+	readMu    sync.Mutex
 	writeMu   sync.Mutex
 	closeOnce sync.Once
 	closed    atomic.Bool
@@ -57,9 +58,15 @@ func (c *stream) Close() error {
 	c.closeOnce.Do(func() {
 		c.closed.Store(true)
 		c.flow.Close()
-		// Interrupt a blocked write before waiting for protocol state to settle.
+		// Interrupt blocked I/O before waiting for protocol state to settle.
 		// Logical transports without deadlines retain their native stream close.
-		if c.ExtendedConn.SetWriteDeadline(time.Now()) == nil {
+		readDeadline := c.ExtendedConn.SetReadDeadline(time.Now())
+		writeDeadline := c.ExtendedConn.SetWriteDeadline(time.Now())
+		if readDeadline == nil {
+			c.readMu.Lock()
+			defer c.readMu.Unlock()
+		}
+		if writeDeadline == nil {
 			c.writeMu.Lock()
 			defer c.writeMu.Unlock()
 		}
@@ -69,7 +76,9 @@ func (c *stream) Close() error {
 }
 
 func (c *stream) Read(data []byte) (int, error) {
-	n, err := c.ExtendedConn.Read(data)
+	c.readMu.Lock()
+	n, err := c.read(data)
+	c.readMu.Unlock()
 	if n > 0 && !c.flow.Permit() {
 		_ = c.Close()
 		return 0, ErrDenied
@@ -78,9 +87,19 @@ func (c *stream) Read(data []byte) (int, error) {
 	return n, err
 }
 
+func (c *stream) read(data []byte) (int, error) {
+	if c.closed.Load() {
+		return 0, net.ErrClosed
+	}
+	return c.ExtendedConn.Read(data)
+}
+
 func (c *stream) ReadBuffer(buffer *buf.Buffer) error {
 	before := buffer.Len()
-	if err := c.ExtendedConn.ReadBuffer(buffer); err != nil {
+	c.readMu.Lock()
+	err := c.readBuffer(buffer)
+	c.readMu.Unlock()
+	if err != nil {
 		return err
 	}
 	n := buffer.Len() - before
@@ -90,6 +109,13 @@ func (c *stream) ReadBuffer(buffer *buf.Buffer) error {
 	}
 	c.flow.Activity(n)
 	return nil
+}
+
+func (c *stream) readBuffer(buffer *buf.Buffer) error {
+	if c.closed.Load() {
+		return net.ErrClosed
+	}
+	return c.ExtendedConn.ReadBuffer(buffer)
 }
 
 func (c *stream) Write(data []byte) (int, error) {

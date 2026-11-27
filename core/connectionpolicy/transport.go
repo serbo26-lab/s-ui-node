@@ -108,10 +108,10 @@ type verifiedSource interface{ SourceAddress() netip.Addr }
 
 type peerConn struct {
 	net.Conn
-	address netip.Addr
+	source func() netip.Addr
 }
 
-func (c *peerConn) SourceAddress() netip.Addr { return c.address }
+func (c *peerConn) SourceAddress() netip.Addr { return c.source() }
 func (c *peerConn) Upstream() any             { return c.Conn }
 
 type sourceHandler struct {
@@ -152,11 +152,10 @@ type peerHandler struct{ inner http.Handler }
 func (h *peerHandler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	request = request.WithContext(forwardedContext(request.Context(), request.Header.Values("X-Forwarded-For")))
 	source := Source(request.Context())
-	address := netip.Addr{}
-	if source != nil {
-		address = source()
+	if source == nil {
+		source = func() netip.Addr { return netip.Addr{} }
 	}
-	wrapped := &peerWriter{ResponseWriter: writer, address: address}
+	wrapped := &peerWriter{ResponseWriter: writer, source: source}
 	if hijacker, ok := writer.(http.Hijacker); ok {
 		h.inner.ServeHTTP(&peerHijacker{peerWriter: wrapped, hijacker: hijacker}, request)
 		return
@@ -166,7 +165,7 @@ func (h *peerHandler) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 
 type peerWriter struct {
 	http.ResponseWriter
-	address netip.Addr
+	source func() netip.Addr
 }
 
 func (w *peerWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
@@ -183,5 +182,5 @@ func (w *peerHijacker) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	return &peerConn{Conn: conn, address: w.address}, buffer, nil
+	return &peerConn{Conn: conn, source: w.source}, buffer, nil
 }

@@ -206,6 +206,48 @@ func TestNativeProxyDatagramsObserveAndRecheckAdmission(t *testing.T) {
 	}
 }
 
+func TestLiveHTTPTransportsReevaluateTrustedProxySources(t *testing.T) {
+	for _, name := range []string{"vless-ws", "vless-httpupgrade", "vless-http"} {
+		t.Run(name, func(t *testing.T) {
+			runtime, err := ipruntime.New(engine.DefaultProfile(), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			runtime.SetUsers(map[ipruntime.Identity]string{{Inbound: "access", User: "user"}: "client"})
+			runtime.SetEnabled(true)
+			runtime.SetTrustedProxies([]netip.Prefix{netip.MustParsePrefix("127.0.0.1/32")})
+			server, client := nativeProxyOptions(t, name)
+			client["transport"].(map[string]any)["headers"] = map[string]any{"X-Forwarded-For": "192.0.2.99"}
+			serverCore := core.NewCoreWithContext(connectionpolicy.WithGuard(context.Background(), runtime))
+			runCore(t, serverCore, []any{server}, []any{map[string]any{"type": "direct", "tag": "direct"}})
+			clientCore := core.NewCore()
+			runCore(t, clientCore, nil, []any{client})
+			outbound, _ := clientCore.GetInstance().Outbound().Outbound("access")
+			echo, _ := echoServer(t)
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			t.Cleanup(cancel)
+			conn, err := outbound.DialContext(ctx, "tcp", M.ParseSocksaddr(echo))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = conn.Close() })
+			exchange(t, conn)
+			assertReportedSource(t, runtime, "192.0.2.99")
+			runtime.SetTrustedProxies(nil)
+			exchange(t, conn)
+			assertReportedSource(t, runtime, "127.0.0.1")
+		})
+	}
+}
+
+func assertReportedSource(t *testing.T, runtime *ipruntime.Runtime, address string) {
+	t.Helper()
+	state := runtime.Report("local").Snapshot
+	if len(state.Entries) != 1 || state.Entries[0].Address != netip.MustParseAddr(address) || state.Entries[0].ActivityAge == nil {
+		t.Fatalf("unexpected current source: %+v", state)
+	}
+}
+
 func testNativeDatagrams(t *testing.T, name string) {
 	t.Helper()
 	var elapsed atomic.Int64
