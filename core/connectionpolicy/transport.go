@@ -53,8 +53,12 @@ func NewServerTransport(ctx context.Context, logger logger.ContextLogger, option
 		},
 	}
 	var wrapped http.Handler = &peerHandler{inner: httpHandler}
-	if options.Type == C.V2RayTransportTypeHTTP {
-		h2 := &http2.Server{IdleTimeout: time.Duration(options.HTTPOptions.IdleTimeout)}
+	if options.Type == C.V2RayTransportTypeHTTP || options.Type == C.V2RayTransportTypeGRPC {
+		idleTimeout := options.HTTPOptions.IdleTimeout
+		if options.Type == C.V2RayTransportTypeGRPC {
+			idleTimeout = options.GRPCOptions.IdleTimeout
+		}
+		h2 := &http2.Server{IdleTimeout: time.Duration(idleTimeout)}
 		if err := http2.ConfigureServer(server.server, h2); err != nil {
 			_ = inner.Close()
 			return nil, err
@@ -115,21 +119,24 @@ type sourceHandler struct {
 
 func (h *sourceHandler) NewConnectionEx(ctx context.Context, conn net.Conn, source, destination M.Socksaddr, onClose N.CloseHandlerFunc) {
 	if Source(ctx) == nil {
-		var address netip.Addr
-		if marked, ok := common.Cast[physicalPeer](conn); ok {
-			address = marked.PhysicalPeer()
-		} else if grpc, ok := common.Cast[*v2raygrpc.GRPCConn](conn); ok {
-			if stream, ok := grpc.GunService.(interface{ Context() context.Context }); ok {
-				if p, ok := peer.FromContext(stream.Context()); ok {
-					address = M.SocksaddrFromNet(p.Addr).Addr
-				}
-			}
-		} else {
-			address = M.SocksaddrFromNet(conn.RemoteAddr()).Addr
-		}
-		ctx = WithSource(ctx, func() netip.Addr { return address })
+		ctx = WithSource(ctx, connectionSource(conn))
 	}
 	h.handler.NewConnectionEx(ctx, conn, source, destination, onClose)
+}
+
+func connectionSource(conn net.Conn) func() netip.Addr {
+	if marked, ok := common.Cast[physicalPeer](conn); ok {
+		return marked.PhysicalPeer
+	}
+	if grpc, ok := common.Cast[*v2raygrpc.GRPCConn](conn); ok {
+		if stream, ok := grpc.GunService.(interface{ Context() context.Context }); ok {
+			if p, ok := peer.FromContext(stream.Context()); ok {
+				return func() netip.Addr { return M.SocksaddrFromNet(p.Addr).Addr }
+			}
+		}
+		return func() netip.Addr { return netip.Addr{} }
+	}
+	return func() netip.Addr { return M.SocksaddrFromNet(conn.RemoteAddr()).Addr }
 }
 
 type peerHandler struct{ inner http.Handler }

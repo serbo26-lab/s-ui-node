@@ -44,6 +44,7 @@ type Runtime struct {
 	mu           sync.Mutex
 	entries      map[entryKey]*entry
 	unsupported  map[string]int
+	incomplete   map[string]bool
 	reservations map[entryKey]int64
 	sequence     uint64
 	revision     uint64
@@ -100,6 +101,20 @@ func (r *Runtime) SetUsers(users map[Identity]string) {
 	r.reservations = map[entryKey]int64{}
 }
 
+func (r *Runtime) SetIncomplete(ids []string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	next := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		next[id] = true
+	}
+	if !maps.Equal(r.incomplete, next) {
+		r.incomplete = next
+		r.table.Store(nil)
+		r.challenge = ""
+	}
+}
+
 type Report struct {
 	Snapshot  engine.Snapshot
 	Challenge string
@@ -138,7 +153,11 @@ func (r *Runtime) Report(source string) Report {
 			report.Snapshot.IncompleteClients = append(report.Snapshot.IncompleteClients, client)
 		}
 	}
+	for client := range r.incomplete {
+		report.Snapshot.IncompleteClients = append(report.Snapshot.IncompleteClients, client)
+	}
 	slices.Sort(report.Snapshot.IncompleteClients)
+	report.Snapshot.IncompleteClients = slices.Compact(report.Snapshot.IncompleteClients)
 	for key, value := range r.entries {
 		active, attempted := value.activity.Load(), value.attempt.Load()
 		activity, hasActivity := r.age(now, active)
