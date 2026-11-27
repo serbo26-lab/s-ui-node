@@ -1,0 +1,160 @@
+package connectionpolicy
+
+import (
+	"bufio"
+	"context"
+	"net"
+	"net/http"
+	"net/netip"
+	"os"
+	"time"
+
+	"github.com/sagernet/sing-box/adapter"
+	"github.com/sagernet/sing-box/common/tls"
+	C "github.com/sagernet/sing-box/constant"
+	"github.com/sagernet/sing-box/log"
+	"github.com/sagernet/sing-box/option"
+	"github.com/sagernet/sing-box/transport/v2ray"
+	"github.com/sagernet/sing-box/transport/v2raygrpc"
+	"github.com/sagernet/sing/common"
+	"github.com/sagernet/sing/common/logger"
+	M "github.com/sagernet/sing/common/metadata"
+	N "github.com/sagernet/sing/common/network"
+	"github.com/sagernet/sing/service"
+
+	"golang.org/x/net/http2"
+	"golang.org/x/net/http2/h2c"
+	"google.golang.org/grpc/peer"
+)
+
+// NewServerTransport reuses the transport's HTTP implementation. Its own
+// listener binds a physical peer before forwarded routing headers are parsed.
+func NewServerTransport(ctx context.Context, logger logger.ContextLogger, options option.V2RayTransportOptions, tlsConfig tls.ServerConfig, handler adapter.V2RayServerTransportHandler) (adapter.V2RayServerTransport, error) {
+	if service.FromContext[Guard](ctx) == nil {
+		return v2ray.NewServerTransport(ctx, logger, options, tlsConfig, handler)
+	}
+	inner, err := v2ray.NewServerTransport(ctx, logger, options, tlsConfig, &sourceHandler{handler: handler})
+	if err != nil || inner == nil {
+		return inner, err
+	}
+	httpHandler, isHTTP := inner.(http.Handler)
+	if !isHTTP {
+		return inner, nil
+	}
+	server := &httpTransport{V2RayServerTransport: inner, tls: tlsConfig}
+	server.server = &http.Server{
+		ReadHeaderTimeout: C.TCPTimeout,
+		MaxHeaderBytes:    http.DefaultMaxHeaderBytes,
+		BaseContext:       func(net.Listener) context.Context { return ctx },
+		ConnContext: func(ctx context.Context, conn net.Conn) context.Context {
+			address := M.SocksaddrFromNet(conn.RemoteAddr()).Addr
+			return WithSource(log.ContextWithNewID(ctx), func() netip.Addr { return address })
+		},
+	}
+	var wrapped http.Handler = &peerHandler{inner: httpHandler}
+	if options.Type == C.V2RayTransportTypeHTTP {
+		h2 := &http2.Server{IdleTimeout: time.Duration(options.HTTPOptions.IdleTimeout)}
+		if err := http2.ConfigureServer(server.server, h2); err != nil {
+			_ = inner.Close()
+			return nil, err
+		}
+		wrapped = h2c.NewHandler(wrapped, h2)
+		if tlsConfig != nil && !common.Contains(tlsConfig.NextProtos(), http2.NextProtoTLS) {
+			tlsConfig.SetNextProtos(append([]string{http2.NextProtoTLS}, tlsConfig.NextProtos()...))
+		}
+	} else {
+		server.server.TLSNextProto = map[string]func(*http.Server, *tls.STDConn, http.Handler){}
+	}
+	server.server.Handler = wrapped
+	return server, nil
+}
+
+type httpTransport struct {
+	adapter.V2RayServerTransport
+	server *http.Server
+	tls    tls.ServerConfig
+}
+
+func (s *httpTransport) Serve(listener net.Listener) error {
+	if s.tls != nil {
+		listener = tls.NewListener(listener, s.tls)
+	}
+	return s.server.Serve(listener)
+}
+
+func (s *httpTransport) ServePacket(net.PacketConn) error { return os.ErrInvalid }
+
+func (s *httpTransport) Close() error {
+	return common.Close(s.server, s.V2RayServerTransport)
+}
+
+type physicalPeer interface{ PhysicalPeer() netip.Addr }
+
+type peerConn struct {
+	net.Conn
+	address netip.Addr
+}
+
+func (c *peerConn) PhysicalPeer() netip.Addr { return c.address }
+func (c *peerConn) Upstream() any            { return c.Conn }
+
+type sourceHandler struct {
+	handler adapter.V2RayServerTransportHandler
+}
+
+func (h *sourceHandler) NewConnectionEx(ctx context.Context, conn net.Conn, source, destination M.Socksaddr, onClose N.CloseHandlerFunc) {
+	if Source(ctx) == nil {
+		var address netip.Addr
+		if marked, ok := common.Cast[physicalPeer](conn); ok {
+			address = marked.PhysicalPeer()
+		} else if grpc, ok := common.Cast[*v2raygrpc.GRPCConn](conn); ok {
+			if stream, ok := grpc.GunService.(interface{ Context() context.Context }); ok {
+				if p, ok := peer.FromContext(stream.Context()); ok {
+					address = M.SocksaddrFromNet(p.Addr).Addr
+				}
+			}
+		} else {
+			address = M.SocksaddrFromNet(conn.RemoteAddr()).Addr
+		}
+		ctx = WithSource(ctx, func() netip.Addr { return address })
+	}
+	h.handler.NewConnectionEx(ctx, conn, source, destination, onClose)
+}
+
+type peerHandler struct{ inner http.Handler }
+
+func (h *peerHandler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
+	source := Source(request.Context())
+	address := netip.Addr{}
+	if source != nil {
+		address = source()
+	}
+	wrapped := &peerWriter{ResponseWriter: writer, address: address}
+	if hijacker, ok := writer.(http.Hijacker); ok {
+		h.inner.ServeHTTP(&peerHijacker{peerWriter: wrapped, hijacker: hijacker}, request)
+		return
+	}
+	h.inner.ServeHTTP(wrapped, request)
+}
+
+type peerWriter struct {
+	http.ResponseWriter
+	address netip.Addr
+}
+
+func (w *peerWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+func (w *peerWriter) FlushError() error           { return http.NewResponseController(w.ResponseWriter).Flush() }
+func (w *peerWriter) Flush()                      { _ = w.FlushError() }
+
+type peerHijacker struct {
+	*peerWriter
+	hijacker http.Hijacker
+}
+
+func (w *peerHijacker) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	conn, buffer, err := w.hijacker.Hijack()
+	if err != nil {
+		return nil, nil, err
+	}
+	return &peerConn{Conn: conn, address: w.address}, buffer, nil
+}
