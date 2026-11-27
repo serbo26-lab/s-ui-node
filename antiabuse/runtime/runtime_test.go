@@ -34,6 +34,40 @@ func newRuntime(t *testing.T) (*Runtime, *clock) {
 	return r, c
 }
 
+func TestReassignedLoginPreservesIdentityAndReportsAmbiguousCoverage(t *testing.T) {
+	r, _ := newRuntime(t)
+	flow := openFlow(t, r, sourceA)
+	flow.Activity(1)
+	r.SetUsers(map[Identity]string{{Inbound: "in", User: "user"}: "replacement"})
+	flow.Activity(1)
+	report := r.Report("local").Snapshot
+	if len(report.Entries) != 1 || report.Entries[0].Client != "client" {
+		t.Fatal("existing flow was charged to a replacement account")
+	}
+	if len(report.IncompleteClients) != 2 || report.IncompleteClients[0] != "client" || report.IncompleteClients[1] != "replacement" {
+		t.Fatal("reassigned live login was treated as unambiguous", report.IncompleteClients)
+	}
+	flow.Close()
+	if report := r.Report("local"); len(report.Snapshot.IncompleteClients) != 0 {
+		t.Fatal("closed flow retained an ambiguous binding")
+	}
+}
+
+func TestClosedFlowCannotRenewActivityFromLateCallbacks(t *testing.T) {
+	r, clock := newRuntime(t)
+	flow := openFlow(t, r, sourceA)
+	flow.Activity(1)
+	flow.Close()
+	clock.advance(time.Minute)
+	flow.Activity(1)
+	if len(r.Report("local").Snapshot.Entries) != 0 {
+		t.Fatal("late callback revived a closed flow")
+	}
+	if len(r.bound) != 0 {
+		t.Fatal("closed flow retained its identity reference")
+	}
+}
+
 func openFlow(t *testing.T, r *Runtime, source netip.Addr) *Flow {
 	t.Helper()
 	f, err := r.Open(Identity{Inbound: "in", User: "user"}, func() netip.Addr { return source })

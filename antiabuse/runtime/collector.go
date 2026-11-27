@@ -45,6 +45,7 @@ type Runtime struct {
 	mu           sync.Mutex
 	entries      map[entryKey]*entry
 	unsupported  map[string]int
+	bound        map[Identity]map[string]int
 	incomplete   map[string]bool
 	reservations map[entryKey]int64
 	sequence     uint64
@@ -62,7 +63,7 @@ func New(profile engine.Profile, now func() time.Time) (*Runtime, error) {
 		now = time.Now
 	}
 	r := &Runtime{profile: profile, now: now, origin: now(), boot: rand.Text(),
-		entries: map[entryKey]*entry{}, unsupported: map[string]int{}, reservations: map[entryKey]int64{}}
+		entries: map[entryKey]*entry{}, unsupported: map[string]int{}, bound: map[Identity]map[string]int{}, reservations: map[entryKey]int64{}}
 	r.users.Store(&bindings{users: map[Identity]string{}})
 	return r, nil
 }
@@ -157,6 +158,7 @@ func (r *Runtime) Report(source string) Report {
 	for client := range r.incomplete {
 		report.Snapshot.IncompleteClients = append(report.Snapshot.IncompleteClients, client)
 	}
+	report.Snapshot.IncompleteClients = r.conflictingBindings(report.Snapshot.IncompleteClients)
 	slices.Sort(report.Snapshot.IncompleteClients)
 	report.Snapshot.IncompleteClients = slices.Compact(report.Snapshot.IncompleteClients)
 	report.Snapshot.Entries = r.observations(now)

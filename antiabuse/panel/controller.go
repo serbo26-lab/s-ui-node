@@ -201,7 +201,8 @@ func (c *Controller) refresh(ctx context.Context) error {
 		c.scope = rand.Text()
 	}
 	profile := p.config.Profile()
-	if c.engine == nil || profile != c.profile {
+	sourcesChanged := old != nil && !slices.Equal(old.config.TrustedProxies, p.config.TrustedProxies)
+	if c.engine == nil || profile != c.profile || sourcesChanged {
 		c.engine, err = engine.New(profile)
 		if err != nil {
 			return err

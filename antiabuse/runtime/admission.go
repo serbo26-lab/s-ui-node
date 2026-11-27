@@ -152,7 +152,7 @@ type Flow struct {
 	current  atomic.Pointer[entry]
 	mu       sync.Mutex
 	key      entryKey
-	closed   bool
+	closed   atomic.Bool
 }
 
 func (r *Runtime) Open(identity Identity, source func() netip.Addr) (*Flow, error) {
@@ -166,6 +166,9 @@ func (r *Runtime) Open(identity Identity, source func() netip.Addr) (*Flow, erro
 }
 
 func (f *Flow) resolve() *entry {
+	if f.closed.Load() {
+		return nil
+	}
 	client := f.bindClient()
 	if client == nil {
 		return nil
@@ -181,7 +184,7 @@ func (f *Flow) resolve() *entry {
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if f.closed {
+	if f.closed.Load() {
 		return nil
 	}
 	if old := f.current.Load(); old != nil && old.key == key {
@@ -211,7 +214,15 @@ func (f *Flow) bindClient() *string {
 	if id == "" {
 		return nil
 	}
-	f.client.CompareAndSwap(nil, &id)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.closed.Load() {
+		return nil
+	}
+	if f.client.Load() == nil {
+		f.runtime.retainBinding(f.identity, id)
+		f.client.Store(&id)
+	}
 	return f.client.Load()
 }
 
@@ -240,8 +251,13 @@ func (f *Flow) Activity(size int) {
 func (f *Flow) Close() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if !f.closed && f.key.client != "" {
+	if !f.closed.CompareAndSwap(false, true) {
+		return
+	}
+	if f.key.client != "" {
 		f.runtime.release(f.key, f.current.Load())
 	}
-	f.closed = true
+	if client := f.client.Load(); client != nil {
+		f.runtime.releaseBinding(f.identity, *client)
+	}
 }

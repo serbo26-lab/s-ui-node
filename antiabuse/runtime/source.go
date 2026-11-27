@@ -20,6 +20,9 @@ func (r *Runtime) SetTrustedProxies(proxies []netip.Prefix) error {
 		return nil
 	}
 	r.sources.Store(&sourcePolicy{proxies: slices.Clone(proxies)})
+	if r.enabled.Load() {
+		r.since.Store(r.stamp())
+	}
 	r.table.Store(nil)
 	r.challenge = ""
 	r.reservations = map[entryKey]int64{}

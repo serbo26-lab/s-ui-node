@@ -3,9 +3,27 @@ package runtime
 import (
 	"net/netip"
 	"testing"
+	"time"
 
 	"github.com/alireza0/s-ui/antiabuse/engine"
 )
+
+func TestProxyPolicyChangeDoesNotReusePriorSourceObservations(t *testing.T) {
+	r, clock := newRuntime(t)
+	flow := openFlow(t, r, sourceA)
+	flow.Activity(1)
+	clock.advance(time.Second)
+	if err := r.SetTrustedProxies([]netip.Prefix{netip.MustParsePrefix("192.0.2.0/24")}); err != nil {
+		t.Fatal(err)
+	}
+	if len(r.Report("local").Snapshot.Entries) != 0 {
+		t.Fatal("prior source definition survived a trust policy change")
+	}
+	flow.Activity(1)
+	if len(r.Report("local").Snapshot.Entries) != 1 {
+		t.Fatal("new useful traffic was not observed")
+	}
+}
 
 func TestSourcePolicyIsCopiedAndReloaded(t *testing.T) {
 	r, err := New(engine.DefaultProfile(), nil)

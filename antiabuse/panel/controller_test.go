@@ -58,6 +58,33 @@ func nativeFlow(t *testing.T, runtime *ipruntime.Runtime, address string) *iprun
 	return f
 }
 
+func TestSourcePolicyChangeRestartsConfirmation(t *testing.T) {
+	c, runtime, now := localController(t)
+	first, second := nativeFlow(t, runtime, "192.0.2.1"), nativeFlow(t, runtime, "192.0.2.2")
+	c.tick(context.Background())
+	*now = now.Add(110 * time.Second)
+	first.Activity(1)
+	second.Activity(1)
+	c.tick(context.Background())
+	config, err := c.Configuration()
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.TrustedProxies = []netip.Prefix{netip.MustParsePrefix("192.0.2.0/24")}
+	if _, err := c.SaveConfiguration(config); err != nil {
+		t.Fatal(err)
+	}
+	c.tick(context.Background())
+	*now = now.Add(15 * time.Second)
+	first.Activity(1)
+	second.Activity(1)
+	c.tick(context.Background())
+	status := c.Status([]uint{1}).Clients[0]
+	if status.Denied != 0 {
+		t.Fatal("confirmation from an earlier source policy was reused")
+	}
+}
+
 func TestControllerLocalOnlyCountsWithoutAnyNodes(t *testing.T) {
 	c, runtime, _ := localController(t)
 	f := nativeFlow(t, runtime, "192.0.2.1")
