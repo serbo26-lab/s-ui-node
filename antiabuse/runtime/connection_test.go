@@ -6,6 +6,8 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"os"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -17,6 +19,64 @@ import (
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
 )
+
+type blockedWriter struct {
+	net.Conn
+	started           chan struct{}
+	interrupted       chan struct{}
+	once              sync.Once
+	writing           atomic.Bool
+	closedDuringWrite atomic.Bool
+	closes            atomic.Int32
+}
+
+func (c *blockedWriter) Write([]byte) (int, error) {
+	c.writing.Store(true)
+	close(c.started)
+	<-c.interrupted
+	c.writing.Store(false)
+	return 0, os.ErrDeadlineExceeded
+}
+
+func (c *blockedWriter) SetWriteDeadline(time.Time) error {
+	c.once.Do(func() { close(c.interrupted) })
+	return nil
+}
+
+func (c *blockedWriter) Close() error {
+	c.closedDuringWrite.Store(c.writing.Load())
+	c.closes.Add(1)
+	return c.Conn.Close()
+}
+
+func TestStreamCloseInterruptsBlockedWriterBeforeClosingProtocolState(t *testing.T) {
+	r, _ := newRuntime(t)
+	left, right := net.Pipe()
+	t.Cleanup(func() { _ = right.Close() })
+	raw := &blockedWriter{Conn: left, started: make(chan struct{}), interrupted: make(chan struct{})}
+	conn, err := r.Connection(context.Background(), raw, adapter.InboundContext{Inbound: "in", User: "user", Source: M.SocksaddrFrom(sourceA, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	written, closed := make(chan error, 1), make(chan error, 1)
+	go func() { _, err := conn.Write([]byte{42}); written <- err }()
+	<-raw.started
+	go func() { closed <- conn.Close() }()
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("close waited for a write without interrupting it")
+	}
+	if !errors.Is(<-written, os.ErrDeadlineExceeded) || raw.closedDuringWrite.Load() {
+		t.Fatal("protocol state closed during write")
+	}
+	if err := conn.Close(); err != nil || raw.closes.Load() != 1 {
+		t.Fatal("duplicate underlying close", err)
+	}
+}
 
 func TestCounterUnwrapCannotBypassExistingStreamGuard(t *testing.T) {
 	r, c := newRuntime(t)
