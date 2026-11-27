@@ -4,6 +4,9 @@ import (
 	"context"
 	"net"
 	"net/netip"
+	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/alireza0/s-ui/core/connectionpolicy"
 	"github.com/sagernet/sing-box/adapter"
@@ -43,12 +46,26 @@ func (r *Runtime) PacketConnection(ctx context.Context, conn N.PacketConn, metad
 // would let an existing copy loop bypass a later enable or idle re-admission.
 type stream struct {
 	N.ExtendedConn
-	flow *Flow
+	flow      *Flow
+	writeMu   sync.Mutex
+	closeOnce sync.Once
+	closed    atomic.Bool
+	closeErr  error
 }
 
 func (c *stream) Close() error {
-	c.flow.Close()
-	return c.ExtendedConn.Close()
+	c.closeOnce.Do(func() {
+		c.closed.Store(true)
+		c.flow.Close()
+		// Interrupt a blocked write before waiting for protocol state to settle.
+		// Logical transports without deadlines retain their native stream close.
+		if c.ExtendedConn.SetWriteDeadline(time.Now()) == nil {
+			c.writeMu.Lock()
+			defer c.writeMu.Unlock()
+		}
+		c.closeErr = c.ExtendedConn.Close()
+	})
+	return c.closeErr
 }
 
 func (c *stream) Read(data []byte) (int, error) {
@@ -80,6 +97,11 @@ func (c *stream) Write(data []byte) (int, error) {
 		_ = c.Close()
 		return 0, ErrDenied
 	}
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	if c.closed.Load() {
+		return 0, net.ErrClosed
+	}
 	n, err := c.ExtendedConn.Write(data)
 	c.flow.Activity(n)
 	return n, err
@@ -91,6 +113,12 @@ func (c *stream) WriteBuffer(buffer *buf.Buffer) error {
 		buffer.Release()
 		_ = c.Close()
 		return ErrDenied
+	}
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	if c.closed.Load() {
+		buffer.Release()
+		return net.ErrClosed
 	}
 	if err := c.ExtendedConn.WriteBuffer(buffer); err != nil {
 		return err
@@ -118,6 +146,12 @@ func (w *vectorWriter) WriteVectorised(buffers []*buf.Buffer) error {
 		buf.ReleaseMulti(buffers)
 		_ = w.stream.Close()
 		return ErrDenied
+	}
+	w.stream.writeMu.Lock()
+	defer w.stream.writeMu.Unlock()
+	if w.stream.closed.Load() {
+		buf.ReleaseMulti(buffers)
+		return net.ErrClosed
 	}
 	if err := w.writer.WriteVectorised(buffers); err != nil {
 		return err

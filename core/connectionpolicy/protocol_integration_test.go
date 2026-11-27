@@ -184,7 +184,8 @@ func testNativeProxy(t *testing.T, name string) {
 		user["uuid"], client["uuid"] = uuid, uuid
 	case "snell":
 		server["version"], client["version"] = 6, 6
-		user["psk"], client["psk"] = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=", "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
+		server["psk"], client["psk"] = "test-only-server-key", "test-only-server-key"
+		user["userkey"], client["userkey"] = "test-only-user-key", "test-only-user-key"
 	case "hysteria":
 		user["auth_str"], client["auth_str"] = "test-only", "test-only"
 		server["up_mbps"], server["down_mbps"], client["up_mbps"], client["down_mbps"] = 100, 100, 100, 100
@@ -249,17 +250,21 @@ func testNativeProxy(t *testing.T, name string) {
 		t.Fatal(err)
 	}
 	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+	stop := time.AfterFunc(2*time.Second, func() { _ = conn.Close() })
 	_, _ = conn.Write([]byte{42})
 	var reply [1]byte
 	if _, err := io.ReadFull(conn, reply[:]); err == nil {
 		t.Fatal("existing useful stream bypassed denial")
 	}
+	stop.Stop()
 	before := accepted.Load()
 	if next, err := dial(); err == nil {
 		_ = next.SetDeadline(time.Now().Add(2 * time.Second))
+		stop := time.AfterFunc(2*time.Second, func() { _ = next.Close() })
 		_, _ = next.Write([]byte{42})
 		_, err = io.ReadFull(next, reply[:])
 		_ = next.Close()
+		stop.Stop()
 		if err == nil {
 			t.Fatal("new useful stream bypassed denial")
 		}

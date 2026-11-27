@@ -3,6 +3,7 @@ package connectionpolicy_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/netip"
@@ -106,7 +107,9 @@ func startLocalCore(t *testing.T, runtime *ipruntime.Runtime) proxy.Dialer {
 
 func exchange(t *testing.T, conn net.Conn) {
 	t.Helper()
-	if err := conn.SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
+	stop := time.AfterFunc(2*time.Second, func() { _ = conn.Close() })
+	defer stop.Stop()
+	if err := conn.SetDeadline(time.Now().Add(2 * time.Second)); err != nil && !errors.Is(err, os.ErrInvalid) {
 		t.Fatal(err)
 	}
 	if _, err := conn.Write([]byte{42}); err != nil {
