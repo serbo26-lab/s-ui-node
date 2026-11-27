@@ -4,7 +4,8 @@ on:
   workflow_dispatch:
   pull_request:
     paths:
-      - antiabuse/**
+      - antiabuse/engine/**
+      - antiabuse/runtime/**
       - core/connectionpolicy/**
       - core/quicgrace/**
       - .github/workflows/ip-control.yml

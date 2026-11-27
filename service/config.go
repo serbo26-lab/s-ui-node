@@ -371,15 +371,17 @@ func (s *ConfigService) CheckOutbound(tag string, link string) core.CheckOutboun
 	return corePtr.CheckOutbound(tag, link)
 }
 
-func (s *ConfigService) Save(obj string, act string, data json.RawMessage, initUsers string, loginUser string, hostname string) ([]string, error) {
-	var err error
-	var objs []string = []string{obj}
+func (s *ConfigService) Save(obj string, act string, data json.RawMessage, initUsers string, loginUser string, hostname string) (objs []string, err error) {
+	objs = []string{obj}
 	// Set when the config object changed. The restart waits for the commit, or
 	// a later rollback leaves the core running a config that was never saved.
 	var restartWith json.RawMessage
 
 	db := database.GetDB()
 	tx := db.Begin()
+	if tx.Error != nil {
+		return nil, tx.Error
+	}
 	defer func() {
 		// A panic leaves err nil, which would otherwise commit a half-applied
 		// transaction while gin tells the operator the save failed.
@@ -392,6 +394,8 @@ func (s *ConfigService) Save(obj string, act string, data json.RawMessage, initU
 			return
 		}
 		if cErr := tx.Commit().Error; cErr != nil {
+			err = cErr
+			objs = nil
 			logger.Error("failed to commit config save: ", cErr)
 			return
 		}
