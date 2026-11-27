@@ -20,6 +20,7 @@ import (
 	"net/netip"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -33,7 +34,7 @@ import (
 	M "github.com/sagernet/sing/common/metadata"
 )
 
-func TestNaiveHTTP3TracksLiveQUICMigration(t *testing.T) {
+func TestNaiveHTTP3TracksLiveQUICRebinding(t *testing.T) {
 	runtime, err := ipruntime.New(engine.DefaultProfile(), nil)
 	if err != nil {
 		t.Fatal(err)
@@ -50,26 +51,17 @@ func TestNaiveHTTP3TracksLiveQUICMigration(t *testing.T) {
 	if !pool.AppendCertsFromPEM([]byte(serverTLS["certificate"].(string))) {
 		t.Fatal("test certificate invalid")
 	}
-	pathTransport := func(address string) *quic.Transport {
-		t.Helper()
-		socket, err := net.ListenPacket("udp", net.JoinHostPort(address, "0"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		transport := &quic.Transport{Conn: socket}
-		t.Cleanup(func() { _ = transport.Close(); _ = socket.Close() })
-		return transport
-	}
-	initial := pathTransport("127.0.0.1")
-	var connection *quic.Conn
+	socket := &rebindingSocket{}
+	socket.rebind(t, "127.0.0.1")
+	initial := &quic.Transport{Conn: socket}
+	t.Cleanup(func() { _ = initial.Close(); _ = socket.Close() })
 	transport := &http3.Transport{TLSClientConfig: &tls.Config{RootCAs: pool, ServerName: "test.example", MinVersion: tls.VersionTLS13},
 		Dial: func(ctx context.Context, address string, config *tls.Config, quicConfig *quic.Config) (*quic.Conn, error) {
 			remote, err := net.ResolveUDPAddr("udp", address)
 			if err != nil {
 				return nil, err
 			}
-			connection, err = initial.DialEarly(ctx, remote, config, quicConfig)
-			return connection, err
+			return initial.DialEarly(ctx, remote, config, quicConfig)
 		}}
 	t.Cleanup(func() { _ = transport.Close() })
 	echo, _ := echoServer(t)
@@ -98,16 +90,7 @@ func TestNaiveHTTP3TracksLiveQUICMigration(t *testing.T) {
 	}
 	assertPaddingEcho(t, response.Body)
 	assertPhysicalReport(t, runtime)
-	path, err := connection.AddPath(pathTransport("127.0.0.2"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := path.Probe(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if err := path.Switch(); err != nil {
-		t.Fatal(err)
-	}
+	socket.rebind(t, "127.0.0.2")
 	if _, err := writer.Write([]byte{0, 1, 0, 42}); err != nil {
 		t.Fatal(err)
 	}
@@ -144,6 +127,60 @@ func testTLS(t *testing.T) (map[string]any, map[string]any) {
 		map[string]any{"enabled": true, "server_name": "test.example", "certificate": cert}
 }
 
+// Simulate NAT rebinding without opening a new QUIC or application session.
+type rebindingSocket struct {
+	mu   sync.RWMutex
+	conn *net.UDPConn
+}
+
+func (s *rebindingSocket) current() *net.UDPConn {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.conn
+}
+
+func (s *rebindingSocket) rebind(t *testing.T, address string) {
+	t.Helper()
+	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP(address)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	old := s.conn
+	s.conn = conn
+	if old != nil {
+		_ = old.Close()
+	}
+}
+
+func (s *rebindingSocket) ReadFrom(data []byte) (int, net.Addr, error) {
+	for {
+		conn := s.current()
+		n, address, err := conn.ReadFrom(data)
+		if err != nil && conn != s.current() {
+			continue
+		}
+		return n, address, err
+	}
+}
+
+func (s *rebindingSocket) WriteTo(data []byte, address net.Addr) (int, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.conn.WriteTo(data, address)
+}
+
+func (s *rebindingSocket) Close() error                      { return s.current().Close() }
+func (s *rebindingSocket) LocalAddr() net.Addr               { return s.current().LocalAddr() }
+func (s *rebindingSocket) SetDeadline(value time.Time) error { return s.current().SetDeadline(value) }
+func (s *rebindingSocket) SetReadDeadline(value time.Time) error {
+	return s.current().SetReadDeadline(value)
+}
+func (s *rebindingSocket) SetWriteDeadline(value time.Time) error {
+	return s.current().SetWriteDeadline(value)
+}
+
 func runCore(t *testing.T, instance *core.Core, inbounds, outbounds []any) {
 	t.Helper()
 	config, err := json.Marshal(map[string]any{"log": map[string]any{"disabled": true}, "inbounds": inbounds, "outbounds": outbounds})
@@ -172,56 +209,7 @@ func testNativeProxy(t *testing.T, name string) {
 	}
 	runtime.SetUsers(map[ipruntime.Identity]string{{Inbound: "access", User: "user"}: "client"})
 	runtime.SetEnabled(true)
-	port := unusedPort(t)
-	kind := strings.Split(name, "-")[0]
-	server := map[string]any{"type": kind, "tag": "access", "listen": "127.0.0.1", "listen_port": port}
-	client := map[string]any{"type": kind, "tag": "access", "server": "127.0.0.1", "server_port": port}
-	user := map[string]any{"name": "user"}
-	server["users"] = []any{user}
-	const uuid = "11111111-1111-4111-8111-111111111111"
-	switch kind {
-	case "vless", "vmess", "tuic":
-		user["uuid"], client["uuid"] = uuid, uuid
-	case "snell":
-		server["version"], client["version"] = 6, 6
-		server["psk"], client["psk"] = "test-only-server-key", "test-only-server-key"
-		user["userkey"], client["userkey"] = "test-only-user-key", "test-only-user-key"
-	case "hysteria":
-		user["auth_str"], client["auth_str"] = "test-only", "test-only"
-		server["up_mbps"], server["down_mbps"], client["up_mbps"], client["down_mbps"] = 100, 100, 100, 100
-	case "shadowsocks":
-		method, password := "aes-128-gcm", "test-only"
-		if name == "shadowsocks-2022" {
-			method, password = "2022-blake3-aes-128-gcm", "ZmVkY2JhOTg3NjU0MzIxMA=="
-			server["password"] = "MDEyMzQ1Njc4OWFiY2RlZg=="
-			client["password"] = "MDEyMzQ1Njc4OWFiY2RlZg==:" + password
-		} else {
-			client["password"] = password
-		}
-		server["method"], client["method"], user["password"] = method, method, password
-	}
-	if kind == "trojan" || kind == "anytls" || kind == "hysteria2" || kind == "tuic" {
-		user["password"], client["password"] = "test-only", "test-only"
-	}
-	if kind == "vmess" {
-		client["security"] = "auto"
-	}
-	if kind == "anytls" || kind == "hysteria" || kind == "hysteria2" || kind == "tuic" || name == "vless-quic" {
-		server["tls"], client["tls"] = testTLS(t)
-	}
-	if strings.HasPrefix(name, "vless-") {
-		mode := strings.TrimPrefix(name, "vless-")
-		if mode == "mux" {
-			server["multiplex"] = map[string]any{"enabled": true}
-			client["multiplex"] = map[string]any{"enabled": true, "protocol": "h2mux"}
-		} else {
-			transport := map[string]any{"type": mode}
-			if mode == "grpc" {
-				transport["service_name"] = "test"
-			}
-			server["transport"], client["transport"] = transport, transport
-		}
-	}
+	server, client := nativeProxyOptions(t, name)
 	serverCore := core.NewCoreWithContext(connectionpolicy.WithGuard(context.Background(), runtime))
 	runCore(t, serverCore, []any{server}, []any{map[string]any{"type": "direct", "tag": "direct"}})
 	clientCore := core.NewCore()
@@ -272,6 +260,61 @@ func testNativeProxy(t *testing.T, name string) {
 	if accepted.Load() != before {
 		t.Fatal("denied stream reached outbound")
 	}
+}
+
+func nativeProxyOptions(t *testing.T, name string) (map[string]any, map[string]any) {
+	t.Helper()
+	port := unusedPort(t)
+	kind := strings.Split(name, "-")[0]
+	server := map[string]any{"type": kind, "tag": "access", "listen": "127.0.0.1", "listen_port": port}
+	client := map[string]any{"type": kind, "tag": "access", "server": "127.0.0.1", "server_port": port}
+	user := map[string]any{"name": "user"}
+	server["users"] = []any{user}
+	const uuid = "11111111-1111-4111-8111-111111111111"
+	switch kind {
+	case "vless", "vmess", "tuic":
+		user["uuid"], client["uuid"] = uuid, uuid
+	case "snell":
+		server["version"], client["version"] = 6, 6
+		server["psk"], client["psk"] = "test-only-server-key", "test-only-server-key"
+		user["userkey"], client["userkey"] = "test-only-user-key", "test-only-user-key"
+	case "hysteria":
+		user["auth_str"], client["auth_str"] = "test-only", "test-only"
+		server["up_mbps"], server["down_mbps"], client["up_mbps"], client["down_mbps"] = 100, 100, 100, 100
+	case "shadowsocks":
+		method, password := "aes-128-gcm", "test-only"
+		if name == "shadowsocks-2022" {
+			method, password = "2022-blake3-aes-128-gcm", "ZmVkY2JhOTg3NjU0MzIxMA=="
+			server["password"] = "MDEyMzQ1Njc4OWFiY2RlZg=="
+			client["password"] = "MDEyMzQ1Njc4OWFiY2RlZg==:" + password
+		} else {
+			client["password"] = password
+		}
+		server["method"], client["method"], user["password"] = method, method, password
+	}
+	if kind == "trojan" || kind == "anytls" || kind == "hysteria2" || kind == "tuic" {
+		user["password"], client["password"] = "test-only", "test-only"
+	}
+	if kind == "vmess" {
+		client["security"] = "auto"
+	}
+	if kind == "anytls" || kind == "hysteria" || kind == "hysteria2" || kind == "tuic" || name == "vless-quic" {
+		server["tls"], client["tls"] = testTLS(t)
+	}
+	if strings.HasPrefix(name, "vless-") {
+		mode := strings.TrimPrefix(name, "vless-")
+		if mode == "mux" {
+			server["multiplex"] = map[string]any{"enabled": true}
+			client["multiplex"] = map[string]any{"enabled": true, "protocol": "h2mux"}
+		} else {
+			transport := map[string]any{"type": mode}
+			if mode == "grpc" {
+				transport["service_name"] = "test"
+			}
+			server["transport"], client["transport"] = transport, transport
+		}
+	}
+	return server, client
 }
 
 func TestShadowTLSDetourKeepsFinalClientSource(t *testing.T) {
