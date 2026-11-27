@@ -149,7 +149,7 @@ func TestLocalCoreAdmissionWithoutNodesAndExistingCopyLoops(t *testing.T) {
 		} else {
 			rule.Denied = []netip.Prefix{peer}
 		}
-		if err := runtime.Apply(report.Challenge, revision, []ipruntime.Rule{rule}); err != nil {
+		if err := runtime.Apply(ipruntime.Decision{Scope: "controller", Challenge: report.Challenge, Revision: revision, Rules: []ipruntime.Rule{rule}}); err != nil {
 			t.Fatal(err)
 		}
 	}

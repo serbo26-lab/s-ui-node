@@ -30,16 +30,23 @@ type decisionTable struct {
 	rules   map[string]rule
 }
 
+type Decision struct {
+	Scope     string
+	Challenge string
+	Revision  uint64
+	Rules     []Rule
+}
+
 // Apply cannot extend a decision beyond the locally issued challenge deadline.
-func (r *Runtime) Apply(challenge string, revision uint64, rules []Rule) error {
+func (r *Runtime) Apply(decision Decision) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if !r.enabled.Load() || challenge == "" || challenge != r.challenge || revision <= r.revision || r.stamp() >= r.deadline {
+	if !r.validDecision(decision) {
 		return errors.New("expired IP decision")
 	}
-	table := &decisionTable{expires: r.deadline, rules: make(map[string]rule, len(rules))}
-	seen := make(map[string]bool, len(rules))
-	for _, item := range rules {
+	table := &decisionTable{expires: r.deadline, rules: make(map[string]rule, len(decision.Rules))}
+	seen := make(map[string]bool, len(decision.Rules))
+	for _, item := range decision.Rules {
 		if item.Client == "" || seen[item.Client] {
 			return errors.New("invalid IP decision client")
 		}
@@ -53,10 +60,16 @@ func (r *Runtime) Apply(challenge string, revision uint64, rules []Rule) error {
 		}
 		table.rules[item.Client] = value
 	}
-	r.revision, r.challenge = revision, ""
+	r.revision, r.challenge, r.scope = decision.Revision, "", decision.Scope
 	r.reservations = map[entryKey]int64{}
 	r.table.Store(table)
 	return nil
+}
+
+func (r *Runtime) validDecision(value Decision) bool {
+	return r.enabled.Load() && value.Scope != "" && len(value.Scope) <= 128 &&
+		value.Challenge != "" && value.Challenge == r.challenge && value.Revision > 0 &&
+		(value.Scope != r.scope || value.Revision > r.revision) && r.stamp() < r.deadline
 }
 
 func compileRule(item Rule) (rule, error) {
@@ -134,6 +147,7 @@ func (r *Runtime) reserve(table *decisionTable, value rule, key entryKey, now in
 type Flow struct {
 	runtime  *Runtime
 	identity Identity
+	client   atomic.Pointer[string]
 	source   func() netip.Addr
 	current  atomic.Pointer[entry]
 	mu       sync.Mutex
@@ -143,6 +157,7 @@ type Flow struct {
 
 func (r *Runtime) Open(identity Identity, source func() netip.Addr) (*Flow, error) {
 	flow := &Flow{runtime: r, identity: identity, source: source}
+	flow.bindClient()
 	if !flow.Permit() {
 		flow.Close()
 		return nil, ErrDenied
@@ -151,8 +166,8 @@ func (r *Runtime) Open(identity Identity, source func() netip.Addr) (*Flow, erro
 }
 
 func (f *Flow) resolve() *entry {
-	client := f.runtime.users.Load().users[f.identity]
-	if client == "" {
+	client := f.bindClient()
+	if client == nil {
 		return nil
 	}
 	address := netip.Addr{}
@@ -160,7 +175,7 @@ func (f *Flow) resolve() *entry {
 		address = f.source()
 	}
 	prefix, _ := engine.Address(address)
-	key := entryKey{client: client, address: prefix}
+	key := entryKey{client: *client, address: prefix}
 	if old := f.current.Load(); old != nil && old.key == key {
 		return old
 	}
@@ -181,11 +196,23 @@ func (f *Flow) resolve() *entry {
 		next = f.runtime.acquire(key)
 	} else {
 		f.runtime.mu.Lock()
-		f.runtime.unsupported[client]++
+		f.runtime.unsupported[*client]++
 		f.runtime.mu.Unlock()
 	}
 	f.current.Store(next)
 	return next
+}
+
+func (f *Flow) bindClient() *string {
+	if client := f.client.Load(); client != nil {
+		return client
+	}
+	id := f.runtime.users.Load().users[f.identity]
+	if id == "" {
+		return nil
+	}
+	f.client.CompareAndSwap(nil, &id)
+	return f.client.Load()
 }
 
 func (f *Flow) Permit() bool {

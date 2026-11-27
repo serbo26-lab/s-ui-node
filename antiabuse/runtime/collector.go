@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"crypto/rand"
+	"maps"
 	"net/netip"
 	"slices"
 	"sync"
@@ -46,6 +47,7 @@ type Runtime struct {
 	reservations map[entryKey]int64
 	sequence     uint64
 	revision     uint64
+	scope        string
 	challenge    string
 	deadline     int64
 }
@@ -87,12 +89,36 @@ func (r *Runtime) SetUsers(users map[Identity]string) {
 			copyUsers[key] = value
 		}
 	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if maps.Equal(r.users.Load().users, copyUsers) {
+		return
+	}
 	r.users.Store(&bindings{users: copyUsers})
+	r.table.Store(nil)
+	r.challenge = ""
+	r.reservations = map[entryKey]int64{}
 }
 
 type Report struct {
 	Snapshot  engine.Snapshot
 	Challenge string
+	Scope     string
+}
+
+func (r *Runtime) Configure(profile engine.Profile) error {
+	if err := profile.Validate(); err != nil {
+		return err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.profile != profile {
+		r.profile = profile
+		r.table.Store(nil)
+		r.challenge = ""
+		r.reservations = map[entryKey]int64{}
+	}
+	return nil
 }
 
 // Report retains short closed flows, but never renews their last activity.
@@ -103,7 +129,7 @@ func (r *Runtime) Report(source string) Report {
 	r.sequence++
 	r.challenge, r.deadline = rand.Text(), now+int64(r.profile.Freshness)
 	report := Report{Snapshot: engine.Snapshot{Source: source, Boot: r.boot,
-		Sequence: r.sequence, Complete: true}, Challenge: r.challenge}
+		Sequence: r.sequence, Complete: true}, Challenge: r.challenge, Scope: r.scope}
 	if !r.enabled.Load() {
 		return report
 	}
