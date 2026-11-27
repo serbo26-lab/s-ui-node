@@ -97,7 +97,8 @@ func validPrefix(prefix netip.Prefix) bool {
 	return err == nil && prefix == normal
 }
 
-func (r *Runtime) permits(key entryKey, now int64) bool {
+func (r *Runtime) permits(entry *entry, now int64) bool {
+	key := entry.key
 	for {
 		table := r.table.Load()
 		if table == nil || now >= table.expires {
@@ -110,8 +111,15 @@ func (r *Runtime) permits(key entryKey, now int64) bool {
 		if value.denied[key.address] {
 			return false
 		}
+		// Reservations outlive their decision table: Freshness < Activity.
+		if entry.reserved.Load() == table {
+			return true
+		}
 		permitted, retry := r.reserve(table, value, key, now)
 		if !retry {
+			if permitted {
+				entry.reserved.Store(table)
+			}
 			return permitted
 		}
 	}
@@ -240,7 +248,7 @@ func (f *Flow) Permit() bool {
 	}
 	now := f.runtime.stamp()
 	latest(&value.attempt, now)
-	return f.runtime.permits(value.key, now)
+	return f.runtime.permits(value, now)
 }
 
 func (f *Flow) Activity(size int) {

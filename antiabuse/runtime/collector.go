@@ -27,6 +27,7 @@ type entry struct {
 	activity atomic.Int64
 	attempt  atomic.Int64
 	refs     int
+	reserved atomic.Pointer[decisionTable]
 }
 
 type bindings struct {

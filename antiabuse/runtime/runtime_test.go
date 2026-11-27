@@ -132,6 +132,42 @@ func decision(t *testing.T, r *Runtime, revision uint64, allowed, denied []netip
 	}
 }
 
+func TestProvisionalTrafficDoesNotTakeCollectorLockAndRechecksNewDecision(t *testing.T) {
+	r, _ := newRuntime(t)
+	flow := openFlow(t, r, sourceB)
+	decision(t, r, 1, []netip.Prefix{prefix(sourceA)}, nil)
+	if !flow.Permit() {
+		t.Fatal("provisional source not admitted")
+	}
+	r.mu.Lock()
+	done := make(chan bool, 1)
+	go func() {
+		for range 100 {
+			if !flow.Permit() {
+				done <- false
+				return
+			}
+			flow.Activity(1)
+		}
+		done <- true
+	}()
+	select {
+	case permitted := <-done:
+		r.mu.Unlock()
+		if !permitted {
+			t.Fatal("provisional traffic was interrupted")
+		}
+	case <-time.After(time.Second):
+		r.mu.Unlock()
+		<-done
+		t.Fatal("provisional traffic waited for the collector")
+	}
+	decision(t, r, 2, []netip.Prefix{prefix(sourceA)}, []netip.Prefix{prefix(sourceB)})
+	if flow.Permit() {
+		t.Fatal("provisional admission bypassed a newer decision")
+	}
+}
+
 func TestBackgroundFlowDoesNotCreateActivityAndRemainsReusable(t *testing.T) {
 	r, c := newRuntime(t)
 	f := openFlow(t, r, sourceA)
