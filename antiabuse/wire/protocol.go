@@ -2,6 +2,7 @@ package wire
 
 import (
 	"errors"
+	"github.com/alireza0/s-ui/antiabuse/source"
 	"math"
 	"net/netip"
 	"reflect"
@@ -35,20 +36,21 @@ type Profile struct {
 }
 
 type Configuration struct {
-	Version   uint32   `json:"version"`
-	Identity  Identity `json:"identity"`
-	Scope     string   `json:"scope"`
-	Revision  uint64   `json:"revision"`
-	Enabled   bool     `json:"enabled"`
-	Profile   Profile  `json:"profile"`
-	Boot      string   `json:"boot"`
-	Challenge string   `json:"challenge"`
+	Version        uint32         `json:"version"`
+	Identity       Identity       `json:"identity"`
+	Scope          string         `json:"scope"`
+	Revision       uint64         `json:"revision"`
+	Enabled        bool           `json:"enabled"`
+	Profile        Profile        `json:"profile"`
+	Boot           string         `json:"boot"`
+	Challenge      string         `json:"challenge"`
+	TrustedProxies []netip.Prefix `json:"trusted_proxies"`
 }
 
 func (c Configuration) Validate() error {
 	if c.Version != Version || !c.Identity.Valid() || !token(c.Scope) || !token(c.Boot) || !token(c.Challenge) || c.Revision == 0 ||
 		c.Profile.ActivitySeconds <= 15 || c.Profile.TransitionSeconds < c.Profile.ActivitySeconds ||
-		c.Profile.ConfirmationSeconds == 0 || c.Profile.ConfirmationSeconds > c.Profile.TransitionSeconds {
+		c.Profile.ConfirmationSeconds == 0 || c.Profile.ConfirmationSeconds > c.Profile.TransitionSeconds || source.ValidateProxies(c.TrustedProxies) != nil {
 		return ErrInvalid
 	}
 	return nil

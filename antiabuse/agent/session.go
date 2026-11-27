@@ -2,6 +2,7 @@ package agent
 
 import (
 	"errors"
+	"slices"
 	"strconv"
 	"sync"
 	"time"
@@ -55,7 +56,7 @@ func (s *Session) Configure(value wire.Configuration) error {
 		return ErrConflict
 	}
 	if value.Scope == s.config.Scope && value.Revision == s.config.Revision &&
-		(value.Enabled != s.config.Enabled || value.Profile != s.config.Profile) {
+		(value.Enabled != s.config.Enabled || value.Profile != s.config.Profile || !slices.Equal(value.TrustedProxies, s.config.TrustedProxies)) {
 		return ErrConflict
 	}
 	profile := engine.DefaultProfile()
@@ -68,7 +69,11 @@ func (s *Session) Configure(value wire.Configuration) error {
 	if err := s.runtime.Configure(profile); err != nil {
 		return err
 	}
+	if err := s.runtime.SetTrustedProxies(value.TrustedProxies); err != nil {
+		return err
+	}
 	s.runtime.SetEnabled(value.Enabled)
+	value.TrustedProxies = slices.Clone(value.TrustedProxies)
 	s.config = value
 	s.clear()
 	return nil

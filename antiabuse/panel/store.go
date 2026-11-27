@@ -1,13 +1,16 @@
 package panel
 
 import (
+	"encoding/json"
 	"errors"
 	"math"
+	"net/netip"
 	"slices"
 	"time"
 
 	"github.com/alireza0/s-ui/antiabuse/engine"
 	ipmodel "github.com/alireza0/s-ui/antiabuse/model"
+	"github.com/alireza0/s-ui/antiabuse/source"
 
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -24,6 +27,7 @@ type Configuration struct {
 	ActivitySeconds   uint32              `json:"activity_seconds"`
 	TransitionSeconds uint32              `json:"transition_seconds"`
 	Groups            []ipmodel.GroupRule `json:"groups"`
+	TrustedProxies    []netip.Prefix      `json:"trusted_proxies"`
 }
 
 func (c Configuration) Profile() engine.Profile {
@@ -34,7 +38,7 @@ func (c Configuration) Profile() engine.Profile {
 }
 
 func (c Configuration) Validate() error {
-	if c.Revision == 0 || c.Revision >= math.MaxInt64 || c.Groups == nil || c.Profile().Validate() != nil {
+	if c.Revision == 0 || c.Revision >= math.MaxInt64 || c.Groups == nil || c.Profile().Validate() != nil || source.ValidateProxies(c.TrustedProxies) != nil {
 		return ErrInvalid
 	}
 	seen := map[string]bool{}
@@ -56,7 +60,7 @@ func NewStore(db *gorm.DB) *Store { return &Store{db: db} }
 func (s *Store) Initialize() error {
 	defaults := engine.DefaultProfile()
 	row := ipmodel.Settings{ID: 1, Revision: 1, ActivitySeconds: uint32(defaults.Activity / time.Second),
-		TransitionSeconds: uint32(defaults.Transition / time.Second)}
+		TransitionSeconds: uint32(defaults.Transition / time.Second), TrustedProxies: []netip.Prefix{}}
 	return s.db.Clauses(clause.OnConflict{DoNothing: true}).Create(&row).Error
 }
 
@@ -72,18 +76,25 @@ func (s *Store) Configuration() (Configuration, error) {
 	if err != nil {
 		return Configuration{}, err
 	}
+	proxies := append([]netip.Prefix{}, row.TrustedProxies...)
 	return Configuration{Revision: row.Revision, Enabled: row.Enabled, ActivitySeconds: row.ActivitySeconds,
-		TransitionSeconds: row.TransitionSeconds, Groups: groups}, nil
+		TransitionSeconds: row.TransitionSeconds, Groups: groups, TrustedProxies: proxies}, nil
 }
 
 func (s *Store) SaveConfiguration(value Configuration) (Configuration, error) {
 	if err := value.Validate(); err != nil {
 		return Configuration{}, err
 	}
-	err := s.db.Transaction(func(tx *gorm.DB) error {
+	value.TrustedProxies = append([]netip.Prefix{}, value.TrustedProxies...)
+	proxies, err := json.Marshal(value.TrustedProxies)
+	if err != nil {
+		return Configuration{}, err
+	}
+	err = s.db.Transaction(func(tx *gorm.DB) error {
 		changed := tx.Model(&ipmodel.Settings{}).Where("id = 1 AND revision = ?", value.Revision).
 			Updates(map[string]any{"revision": value.Revision + 1, "enabled": value.Enabled,
-				"activity_seconds": value.ActivitySeconds, "transition_seconds": value.TransitionSeconds})
+				"activity_seconds": value.ActivitySeconds, "transition_seconds": value.TransitionSeconds,
+				"trusted_proxies": string(proxies)})
 		if changed.Error != nil {
 			return changed.Error
 		}

@@ -25,6 +25,7 @@ import (
 
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/peer"
 )
 
@@ -120,6 +121,13 @@ type sourceHandler struct {
 func (h *sourceHandler) NewConnectionEx(ctx context.Context, conn net.Conn, source, destination M.Socksaddr, onClose N.CloseHandlerFunc) {
 	if Source(ctx) == nil {
 		ctx = WithSource(ctx, connectionSource(conn))
+		if grpc, ok := common.Cast[*v2raygrpc.GRPCConn](conn); ok {
+			if stream, ok := grpc.GunService.(interface{ Context() context.Context }); ok {
+				if incoming, ok := metadata.FromIncomingContext(stream.Context()); ok {
+					ctx = forwardedContext(ctx, incoming.Get("x-forwarded-for"))
+				}
+			}
+		}
 	}
 	h.handler.NewConnectionEx(ctx, conn, source, destination, onClose)
 }
@@ -142,6 +150,7 @@ func connectionSource(conn net.Conn) func() netip.Addr {
 type peerHandler struct{ inner http.Handler }
 
 func (h *peerHandler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
+	request = request.WithContext(forwardedContext(request.Context(), request.Header.Values("X-Forwarded-For")))
 	source := Source(request.Context())
 	address := netip.Addr{}
 	if source != nil {

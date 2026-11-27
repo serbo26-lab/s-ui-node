@@ -212,6 +212,9 @@ func (c *Controller) refresh(ctx context.Context) error {
 	if err := c.local.Configure(profile); err != nil {
 		return err
 	}
+	if err := c.local.SetTrustedProxies(p.config.TrustedProxies); err != nil {
+		return err
+	}
 	c.local.SetUsers(users)
 	c.local.SetIncomplete(incomplete)
 	c.local.SetEnabled(p.config.Enabled)
@@ -298,7 +301,7 @@ func (c *Controller) exchange(parent context.Context, w *work, source string, ta
 		config := wire.Configuration{Version: wire.Version, Identity: target.identity, Scope: w.scope,
 			Revision: w.config.Revision, Enabled: w.config.Enabled, Profile: wire.Profile{
 				ActivitySeconds: w.config.ActivitySeconds, TransitionSeconds: w.config.TransitionSeconds,
-				ConfirmationSeconds: uint32(w.config.Profile().Confirmation / time.Second)}}
+				ConfirmationSeconds: uint32(w.config.Profile().Confirmation / time.Second)}, TrustedProxies: w.config.TrustedProxies}
 		result.header, result.entries, result.requested, result.err = peer.Observe(ctx, config)
 	}
 	if !w.config.Enabled {

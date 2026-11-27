@@ -39,6 +39,7 @@ type Runtime struct {
 	enabled atomic.Bool
 	since   atomic.Int64
 	users   atomic.Pointer[bindings]
+	sources atomic.Pointer[sourcePolicy]
 	table   atomic.Pointer[decisionTable]
 
 	mu           sync.Mutex

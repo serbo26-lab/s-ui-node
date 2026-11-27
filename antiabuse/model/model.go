@@ -1,11 +1,14 @@
 package model
 
+import "net/netip"
+
 type Settings struct {
-	ID                uint   `gorm:"primaryKey;autoIncrement:false"`
-	Revision          uint64 `gorm:"not null"`
-	Enabled           bool   `gorm:"not null"`
-	ActivitySeconds   uint32 `gorm:"not null"`
-	TransitionSeconds uint32 `gorm:"not null"`
+	ID                uint           `gorm:"primaryKey;autoIncrement:false"`
+	Revision          uint64         `gorm:"not null"`
+	Enabled           bool           `gorm:"not null"`
+	ActivitySeconds   uint32         `gorm:"not null"`
+	TransitionSeconds uint32         `gorm:"not null"`
+	TrustedProxies    []netip.Prefix `gorm:"serializer:json"`
 }
 
 func (Settings) TableName() string { return "ip_control_settings" }

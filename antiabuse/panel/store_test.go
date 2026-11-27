@@ -2,6 +2,7 @@ package panel
 
 import (
 	"errors"
+	"net/netip"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -52,6 +53,7 @@ func TestDefaultConfigurationAndStaleSave(t *testing.T) {
 	}
 	v.Enabled = true
 	v.Groups = []ipmodel.GroupRule{{Group: "group", Limit: 4}}
+	v.TrustedProxies = []netip.Prefix{netip.MustParsePrefix("192.0.2.0/24")}
 	saved, err := s.SaveConfiguration(v)
 	if err != nil {
 		t.Fatal(err)

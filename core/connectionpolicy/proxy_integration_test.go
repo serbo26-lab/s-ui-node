@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/net/proxy"
+
 	"github.com/alireza0/s-ui/antiabuse/engine"
 	ipruntime "github.com/alireza0/s-ui/antiabuse/runtime"
 	"github.com/alireza0/s-ui/core"
@@ -79,6 +81,29 @@ func startProxyCore(t *testing.T, kind string) (*ipruntime.Runtime, string) {
 	}
 	t.Cleanup(func() { _ = instance.Stop() })
 	return runtime, net.JoinHostPort("127.0.0.1", strconv.Itoa(int(port)))
+}
+
+func TestMixedSOCKSRetainsAuthenticationAndSource(t *testing.T) {
+	runtime, address := startProxyCore(t, "mixed")
+	echo, _ := echoServer(t)
+	dialer, err := proxy.SOCKS5("tcp", address, &proxy.Auth{User: "user", Password: "test-only"}, &net.Dialer{Timeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, err := dialer.Dial("tcp", echo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
+	if _, err := conn.Write([]byte{42}); err != nil {
+		t.Fatal(err)
+	}
+	var reply [1]byte
+	if _, err := io.ReadFull(conn, reply[:]); err != nil || reply[0] != 42 {
+		t.Fatal("mixed SOCKS payload failed", err)
+	}
+	assertPhysicalReport(t, runtime)
 }
 
 func assertPhysicalReport(t *testing.T, runtime *ipruntime.Runtime) {

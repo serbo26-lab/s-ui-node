@@ -135,17 +135,35 @@ func (h *proxyInbound) handle(ctx context.Context, conn net.Conn, metadata adapt
 
 func (h *proxyInbound) metadata(ctx context.Context, metadata adapter.InboundContext) adapter.InboundContext {
 	metadata.Inbound, metadata.InboundType = h.Tag(), h.Type()
-	metadata.User, _ = auth.UserFromContext[string](ctx)
+	if user, loaded := auth.UserFromContext[string](ctx); loaded {
+		metadata.User = user
+	}
 	return metadata
 }
 
 func (h *proxyInbound) connection(ctx context.Context, conn net.Conn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {
-	h.router.RouteConnectionEx(ctx, conn, h.metadata(ctx, metadata), onClose)
+	metadata = h.metadata(ctx, metadata)
+	h.trace(ctx, metadata, "inbound connection")
+	h.router.RouteConnectionEx(ctx, conn, metadata, onClose)
 }
 
 func (h *proxyInbound) packetConnection(ctx context.Context, conn N.PacketConn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {
 	metadata.OriginDestination = M.SocksaddrFromNet(conn.LocalAddr()).Unwrap()
-	h.router.RoutePacketConnectionEx(ctx, conn, h.metadata(ctx, metadata), onClose)
+	metadata = h.metadata(ctx, metadata)
+	h.trace(ctx, metadata, "inbound packet connection")
+	h.router.RoutePacketConnectionEx(ctx, conn, metadata, onClose)
+}
+
+func (h *proxyInbound) trace(ctx context.Context, metadata adapter.InboundContext, message string) {
+	values := []any{}
+	if metadata.User != "" {
+		values = append(values, "[", metadata.User, "] ")
+	}
+	values = append(values, message)
+	if metadata.Destination.IsValid() {
+		values = append(values, " to ", metadata.Destination)
+	}
+	h.logger.InfoContext(ctx, values...)
 }
 
 var _ adapter.TCPInjectableInbound = (*proxyInbound)(nil)
