@@ -110,9 +110,9 @@ func TestControllerTransitionsAndReopensPreviouslyRejectedIP(t *testing.T) {
 
 func TestControllerDuplicateUsernameMarksBothClientsIncomplete(t *testing.T) {
 	c, _, _ := localController(t)
-	copy := model.Client{Id: 2, CreatedAt: 200, Name: "other", Group: "group", Enable: true,
+	duplicate := model.Client{Id: 2, CreatedAt: 200, Name: "other", Group: "group", Enable: true,
 		Inbounds: json.RawMessage(`[1]`), Config: json.RawMessage(`{"socks":{"username":"user","password":"other-only"}}`)}
-	if err := c.store.db.Create(&copy).Error; err != nil {
+	if err := c.store.db.Create(&duplicate).Error; err != nil {
 		t.Fatal(err)
 	}
 	c.tick(context.Background())

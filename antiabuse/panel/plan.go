@@ -91,29 +91,7 @@ func (p plan) fingerprint(now time.Time) string {
 }
 
 func (p plan) policies(now time.Time) (map[string]engine.Policy, map[ipruntime.Identity]string, []string) {
-	groups := map[string]uint32{}
-	for _, group := range p.config.Groups {
-		groups[group.Group] = group.Limit
-	}
-	individual := map[uint]ipmodel.ClientRule{}
-	for _, rule := range p.rules {
-		individual[rule.ClientID] = rule
-	}
-	inbounds := map[uint]model.Inbound{}
-	for _, inbound := range p.inbounds {
-		inbounds[inbound.Id] = inbound
-	}
-	nodeEnabled := map[uint]bool{}
-	for _, node := range p.nodes {
-		nodeEnabled[node.Id] = node.Enable
-	}
-	sources := map[uint][]string{}
-	for _, binding := range p.bindings {
-		enabled, exists := nodeEnabled[binding.NodeId]
-		if binding.Active && (!exists || enabled) {
-			sources[binding.ClientId] = append(sources[binding.ClientId], fmt.Sprintf("node:%d", binding.NodeId))
-		}
-	}
+	groups, individual, inbounds, sources := p.policyIndexes()
 	policies := map[string]engine.Policy{}
 	users := map[ipruntime.Identity]string{}
 	unresolved := map[string]bool{}
@@ -142,6 +120,33 @@ func (p plan) policies(now time.Time) (map[string]engine.Policy, map[ipruntime.I
 	}
 	slices.Sort(incomplete)
 	return policies, users, incomplete
+}
+
+func (p plan) policyIndexes() (map[string]uint32, map[uint]ipmodel.ClientRule, map[uint]model.Inbound, map[uint][]string) {
+	groups := map[string]uint32{}
+	for _, group := range p.config.Groups {
+		groups[group.Group] = group.Limit
+	}
+	individual := map[uint]ipmodel.ClientRule{}
+	for _, rule := range p.rules {
+		individual[rule.ClientID] = rule
+	}
+	inbounds := map[uint]model.Inbound{}
+	for _, inbound := range p.inbounds {
+		inbounds[inbound.Id] = inbound
+	}
+	nodeEnabled := map[uint]bool{}
+	for _, node := range p.nodes {
+		nodeEnabled[node.Id] = node.Enable
+	}
+	sources := map[uint][]string{}
+	for _, binding := range p.bindings {
+		enabled, exists := nodeEnabled[binding.NodeId]
+		if binding.Active && (!exists || enabled) {
+			sources[binding.ClientId] = append(sources[binding.ClientId], fmt.Sprintf("node:%d", binding.NodeId))
+		}
+	}
+	return groups, individual, inbounds, sources
 }
 
 func localBindings(client policyClient, inbounds map[uint]model.Inbound, users map[ipruntime.Identity]string, unresolved map[string]bool) (bool, bool) {
@@ -179,9 +184,14 @@ func localBindings(client policyClient, inbounds map[uint]model.Inbound, users m
 
 func localName(inbound model.Inbound, credentials map[string]json.RawMessage) string {
 	var options struct {
-		Method string `json:"method"`
+		Method  string `json:"method"`
+		Version uint   `json:"version"`
+		Managed bool   `json:"managed"`
 	}
 	if json.Unmarshal(inbound.Options, &options) != nil {
+		return ""
+	}
+	if inbound.Type == "shadowtls" && options.Version < 3 || inbound.Type == "shadowsocks" && options.Managed {
 		return ""
 	}
 	var user struct {

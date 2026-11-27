@@ -35,6 +35,7 @@ type ClientStatus struct {
 	Checking    bool   `json:"checking"`
 	UpdatedAt   int64  `json:"updated_at"`
 	Denied      int    `json:"denied"`
+	Applied     bool   `json:"applied"`
 }
 
 type work struct {
@@ -80,6 +81,7 @@ type Controller struct {
 	dirty     atomic.Bool
 	wake      chan struct{}
 	results   chan observationResult
+	acks      chan applicationResult
 	slots     chan struct{}
 	engine    *engine.Engine
 	profile   engine.Profile
@@ -87,6 +89,10 @@ type Controller struct {
 	revision  uint64
 	workers   map[string]context.CancelFunc
 	wg        sync.WaitGroup
+	applied   map[string]string
+	expected  map[string]string
+	lastEvent map[string]string
+	lastPrune time.Time
 }
 
 func NewController(store *Store, local *ipruntime.Runtime, transport Transport, ready func() bool) (*Controller, error) {
@@ -94,7 +100,7 @@ func NewController(store *Store, local *ipruntime.Runtime, transport Transport, 
 		return nil, err
 	}
 	return &Controller{store: store, now: time.Now, local: local, transport: transport, ready: ready,
-		wake: make(chan struct{}, 1), results: make(chan observationResult, 64), slots: make(chan struct{}, 8)}, nil
+		wake: make(chan struct{}, 1), results: make(chan observationResult, 64), acks: make(chan applicationResult, 64), slots: make(chan struct{}, 8)}, nil
 }
 
 func (c *Controller) Notify() {
@@ -120,6 +126,7 @@ func (c *Controller) run(ctx context.Context) {
 	c.engine, c.profile = nil, engine.Profile{}
 	c.local.SetEnabled(false)
 	c.workers = map[string]context.CancelFunc{}
+	c.lastEvent = map[string]string{}
 	c.view.Store(nil)
 	c.dirty.Store(true)
 	ticker := time.NewTicker(5 * time.Second)
@@ -138,6 +145,8 @@ func (c *Controller) run(ctx context.Context) {
 			c.tick(ctx)
 		case result := <-c.results:
 			c.respond(ctx, result)
+		case result := <-c.acks:
+			c.appliedResult(result)
 		}
 	}
 }
@@ -162,11 +171,14 @@ func (c *Controller) tick(ctx context.Context) {
 }
 
 func (c *Controller) refresh(ctx context.Context) error {
+	c.dirty.Store(false)
 	p, err := c.store.loadPlan()
 	if err != nil {
 		return err
 	}
-	c.dirty.Store(false)
+	if c.dirty.Load() {
+		return ErrConflict
+	}
 	key := p.fingerprint(c.now())
 	old := c.view.Load()
 	if old != nil && old.key == key {
@@ -197,6 +209,7 @@ func (c *Controller) refresh(ctx context.Context) error {
 		w.clients[client.key()] = client.ID
 	}
 	c.view.Store(w)
+	c.applied, c.expected = map[string]string{}, map[string]string{}
 	c.status.Store(&statusView{enabled: p.config.Enabled, updated: c.now(), clients: map[uint]ClientStatus{}})
 	c.resetWorkers(ctx, w)
 	return nil
@@ -273,8 +286,13 @@ func (c *Controller) exchange(parent context.Context, w *work, source string, ta
 	}
 	select {
 	case decision := <-result.answer:
-		if decision != nil && result.err == nil && c.view.Load() == w {
-			_ = peer.Apply(ctx, *decision)
+		if decision != nil && result.err == nil && c.view.Load() == w && !c.dirty.Load() {
+			err := peer.Apply(ctx, *decision)
+			ack := applicationResult{work: w, source: source, signature: ruleSignature(decision.Rules), err: err}
+			select {
+			case c.acks <- ack:
+			case <-ctx.Done():
+			}
 		}
 	case <-ctx.Done():
 	}
@@ -361,14 +379,25 @@ func (c *Controller) evaluate(w *work) map[string][]wire.Rule {
 				Complete: result.Complete, Allowed: result.Allowed, Denied: result.Denied})
 		}
 	}
-	c.status.Store(view)
 	c.revision++
 	localRules := make([]ipruntime.Rule, len(rules["local"]))
 	for index, value := range rules["local"] {
 		localRules[index] = ipruntime.Rule{Client: value.Client, Limit: value.Limit,
 			Complete: value.Complete, Allowed: value.Allowed, Denied: value.Denied}
 	}
-	_ = c.local.Apply(ipruntime.Decision{Scope: w.scope, Challenge: report.Challenge, Revision: c.revision, Rules: localRules})
+	for source, values := range rules {
+		c.expected[source] = ruleSignature(values)
+	}
+	if err := c.local.Apply(ipruntime.Decision{Scope: w.scope, Challenge: report.Challenge, Revision: c.revision, Rules: localRules}); err == nil {
+		c.applied["local"] = ruleSignature(rules["local"])
+	}
+	for id, policy := range w.policies {
+		row := view.clients[w.clients[id]]
+		row.Applied = row.Available && c.isApplied(policy.Sources)
+		view.clients[row.ClientID] = row
+	}
+	c.status.Store(view)
+	c.recordEvents(w, rules, view)
 	return rules
 }
 
@@ -384,6 +413,7 @@ func (c *Controller) Status(ids []uint) (bool, []ClientStatus) {
 		row.ClientID = id
 		if !fresh || !view.enabled {
 			row.Available, row.ActiveCount = false, nil
+			row.Applied, row.Checking = false, false
 		}
 		rows = append(rows, row)
 	}

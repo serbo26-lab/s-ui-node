@@ -158,6 +158,12 @@ func (r *Runtime) Report(source string) Report {
 	}
 	slices.Sort(report.Snapshot.IncompleteClients)
 	report.Snapshot.IncompleteClients = slices.Compact(report.Snapshot.IncompleteClients)
+	report.Snapshot.Entries = r.observations(now)
+	return report
+}
+
+func (r *Runtime) observations(now int64) []engine.Observation {
+	var observations []engine.Observation
 	for key, value := range r.entries {
 		active, attempted := value.activity.Load(), value.attempt.Load()
 		activity, hasActivity := r.age(now, active)
@@ -175,9 +181,9 @@ func (r *Runtime) Report(source string) Report {
 		if hasAttempt {
 			item.AttemptAge = &attempt
 		}
-		report.Snapshot.Entries = append(report.Snapshot.Entries, item)
+		observations = append(observations, item)
 	}
-	return report
+	return observations
 }
 
 func (r *Runtime) age(now, stamp int64) (time.Duration, bool) {

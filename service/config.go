@@ -6,6 +6,8 @@ import (
 	"sync"
 	"time"
 
+	ipcontrol "github.com/alireza0/s-ui/antiabuse/panel"
+
 	"github.com/alireza0/s-ui/core"
 	"github.com/alireza0/s-ui/database"
 	"github.com/alireza0/s-ui/database/model"
@@ -508,6 +510,7 @@ func (s *ConfigService) finishSave(tx *gorm.DB, objects *[]string, saveError *er
 		logger.Error("failed to commit config save: ", cErr)
 		return
 	}
+	ipcontrol.Notify()
 	if *restartWith != nil {
 		// Detached: a restart takes seconds and this is an HTTP handler.
 		// The recover is required -- a panic here is outside gin's reach.

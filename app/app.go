@@ -4,6 +4,8 @@ import (
 	"context"
 	"log"
 
+	ipcontrol "github.com/alireza0/s-ui/antiabuse/panel"
+
 	"github.com/alireza0/s-ui/config"
 	"github.com/alireza0/s-ui/core"
 	"github.com/alireza0/s-ui/cronjob"
@@ -26,6 +28,8 @@ type APP struct {
 	logger        *logging.Logger
 	core          *core.Core
 	nodeCancel    context.CancelFunc
+	ipControl     *ipcontrol.Controller
+	ipCancel      context.CancelFunc
 }
 
 func NewApp() *APP {
@@ -45,7 +49,9 @@ func (a *APP) Init() error {
 	// Init Setting
 	a.SettingService.GetAllSetting()
 
-	a.core = core.NewCore()
+	if err := a.initIPControl(); err != nil {
+		return err
+	}
 
 	a.cronJob = cronjob.NewCronJob()
 	a.webServer = web.NewServer()
@@ -99,10 +105,17 @@ func (a *APP) Start() error {
 	}
 
 	a.nodeCancel = nodes.Start(context.Background(), nodes.TrafficConfig{Enabled: trafficAge > 0, BucketSeconds: statsBucketSeconds})
+	ipcontrol.Register(a.ipControl)
+	a.ipCancel = a.ipControl.Start(context.Background())
 	return nil
 }
 
 func (a *APP) Stop() {
+	if a.ipCancel != nil {
+		a.ipCancel()
+		a.ipCancel = nil
+	}
+	ipcontrol.Unregister(a.ipControl)
 	if a.nodeCancel != nil {
 		a.nodeCancel()
 		a.nodeCancel = nil

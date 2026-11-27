@@ -106,7 +106,28 @@ func (d Decision) Validate() error {
 		!token(d.Challenge) || d.ConfigRevision == 0 || d.Sequence == 0 || d.Revision == 0 || len(d.Rules) > MaxEntries {
 		return ErrInvalid
 	}
+	seen := map[string]bool{}
+	entries := 0
+	for _, rule := range d.Rules {
+		entries += len(rule.Allowed) + len(rule.Denied)
+		if !token(rule.Client) || seen[rule.Client] || entries > MaxEntries || !validPrefixes(rule.Allowed) || !validPrefixes(rule.Denied) {
+			return ErrInvalid
+		}
+		seen[rule.Client] = true
+	}
 	return nil
+}
+
+func validPrefixes(values []netip.Prefix) bool {
+	for _, value := range values {
+		if !value.IsValid() || value != value.Masked() || value.Addr().IsUnspecified() || value.Addr().IsMulticast() {
+			return false
+		}
+		if value.Addr().Is4() && value.Bits() != 32 || value.Addr().Is6() && (value.Addr().Is4In6() || value.Bits() != 64) {
+			return false
+		}
+	}
+	return true
 }
 
 func token(value string) bool { return value != "" && len(value) <= 128 }

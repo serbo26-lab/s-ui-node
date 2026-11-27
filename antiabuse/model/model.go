@@ -35,9 +35,10 @@ type Event struct {
 	ID        uint64 `json:"id" gorm:"primaryKey;autoIncrement"`
 	At        int64  `json:"at" gorm:"index;not null"`
 	ClientID  uint   `json:"client_id,omitempty" gorm:"index"`
-	CreatedAt int64  `json:"-" gorm:"autoCreateTime:false"`
+	CreatedAt int64  `json:"client_created_at,omitempty" gorm:"autoCreateTime:false"`
 	Code      string `json:"code" gorm:"not null"`
 	Address   string `json:"address,omitempty"`
+	Denied    uint32 `json:"denied"`
 }
 
 func (Event) TableName() string { return "ip_control_events" }

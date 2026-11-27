@@ -2,6 +2,8 @@ package nodeagent
 
 import (
 	"encoding/json"
+	"maps"
+	"slices"
 
 	ipagent "github.com/alireza0/s-ui/antiabuse/agent"
 	"github.com/alireza0/s-ui/antiabuse/engine"
@@ -24,42 +26,66 @@ func (r *CoreRuntime) IPControlSession() *ipagent.Session {
 	return r.ipSession
 }
 
+type ipInbound struct {
+	Tag     string `json:"tag"`
+	Type    string `json:"type"`
+	Method  string `json:"method"`
+	Version uint   `json:"version"`
+	Managed bool   `json:"managed"`
+	Users   []struct {
+		Name     string `json:"name"`
+		Username string `json:"username"`
+	} `json:"users"`
+}
+
 // Called with r.mu held, after the corresponding access/configuration applied.
 func (r *CoreRuntime) updateIPControl(access AccessSnapshot) {
 	r.initializeIPControl()
 	bindings := map[ipruntime.Identity]string{}
+	incomplete := map[string]bool{}
 	var config struct {
-		Inbounds []struct {
-			Tag   string `json:"tag"`
-			Type  string `json:"type"`
-			Users []struct {
-				Name     string `json:"name"`
-				Username string `json:"username"`
-			} `json:"users"`
-		} `json:"inbounds"`
+		Inbounds []ipInbound `json:"inbounds"`
 	}
 	if json.Unmarshal(r.config, &config) == nil {
 		for _, inbound := range config.Inbounds {
-			aliases := ipAliases(access, inbound.Type)
-			for _, user := range inbound.Users {
-				name := user.Name
-				if UsernameAuth(inbound.Type) {
-					name = user.Username
-				}
-				if id := aliases[name]; name != "" && id != "" {
-					bindings[ipruntime.Identity{Inbound: inbound.Tag, User: name}] = id
-				}
-			}
+			inbound.bindIPUsers(access, bindings, incomplete)
+		}
+	} else {
+		for _, grant := range access.Clients {
+			incomplete[grant.TrafficID] = true
 		}
 	}
 	r.ipRuntime.SetUsers(bindings)
+	r.ipRuntime.SetIncomplete(slices.Collect(maps.Keys(incomplete)))
 	r.ipSession.SetIdentity(wire.Identity{NodeID: access.NodeID, Epoch: access.Epoch, AccessRevision: access.Revision})
 }
 
-func ipAliases(access AccessSnapshot, protocol string) map[string]string {
-	aliases := map[string]string{}
+func (in ipInbound) bindIPUsers(access AccessSnapshot, bindings map[ipruntime.Identity]string, incomplete map[string]bool) {
+	aliases := ipAliases(access, in.Type, in.Method)
+	covered := map[string]bool{}
+	for _, user := range in.Users {
+		name := user.Name
+		if UsernameAuth(in.Type) {
+			name = user.Username
+		}
+		if ids := aliases[name]; name != "" && len(ids) == 1 {
+			bindings[ipruntime.Identity{Inbound: in.Tag, User: name}] = ids[0]
+			covered[ids[0]] = true
+		}
+	}
+	for _, ids := range aliases {
+		for _, id := range ids {
+			if !covered[id] || len(ids) != 1 || in.Type == "shadowtls" && in.Version < 3 || in.Managed {
+				incomplete[id] = true
+			}
+		}
+	}
+}
+
+func ipAliases(access AccessSnapshot, protocol, method string) map[string][]string {
+	aliases := map[string][]string{}
 	for _, grant := range access.Clients {
-		credential, ok := grant.Credentials[protocol]
+		credential, ok := grant.Credentials[CredentialKey(protocol, method)]
 		if !ok || grant.TrafficID == "" {
 			continue
 		}
@@ -73,7 +99,7 @@ func ipAliases(access AccessSnapshot, protocol string) map[string]string {
 			}
 			name = auth.Username
 		}
-		aliases[name] = grant.TrafficID
+		aliases[name] = append(aliases[name], grant.TrafficID)
 	}
 	return aliases
 }
