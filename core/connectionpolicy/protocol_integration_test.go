@@ -253,7 +253,7 @@ func testNativeDatagrams(t *testing.T, name string) {
 	if _, err := conn.WriteTo([]byte{42}, echo.LocalAddr()); err != nil {
 		t.Fatal(err)
 	}
-	var data [1]byte
+	var data [65535]byte
 	if n, _, err := conn.ReadFrom(data[:]); err != nil || n != 1 || data[0] != 42 {
 		t.Fatal("native datagram exchange failed", err)
 	}
