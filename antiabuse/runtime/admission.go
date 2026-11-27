@@ -38,28 +38,18 @@ func (r *Runtime) Apply(challenge string, revision uint64, rules []Rule) error {
 		return errors.New("expired IP decision")
 	}
 	table := &decisionTable{expires: r.deadline, rules: make(map[string]rule, len(rules))}
+	seen := make(map[string]bool, len(rules))
 	for _, item := range rules {
-		if item.Client == "" {
+		if item.Client == "" || seen[item.Client] {
 			return errors.New("invalid IP decision client")
 		}
-		if _, exists := table.rules[item.Client]; exists {
-			return errors.New("duplicate IP decision client")
-		}
+		seen[item.Client] = true
 		if !item.Complete || item.Limit == 0 {
 			continue
 		}
-		value := rule{limit: item.Limit, allowed: map[netip.Prefix]bool{}, denied: map[netip.Prefix]bool{}}
-		for _, prefix := range item.Allowed {
-			if !validPrefix(prefix) {
-				return errors.New("invalid allowed IP prefix")
-			}
-			value.allowed[prefix] = true
-		}
-		for _, prefix := range item.Denied {
-			if !validPrefix(prefix) || value.allowed[prefix] {
-				return errors.New("invalid denied IP prefix")
-			}
-			value.denied[prefix] = true
+		value, err := compileRule(item)
+		if err != nil {
+			return err
 		}
 		table.rules[item.Client] = value
 	}
@@ -67,6 +57,23 @@ func (r *Runtime) Apply(challenge string, revision uint64, rules []Rule) error {
 	r.reservations = map[entryKey]int64{}
 	r.table.Store(table)
 	return nil
+}
+
+func compileRule(item Rule) (rule, error) {
+	value := rule{limit: item.Limit, allowed: map[netip.Prefix]bool{}, denied: map[netip.Prefix]bool{}}
+	for _, prefix := range item.Allowed {
+		if !validPrefix(prefix) {
+			return rule{}, errors.New("invalid allowed IP prefix")
+		}
+		value.allowed[prefix] = true
+	}
+	for _, prefix := range item.Denied {
+		if !validPrefix(prefix) || value.allowed[prefix] {
+			return rule{}, errors.New("invalid denied IP prefix")
+		}
+		value.denied[prefix] = true
+	}
+	return value, nil
 }
 
 func validPrefix(prefix netip.Prefix) bool {
@@ -90,32 +97,37 @@ func (r *Runtime) permits(key entryKey, now int64) bool {
 		if value.denied[key.address] {
 			return false
 		}
-		r.mu.Lock()
-		// A table replacement must not reserve an address under an obsolete rule.
-		if r.table.Load() != table {
-			r.mu.Unlock()
+		permitted, retry := r.reserve(table, value, key, now)
+		if !retry {
+			return permitted
+		}
+	}
+}
+
+func (r *Runtime) reserve(table *decisionTable, value rule, key entryKey, now int64) (bool, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.table.Load() != table {
+		return false, true
+	}
+	reserved := uint64(len(value.allowed))
+	for other, expires := range r.reservations {
+		if now >= expires {
+			delete(r.reservations, other)
 			continue
 		}
-		defer r.mu.Unlock()
-		reserved := uint64(len(value.allowed))
-		for other, expires := range r.reservations {
-			if now >= expires {
-				delete(r.reservations, other)
-				continue
-			}
-			if other == key {
-				return true
-			}
-			if other.client == key.client && !value.allowed[other.address] {
-				reserved++
-			}
+		if other == key {
+			return true, false
 		}
-		if reserved >= uint64(value.limit)+1 {
-			return false
+		if other.client == key.client && !value.allowed[other.address] {
+			reserved++
 		}
-		r.reservations[key] = now + int64(r.profile.Activity)
-		return true
 	}
+	if reserved >= uint64(value.limit)+1 {
+		return false, false
+	}
+	r.reservations[key] = now + int64(r.profile.Activity)
+	return true, false
 }
 
 // Flow follows a logical authenticated stream. It does not own the transport.

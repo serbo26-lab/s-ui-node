@@ -148,18 +148,28 @@ func (e *Engine) Accept(snapshot Snapshot, requested, received time.Time) error 
 	if len(snapshot.Entries) > e.profile.MaxEntries || len(snapshot.IncompleteClients) > e.profile.MaxEntries {
 		return errors.New("IP observation limit exceeded")
 	}
+	entries, incomplete, err := parseSnapshot(snapshot, requested)
+	if err != nil {
+		return err
+	}
+	s.sequence, s.received, s.complete, s.entries = snapshot.Sequence, requested, snapshot.Complete, entries
+	s.incomplete = incomplete
+	return nil
+}
+
+func parseSnapshot(snapshot Snapshot, requested time.Time) (map[key]sample, map[string]bool, error) {
 	entries := make(map[key]sample, len(snapshot.Entries))
 	incomplete := make(map[string]bool, len(snapshot.IncompleteClients))
 	for _, id := range snapshot.IncompleteClients {
 		if id == "" {
-			return errors.New("invalid incomplete IP observation client")
+			return nil, nil, errors.New("invalid incomplete IP observation client")
 		}
 		incomplete[id] = true
 	}
 	for _, entry := range snapshot.Entries {
 		address, err := Address(entry.Address)
 		if err != nil || entry.Client == "" || !validAge(entry.ActivityAge) || !validAge(entry.AttemptAge) {
-			return errors.New("invalid IP observation")
+			return nil, nil, errors.New("invalid IP observation")
 		}
 		if entry.ActivityAge == nil && entry.AttemptAge == nil {
 			continue
@@ -174,9 +184,7 @@ func (e *Engine) Accept(snapshot Snapshot, requested, received time.Time) error 
 		}
 		entries[k] = v
 	}
-	s.sequence, s.received, s.complete, s.entries = snapshot.Sequence, requested, snapshot.Complete, entries
-	s.incomplete = incomplete
-	return nil
+	return entries, incomplete, nil
 }
 
 func validAge(age *time.Duration) bool { return age == nil || *age >= 0 }
@@ -228,6 +236,11 @@ func (e *Engine) Evaluate(id string, now time.Time) Result {
 		result.Allowed = prefixKeys(keep)
 		return result
 	}
+	confirmed := e.transition(state, addresses, keep, now)
+	return finishDecision(state, addresses, keep, limit, confirmed, result)
+}
+
+func (e *Engine) transition(state *clientState, addresses []netip.Prefix, keep map[netip.Prefix]bool, now time.Time) bool {
 	if state.window.IsZero() {
 		state.window = now
 		state.witnesses = activityTimes(state.known)
@@ -244,6 +257,10 @@ func (e *Engine) Evaluate(id string, now time.Time) Result {
 	}
 	confirmed := state.restricted || elapsed >= e.profile.Transition && e.confirmed(state)
 	state.restricted = confirmed
+	return confirmed
+}
+
+func finishDecision(state *clientState, addresses []netip.Prefix, keep map[netip.Prefix]bool, limit int, confirmed bool, result Result) Result {
 	result.Checking = !confirmed
 	for _, address := range addresses {
 		if keep[address] {

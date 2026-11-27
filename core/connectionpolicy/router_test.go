@@ -62,34 +62,39 @@ func TestOptionalGuardLeavesOriginalRouter(t *testing.T) {
 func TestAllRouterEntriesRejectBeforeOutboundAndCompleteCallback(t *testing.T) {
 	for _, extended := range []bool{false, true} {
 		for _, packet := range []bool{false, true} {
-			inner := &recordingRouter{}
-			ctx := WithGuard(context.Background(), rejectingGuard{})
-			router := WrapRouter(ctx, inner)
-			left, right := net.Pipe()
-			t.Cleanup(func() { _ = left.Close(); _ = right.Close() })
-			udp := &packetConn{}
-			callbacks := 0
-			onClose := func(err error) {
-				callbacks++
-				if !errors.Is(err, rejection) {
-					t.Errorf("wrong close reason: %v", err)
-				}
-			}
-			var err error
-			metadata := adapter.InboundContext{}
-			switch {
-			case packet && extended:
-				router.RoutePacketConnectionEx(ctx, udp, metadata, onClose)
-			case packet:
-				err = router.RoutePacketConnection(ctx, udp, metadata)
-			case extended:
-				router.RouteConnectionEx(ctx, left, metadata, onClose)
-			default:
-				err = router.RouteConnection(ctx, left, metadata)
-			}
-			if inner.calls != 0 || !extended && !errors.Is(err, rejection) || extended && callbacks != 1 || packet && !udp.closed {
-				t.Fatalf("outbound=%d callback=%d err=%v", inner.calls, callbacks, err)
-			}
+			testRejectedRoute(t, extended, packet)
 		}
+	}
+}
+
+func testRejectedRoute(t *testing.T, extended, packet bool) {
+	t.Helper()
+	inner := &recordingRouter{}
+	ctx := WithGuard(context.Background(), rejectingGuard{})
+	router := WrapRouter(ctx, inner)
+	left, right := net.Pipe()
+	t.Cleanup(func() { _ = left.Close(); _ = right.Close() })
+	udp := &packetConn{}
+	callbacks := 0
+	onClose := func(err error) {
+		callbacks++
+		if !errors.Is(err, rejection) {
+			t.Errorf("wrong close reason: %v", err)
+		}
+	}
+	var err error
+	metadata := adapter.InboundContext{}
+	switch {
+	case packet && extended:
+		router.RoutePacketConnectionEx(ctx, udp, metadata, onClose)
+	case packet:
+		err = router.RoutePacketConnection(ctx, udp, metadata)
+	case extended:
+		router.RouteConnectionEx(ctx, left, metadata, onClose)
+	default:
+		err = router.RouteConnection(ctx, left, metadata)
+	}
+	if inner.calls != 0 || !extended && !errors.Is(err, rejection) || extended && callbacks != 1 || packet && !udp.closed {
+		t.Fatalf("outbound=%d callback=%d err=%v", inner.calls, callbacks, err)
 	}
 }

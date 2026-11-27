@@ -20,6 +20,7 @@ import (
 	"github.com/sagernet/sing/common/logger"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
+	aTLS "github.com/sagernet/sing/common/tls"
 	"github.com/sagernet/sing/service"
 
 	"golang.org/x/net/http2"
@@ -59,14 +60,24 @@ func NewServerTransport(ctx context.Context, logger logger.ContextLogger, option
 			return nil, err
 		}
 		wrapped = h2c.NewHandler(wrapped, h2)
-		if tlsConfig != nil && !common.Contains(tlsConfig.NextProtos(), http2.NextProtoTLS) {
-			tlsConfig.SetNextProtos(append([]string{http2.NextProtoTLS}, tlsConfig.NextProtos()...))
-		}
+		configureHTTPProtocols(tlsConfig)
 	} else {
 		server.server.TLSNextProto = map[string]func(*http.Server, *tls.STDConn, http.Handler){}
 	}
 	server.server.Handler = wrapped
 	return server, nil
+}
+
+func configureHTTPProtocols(config tls.ServerConfig) {
+	if config == nil {
+		return
+	}
+	protocols := config.NextProtos()
+	if len(protocols) == 0 {
+		config.SetNextProtos([]string{http2.NextProtoTLS, "http/1.1"})
+	} else if !common.Contains(protocols, http2.NextProtoTLS) {
+		config.SetNextProtos(append([]string{http2.NextProtoTLS}, protocols...))
+	}
 }
 
 type httpTransport struct {
@@ -77,7 +88,7 @@ type httpTransport struct {
 
 func (s *httpTransport) Serve(listener net.Listener) error {
 	if s.tls != nil {
-		listener = tls.NewListener(listener, s.tls)
+		listener = aTLS.NewListener(listener, s.tls)
 	}
 	return s.server.Serve(listener)
 }
