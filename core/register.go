@@ -64,8 +64,7 @@ func InboundRegistry() *inbound.Registry {
 	redirect.RegisterTProxy(registry)
 	direct.RegisterInbound(registry)
 
-	socks.RegisterInbound(registry)
-	connectionpolicy.RegisterHTTPInbounds(registry)
+	connectionpolicy.RegisterProxyInbounds(registry)
 
 	suiShadowsocks.RegisterInbound(registry)
 	suiSnell.RegisterInbound(registry)

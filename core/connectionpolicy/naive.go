@@ -34,7 +34,7 @@ type naiveInbound struct {
 }
 
 func newNaiveInbound(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.NaiveInboundOptions) (adapter.Inbound, error) {
-	if service.FromContext[Guard](ctx) == nil {
+	if service.FromContext[Guard](ctx) == nil && !managedAuthentication(ctx) {
 		return naive.NewInbound(ctx, router, logger, tag, options)
 	}
 	if common.Contains(options.Network.Build(), N.NetworkUDP) && (options.TLS == nil || !options.TLS.Enabled) {
@@ -48,8 +48,14 @@ func newNaiveInbound(ctx context.Context, router adapter.Router, logger log.Cont
 	if err != nil {
 		return nil, err
 	}
+	handler := inner.(http.Handler)
+	if managedAuthentication(ctx) && len(options.Users) == 0 {
+		handler = http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+			writer.WriteHeader(http.StatusProxyAuthRequired)
+		})
+	}
 	h := &naiveInbound{Adapter: inbound.NewAdapter(C.TypeNaive, tag), logger: logger,
-		handler: &peerHandler{inner: inner.(http.Handler)}, options: options}
+		handler: &peerHandler{inner: handler}, options: options}
 	if options.TLS != nil {
 		h.tls, err = tls.NewServer(ctx, logger, common.PtrValueOrDefault(options.TLS))
 		if err != nil {

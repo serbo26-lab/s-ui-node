@@ -23,7 +23,8 @@ func (a *APP) initIPControl() error {
 	if err != nil {
 		return err
 	}
-	a.core = core.NewCoreWithContext(connectionpolicy.WithGuard(context.Background(), runtime))
+	ctx := connectionpolicy.WithManagedAuthentication(context.Background())
+	a.core = core.NewCoreWithContext(connectionpolicy.WithGuard(ctx, runtime))
 	a.ipControl = &ipControlState{runtime: runtime}
 	return nil
 }

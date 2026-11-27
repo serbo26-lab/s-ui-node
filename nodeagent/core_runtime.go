@@ -51,6 +51,7 @@ func NewCoreRuntime() *CoreRuntime { r := &CoreRuntime{}; r.freshCore(); return 
 func (r *CoreRuntime) freshCore() {
 	r.initializeIPControl()
 	ctx, cancel := context.WithCancel(context.Background())
+	ctx = connectionpolicy.WithManagedAuthentication(ctx)
 	ctx = connectionpolicy.WithGuard(ctx, r.ipRuntime)
 	r.core = core.NewCoreWithContext(ctx)
 	r.cancelMu.Lock()

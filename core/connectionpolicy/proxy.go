@@ -17,6 +17,7 @@ import (
 	"github.com/sagernet/sing-box/option"
 	boxhttp "github.com/sagernet/sing-box/protocol/http"
 	"github.com/sagernet/sing-box/protocol/mixed"
+	boxsocks "github.com/sagernet/sing-box/protocol/socks"
 	"github.com/sagernet/sing/common"
 	"github.com/sagernet/sing/common/auth"
 	E "github.com/sagernet/sing/common/exceptions"
@@ -29,15 +30,21 @@ import (
 
 // Bind the peer before HTTP authentication and forwarding can replace routing
 // metadata or move a request onto an internal pipe.
-func RegisterHTTPInbounds(registry *inbound.Registry) {
+func RegisterProxyInbounds(registry *inbound.Registry) {
+	inbound.Register[option.SocksInboundOptions](registry, C.TypeSOCKS, func(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.SocksInboundOptions) (adapter.Inbound, error) {
+		if !managedAuthentication(ctx) || len(options.Users) > 0 {
+			return boxsocks.NewInbound(ctx, router, logger, tag, options)
+		}
+		return newProxyInbound(ctx, router, logger, tag, C.TypeSOCKS, option.HTTPMixedInboundOptions{ListenOptions: options.ListenOptions})
+	})
 	inbound.Register[option.HTTPMixedInboundOptions](registry, C.TypeHTTP, func(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.HTTPMixedInboundOptions) (adapter.Inbound, error) {
-		if service.FromContext[Guard](ctx) == nil {
+		if service.FromContext[Guard](ctx) == nil && !managedAuthentication(ctx) {
 			return boxhttp.NewInbound(ctx, router, logger, tag, options)
 		}
 		return newProxyInbound(ctx, router, logger, tag, C.TypeHTTP, options)
 	})
 	inbound.Register[option.HTTPMixedInboundOptions](registry, C.TypeMixed, func(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.HTTPMixedInboundOptions) (adapter.Inbound, error) {
-		if service.FromContext[Guard](ctx) == nil {
+		if service.FromContext[Guard](ctx) == nil && !managedAuthentication(ctx) {
 			return mixed.NewInbound(ctx, router, logger, tag, options)
 		}
 		return newProxyInbound(ctx, router, logger, tag, C.TypeMixed, options)
@@ -58,6 +65,9 @@ type proxyInbound struct {
 func newProxyInbound(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag, kind string, options option.HTTPMixedInboundOptions) (adapter.Inbound, error) {
 	h := &proxyInbound{Adapter: inbound.NewAdapter(kind, tag), router: uot.NewRouter(router, logger),
 		logger: logger, authenticator: auth.NewAuthenticator(options.Users), udpTimeout: time.Duration(options.UDPTimeout)}
+	if h.authenticator == nil && managedAuthentication(ctx) {
+		h.authenticator = &auth.Authenticator{}
+	}
 	if h.udpTimeout == 0 {
 		h.udpTimeout = C.UDPTimeout
 	}
@@ -121,6 +131,9 @@ func (h *proxyInbound) handle(ctx context.Context, conn net.Conn, metadata adapt
 	}
 	reader := bufio.NewReader(conn)
 	handler := adapter.NewUpstreamHandler(metadata, h.connection, h.packetConnection)
+	if h.Type() == C.TypeSOCKS {
+		return socks.HandleConnectionEx(ctx, conn, reader, h.authenticator, handler, h.listener, h.udpTimeout, metadata.Source, onClose)
+	}
 	if h.Type() == C.TypeMixed {
 		first, err := reader.Peek(1)
 		if err != nil {
