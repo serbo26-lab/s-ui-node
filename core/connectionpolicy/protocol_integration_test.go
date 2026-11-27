@@ -200,6 +200,83 @@ func TestNativeProxyProtocolsObserveAndRecheckUsefulStreams(t *testing.T) {
 	}
 }
 
+func TestNativeProxyDatagramsObserveAndRecheckAdmission(t *testing.T) {
+	for _, name := range []string{"vless", "vmess", "shadowsocks", "shadowsocks-2022", "hysteria", "hysteria2", "tuic"} {
+		t.Run(name, func(t *testing.T) { testNativeDatagrams(t, name) })
+	}
+}
+
+func testNativeDatagrams(t *testing.T, name string) {
+	t.Helper()
+	var elapsed atomic.Int64
+	runtime, err := ipruntime.New(engine.DefaultProfile(), func() time.Time { return time.Unix(0, elapsed.Load()) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime.SetUsers(map[ipruntime.Identity]string{{Inbound: "access", User: "user"}: "client"})
+	runtime.SetEnabled(true)
+	server, client := nativeProxyOptions(t, name)
+	serverCore := core.NewCoreWithContext(connectionpolicy.WithGuard(context.Background(), runtime))
+	runCore(t, serverCore, []any{server}, []any{map[string]any{"type": "direct", "tag": "direct"}})
+	clientCore := core.NewCore()
+	runCore(t, clientCore, nil, []any{client})
+	outbound, _ := clientCore.GetInstance().Outbound().Outbound("access")
+	echo, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = echo.Close() })
+	var received atomic.Int64
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		var data [4096]byte
+		for {
+			n, address, err := echo.ReadFrom(data[:])
+			if err != nil {
+				return
+			}
+			received.Add(1)
+			_, _ = echo.WriteTo(data[:n], address)
+		}
+	}()
+	t.Cleanup(func() { _ = echo.Close(); <-done })
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	conn, err := outbound.ListenPacket(ctx, M.SocksaddrFromNet(echo.LocalAddr()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	stop := time.AfterFunc(3*time.Second, func() { _ = conn.Close() })
+	defer stop.Stop()
+	if _, err := conn.WriteTo([]byte{42}, echo.LocalAddr()); err != nil {
+		t.Fatal(err)
+	}
+	var data [1]byte
+	if n, _, err := conn.ReadFrom(data[:]); err != nil || n != 1 || data[0] != 42 {
+		t.Fatal("native datagram exchange failed", err)
+	}
+	assertPhysicalReport(t, runtime)
+	elapsed.Store(int64(61 * time.Second))
+	report := runtime.Report("local")
+	if err := runtime.Apply(ipruntime.Decision{Scope: "controller", Challenge: report.Challenge, Revision: 1,
+		Rules: []ipruntime.Rule{{Client: "client", Limit: 1, Complete: true, Denied: []netip.Prefix{netip.MustParsePrefix("127.0.0.1/32")}}}}); err != nil {
+		t.Fatal(err)
+	}
+	before := received.Load()
+	stop.Stop()
+	stop = time.AfterFunc(300*time.Millisecond, func() { _ = conn.Close() })
+	_, _ = conn.WriteTo([]byte{43}, echo.LocalAddr())
+	if _, _, err := conn.ReadFrom(data[:]); err == nil {
+		t.Fatal("existing datagram session bypassed denial")
+	}
+	stop.Stop()
+	if received.Load() != before {
+		t.Fatal("denied datagram reached outbound")
+	}
+}
+
 func testNativeProxy(t *testing.T, name string) {
 	t.Helper()
 	var elapsed atomic.Int64
