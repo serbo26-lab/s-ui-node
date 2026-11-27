@@ -265,3 +265,28 @@ func TestProfileAndSnapshotBounds(t *testing.T) {
 		t.Fatal("negative age accepted")
 	}
 }
+
+func TestRotatingExcessAddressDoesNotReceiveNewProvisionalSlot(t *testing.T) {
+	e := newEngine(t, 1, "local")
+	accept(t, e, "local", 1, start, active(addressA))
+	e.Evaluate("client", start)
+	accept(t, e, "local", 2, start.Add(time.Second), active(addressA), active(addressB))
+	e.Evaluate("client", start.Add(time.Second))
+	accept(t, e, "local", 3, start.Add(2*time.Second), active(addressA), attempt(addressC))
+	r := e.Evaluate("client", start.Add(2*time.Second))
+	if contains(r.Allowed, addressC) || !contains(r.Denied, addressC) {
+		t.Fatalf("replacement extended transition budget: %+v", r)
+	}
+}
+
+func TestUnsupportedClientDoesNotPauseUnrelatedClient(t *testing.T) {
+	e := newEngine(t, 1, "local")
+	snapshot := Snapshot{Source: "local", Boot: "boot", Sequence: 1, Complete: true,
+		IncompleteClients: []string{"other"}, Entries: []Observation{active(addressA)}}
+	if err := e.Accept(snapshot, start, start); err != nil {
+		t.Fatal(err)
+	}
+	if r := e.Evaluate("client", start); !r.Complete || r.Active != 1 {
+		t.Fatalf("unrelated client paused: %+v", r)
+	}
+}

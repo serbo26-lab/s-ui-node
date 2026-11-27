@@ -24,11 +24,12 @@ type Observation struct {
 }
 
 type Snapshot struct {
-	Source   string
-	Boot     string
-	Sequence uint64
-	Complete bool
-	Entries  []Observation
+	Source            string
+	Boot              string
+	Sequence          uint64
+	Complete          bool
+	IncompleteClients []string
+	Entries           []Observation
 }
 
 type Result struct {
@@ -41,11 +42,12 @@ type Result struct {
 }
 
 type source struct {
-	boot     string
-	sequence uint64
-	received time.Time
-	complete bool
-	entries  map[key]sample
+	boot       string
+	sequence   uint64
+	received   time.Time
+	complete   bool
+	incomplete map[string]bool
+	entries    map[key]sample
 }
 
 type key struct {
@@ -71,6 +73,7 @@ type clientState struct {
 	witnesses    map[netip.Prefix]time.Time
 	confirmation map[netip.Prefix]time.Time
 	restricted   bool
+	provisional  netip.Prefix
 }
 
 // Engine is owned by the coordinator. It performs no I/O and is never called
@@ -142,10 +145,17 @@ func (e *Engine) Accept(snapshot Snapshot, requested, received time.Time) error 
 	if requested.IsZero() || received.Before(requested) || received.Sub(requested) >= e.profile.Freshness {
 		return errors.New("expired IP observation response")
 	}
-	if len(snapshot.Entries) > e.profile.MaxEntries {
+	if len(snapshot.Entries) > e.profile.MaxEntries || len(snapshot.IncompleteClients) > e.profile.MaxEntries {
 		return errors.New("IP observation limit exceeded")
 	}
 	entries := make(map[key]sample, len(snapshot.Entries))
+	incomplete := make(map[string]bool, len(snapshot.IncompleteClients))
+	for _, id := range snapshot.IncompleteClients {
+		if id == "" {
+			return errors.New("invalid incomplete IP observation client")
+		}
+		incomplete[id] = true
+	}
 	for _, entry := range snapshot.Entries {
 		address, err := Address(entry.Address)
 		if err != nil || entry.Client == "" || !validAge(entry.ActivityAge) || !validAge(entry.AttemptAge) {
@@ -165,6 +175,7 @@ func (e *Engine) Accept(snapshot Snapshot, requested, received time.Time) error 
 		entries[k] = v
 	}
 	s.sequence, s.received, s.complete, s.entries = snapshot.Sequence, requested, snapshot.Complete, entries
+	s.incomplete = incomplete
 	return nil
 }
 
@@ -212,6 +223,7 @@ func (e *Engine) Evaluate(id string, now time.Time) Result {
 		state.window = time.Time{}
 		state.witnesses, state.confirmation = nil, nil
 		state.restricted = false
+		state.provisional = netip.Prefix{}
 		state.allowed = keep
 		result.Allowed = prefixKeys(keep)
 		return result
@@ -219,6 +231,12 @@ func (e *Engine) Evaluate(id string, now time.Time) Result {
 	if state.window.IsZero() {
 		state.window = now
 		state.witnesses = activityTimes(state.known)
+		for _, addr := range addresses {
+			if !keep[addr] {
+				state.provisional = addr
+				break
+			}
+		}
 	}
 	elapsed := now.Sub(state.window)
 	if elapsed >= e.profile.Transition-e.profile.Confirmation && state.confirmation == nil {
@@ -231,7 +249,7 @@ func (e *Engine) Evaluate(id string, now time.Time) Result {
 		if keep[address] {
 			continue
 		}
-		if !confirmed && len(keep) == limit {
+		if !confirmed && address == state.provisional {
 			// One provisional address per incident; retries do not restart it.
 			keep[address] = true
 			continue
@@ -251,6 +269,9 @@ func (e *Engine) observations(id string, sources []string, now time.Time) (map[n
 		if s == nil || !s.complete || !recent(s.received, now, e.profile.Freshness) {
 			complete = false
 			continue
+		}
+		if s.incomplete[id] {
+			complete = false
 		}
 		for k, value := range s.entries {
 			if k.client != id || (!recent(value.activity, now, e.profile.Activity) && !recent(value.attempt, now, e.profile.Activity)) {
@@ -314,6 +335,14 @@ func sortedCandidates(values map[netip.Prefix]candidate) []netip.Prefix {
 		return a.Addr().Compare(b.Addr())
 	})
 	return keys
+}
+
+func activityTimes(values map[netip.Prefix]candidate) map[netip.Prefix]time.Time {
+	result := make(map[netip.Prefix]time.Time, len(values))
+	for addr, value := range values {
+		result[addr] = value.activity
+	}
+	return result
 }
 
 func retainAllowed(old map[netip.Prefix]bool, addresses []netip.Prefix, limit int) map[netip.Prefix]bool {
