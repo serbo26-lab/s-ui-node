@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"os"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -16,9 +17,16 @@ import (
 	ipruntime "github.com/alireza0/s-ui/antiabuse/runtime"
 	"github.com/alireza0/s-ui/core"
 	"github.com/alireza0/s-ui/core/connectionpolicy"
+	"github.com/alireza0/s-ui/logger"
+	"github.com/op/go-logging"
 
 	"golang.org/x/net/proxy"
 )
+
+func TestMain(m *testing.M) {
+	logger.InitLogger(logging.ERROR)
+	os.Exit(m.Run())
+}
 
 func echoServer(t *testing.T) (string, *atomic.Int64) {
 	t.Helper()

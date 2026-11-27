@@ -47,12 +47,7 @@ type source struct {
 	received   time.Time
 	complete   bool
 	incomplete map[string]bool
-	entries    map[key]sample
-}
-
-type key struct {
-	client  string
-	address netip.Prefix
+	entries    map[string]map[netip.Prefix]sample
 }
 
 type sample struct {
@@ -157,8 +152,8 @@ func (e *Engine) Accept(snapshot Snapshot, requested, received time.Time) error 
 	return nil
 }
 
-func parseSnapshot(snapshot Snapshot, requested time.Time) (map[key]sample, map[string]bool, error) {
-	entries := make(map[key]sample, len(snapshot.Entries))
+func parseSnapshot(snapshot Snapshot, requested time.Time) (map[string]map[netip.Prefix]sample, map[string]bool, error) {
+	entries := make(map[string]map[netip.Prefix]sample)
 	incomplete := make(map[string]bool, len(snapshot.IncompleteClients))
 	for _, id := range snapshot.IncompleteClients {
 		if id == "" {
@@ -174,17 +169,25 @@ func parseSnapshot(snapshot Snapshot, requested time.Time) (map[key]sample, map[
 		if entry.ActivityAge == nil && entry.AttemptAge == nil {
 			continue
 		}
-		k := key{entry.Client, address}
-		v := entries[k]
-		if entry.ActivityAge != nil {
-			v.activity = later(v.activity, requested.Add(-*entry.ActivityAge))
-		}
-		if entry.AttemptAge != nil {
-			v.attempt = later(v.attempt, requested.Add(-*entry.AttemptAge))
-		}
-		entries[k] = v
+		storeObservation(entries, entry, address, requested)
 	}
 	return entries, incomplete, nil
+}
+
+func storeObservation(entries map[string]map[netip.Prefix]sample, entry Observation, address netip.Prefix, requested time.Time) {
+	client := entries[entry.Client]
+	if client == nil {
+		client = map[netip.Prefix]sample{}
+		entries[entry.Client] = client
+	}
+	v := client[address]
+	if entry.ActivityAge != nil {
+		v.activity = later(v.activity, requested.Add(-*entry.ActivityAge))
+	}
+	if entry.AttemptAge != nil {
+		v.attempt = later(v.attempt, requested.Add(-*entry.AttemptAge))
+	}
+	client[address] = v
 }
 
 func validAge(age *time.Duration) bool { return age == nil || *age >= 0 }
@@ -290,14 +293,14 @@ func (e *Engine) observations(id string, sources []string, now time.Time) (map[n
 		if s.incomplete[id] {
 			complete = false
 		}
-		for k, value := range s.entries {
-			if k.client != id || (!recent(value.activity, now, e.profile.Activity) && !recent(value.attempt, now, e.profile.Activity)) {
+		for address, value := range s.entries[id] {
+			if !recent(value.activity, now, e.profile.Activity) && !recent(value.attempt, now, e.profile.Activity) {
 				continue
 			}
-			old := current[k.address]
+			old := current[address]
 			old.activity = later(old.activity, value.activity)
 			old.attempt = later(old.attempt, value.attempt)
-			current[k.address] = old
+			current[address] = old
 		}
 	}
 	return current, complete
