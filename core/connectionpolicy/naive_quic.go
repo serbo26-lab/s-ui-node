@@ -11,22 +11,22 @@ import (
 	"github.com/sagernet/quic-go/http3"
 	"github.com/sagernet/sing-box/log"
 	qtls "github.com/sagernet/sing-quic"
-	"github.com/sagernet/sing-quic/congestion_meta1"
-	"github.com/sagernet/sing-quic/congestion_meta2"
+	congestion_meta1 "github.com/sagernet/sing-quic/congestion_meta1"
+	congestion_meta2 "github.com/sagernet/sing-quic/congestion_meta2"
 	"github.com/sagernet/sing/common"
 	E "github.com/sagernet/sing/common/exceptions"
 	M "github.com/sagernet/sing/common/metadata"
 	"github.com/sagernet/sing/common/ntp"
 )
 
-func (h *naiveInbound) startHTTP3() (io.Closer, error) {
+func (h *naiveInbound) startHTTP3(ctx context.Context) (io.Closer, error) {
 	if err := qtls.ConfigureHTTP3(h.tls); err != nil {
 		return nil, err
 	}
 	if !common.Contains(h.tls.NextProtos(), http3.NextProtoH3) {
 		h.tls.SetNextProtos(append(append([]string{}, h.tls.NextProtos()...), http3.NextProtoH3))
 	}
-	congestionControl, err := h.congestionControl()
+	congestionControl, err := h.congestionControl(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -57,8 +57,8 @@ func (h *naiveInbound) startHTTP3() (io.Closer, error) {
 	return common.Closer(func() error { return common.Close(server, listener, socket) }), nil
 }
 
-func (h *naiveInbound) congestionControl() (func(*quic.Conn) congestion.CongestionControl, error) {
-	now := ntp.TimeFuncFromContext(h.ctx)
+func (h *naiveInbound) congestionControl(ctx context.Context) (func(*quic.Conn) congestion.CongestionControl, error) {
+	now := ntp.TimeFuncFromContext(ctx)
 	if now == nil {
 		now = time.Now
 	}

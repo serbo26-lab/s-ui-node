@@ -26,7 +26,6 @@ import (
 
 type naiveInbound struct {
 	inbound.Adapter
-	ctx      context.Context
 	logger   log.ContextLogger
 	listener *listener.Listener
 	tls      tls.ServerConfig
@@ -49,7 +48,7 @@ func newNaiveInbound(ctx context.Context, router adapter.Router, logger log.Cont
 	if err != nil {
 		return nil, err
 	}
-	h := &naiveInbound{Adapter: inbound.NewAdapter(C.TypeNaive, tag), ctx: ctx, logger: logger,
+	h := &naiveInbound{Adapter: inbound.NewAdapter(C.TypeNaive, tag), logger: logger,
 		handler: &peerHandler{inner: inner.(http.Handler)}, options: options}
 	if options.TLS != nil {
 		h.tls, err = tls.NewServer(ctx, logger, common.PtrValueOrDefault(options.TLS))
@@ -75,7 +74,7 @@ func (h *naiveInbound) Start(stage adapter.StartStage, scope *adapter.Scope) err
 	scope.Add(h.listener.Close)
 	network := h.options.Network.Build()
 	if common.Contains(network, N.NetworkUDP) {
-		closer, err := h.startHTTP3()
+		closer, err := h.startHTTP3(scope.Context())
 		if err != nil {
 			if len(network) == 1 {
 				return err
@@ -98,7 +97,7 @@ func (h *naiveInbound) startHTTP(scope *adapter.Scope) error {
 	}
 	server := &http.Server{ReadHeaderTimeout: C.TCPTimeout,
 		Handler:     h2c.NewHandler(h.handler, &http2.Server{}),
-		BaseContext: func(net.Listener) context.Context { return h.ctx },
+		BaseContext: func(net.Listener) context.Context { return scope.Context() },
 		ConnContext: func(ctx context.Context, conn net.Conn) context.Context {
 			address := M.SocksaddrFromNet(conn.RemoteAddr()).Addr
 			return WithSource(log.ContextWithNewID(ctx), func() netip.Addr { return address })
