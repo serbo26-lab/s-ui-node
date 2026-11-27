@@ -36,6 +36,11 @@ jobs:
         run: |
           . ./build-tags.sh
           go test -tags "$(tags_for agent)" ./core/connectionpolicy
+      - name: Check 32-bit policy arithmetic
+        env:
+          GOARCH: "386"
+          CGO_ENABLED: "0"
+        run: go test ./antiabuse/engine
       - uses: actions/upload-artifact@v7
         with:
           name: ip-control-checks

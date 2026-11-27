@@ -63,6 +63,15 @@ func TestLocalOnlyDeduplicatesAndReplacesSnapshots(t *testing.T) {
 	}
 }
 
+func TestMaximumLimitDoesNotOverflowPlatformInt(t *testing.T) {
+	e := newEngine(t, ^uint32(0), "local")
+	accept(t, e, "local", 1, start, active(addressA), active(addressB))
+	result := e.Evaluate("client", start)
+	if !result.Complete || result.Active != 2 || len(result.Allowed) != 2 || len(result.Denied) != 0 || result.Checking {
+		t.Fatal("large limit changed admission", result)
+	}
+}
+
 func TestSameIPAcrossSourcesAndOneSourceLeaving(t *testing.T) {
 	e := newEngine(t, 1, "local", "node-a", "node-b")
 	for _, source := range []string{"local", "node-a", "node-b"} {

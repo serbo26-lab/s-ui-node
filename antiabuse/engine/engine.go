@@ -225,7 +225,7 @@ func (e *Engine) Evaluate(id string, now time.Time) Result {
 	}
 	state := e.updateClient(id, current, now)
 	addresses := sortedCandidates(state.known)
-	limit := min(int(policy.Limit), len(addresses))
+	limit := int(min(uint64(policy.Limit), uint64(len(addresses))))
 	if policy.Limit == 0 {
 		limit = len(addresses)
 	}
