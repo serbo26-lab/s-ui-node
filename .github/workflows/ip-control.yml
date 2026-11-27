@@ -24,9 +24,12 @@ jobs:
       - name: Compile native checks
         run: |
           mkdir -p checks
-          go test -c -o checks/connectionpolicy.test ./core/connectionpolicy
-          go test -c -o checks/runtime.test ./antiabuse/runtime
-          go test -c -o checks/engine.test ./antiabuse/engine
+          . ./build-tags.sh
+          tags=$(tags_for test)
+          flags=$(ldflags_for test)
+          go test -c -tags "$tags" -ldflags "$flags" -o checks/connectionpolicy.test ./core/connectionpolicy
+          go test -c -tags "$tags" -ldflags "$flags" -o checks/runtime.test ./antiabuse/runtime
+          go test -c -tags "$tags" -ldflags "$flags" -o checks/engine.test ./antiabuse/engine
           printf '%s\n' "$GITHUB_SHA" > checks/commit.txt
           sha256sum checks/*.test > checks/SHA256SUMS
       - uses: actions/upload-artifact@v7
