@@ -69,12 +69,7 @@ func ipControlClients(ctx *gin.Context) {
 		}
 		ids = append(ids, uint(id))
 	}
-	enabled, rows := ipController(ctx).Status(ids)
-	jsonObj(ctx, struct {
-		Enabled bool                     `json:"enabled"`
-		Scope   string                   `json:"scope"`
-		Clients []ipcontrol.ClientStatus `json:"clients"`
-	}{Enabled: enabled, Scope: ipController(ctx).Scope(), Clients: rows}, nil)
+	jsonObj(ctx, ipController(ctx).Status(ids), nil)
 }
 
 func ipControlEvents(ctx *gin.Context) {

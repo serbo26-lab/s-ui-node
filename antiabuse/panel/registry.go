@@ -25,10 +25,3 @@ func (c *Controller) GroupNames() ([]string, error)         { return c.store.Gro
 func (c *Controller) Events(before uint64, limit int) ([]ipmodel.Event, error) {
 	return c.store.Events(before, limit)
 }
-
-func (c *Controller) Scope() string {
-	if w := c.view.Load(); w != nil {
-		return w.scope
-	}
-	return ""
-}

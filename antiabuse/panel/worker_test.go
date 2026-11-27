@@ -54,7 +54,8 @@ func TestStalledNodeDoesNotHoldLocalControlOrUnrelatedClient(t *testing.T) {
 		case <-deadline.C:
 			t.Fatal("local observation waited for the stalled node")
 		case <-ticker.C:
-			_, rows := c.Status([]uint{1, 2})
+			status := c.Status([]uint{1, 2})
+			rows := status.Clients
 			if len(rows) != 2 || rows[0].ActiveCount == nil {
 				continue
 			}
@@ -76,8 +77,9 @@ func TestDisabledModuleRetainsEffectivePolicyWithoutCollecting(t *testing.T) {
 		t.Fatal(err)
 	}
 	c.tick(context.Background())
-	enabled, rows := c.Status([]uint{1})
-	if enabled || rows[0].Limit != 1 || rows[0].LimitSource != "group" || rows[0].ActiveCount != nil {
+	status := c.Status([]uint{1})
+	rows := status.Clients
+	if status.Enabled || rows[0].Limit != 1 || rows[0].LimitSource != "group" || rows[0].ActiveCount != nil {
 		t.Fatal("disabled control lost the effective policy or advertised fresh data")
 	}
 	f := nativeFlow(t, runtime, "192.0.2.1")

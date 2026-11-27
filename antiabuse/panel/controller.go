@@ -41,6 +41,12 @@ type ClientStatus struct {
 	Applied           bool   `json:"applied"`
 }
 
+type ClientStatuses struct {
+	Scope   string         `json:"scope"`
+	Enabled bool           `json:"enabled"`
+	Clients []ClientStatus `json:"clients"`
+}
+
 type work struct {
 	revision     uint64
 	limitSources map[string]string
@@ -68,6 +74,7 @@ type observationResult struct {
 }
 
 type statusView struct {
+	scope   string
 	enabled bool
 	updated time.Time
 	clients map[uint]ClientStatus
@@ -217,7 +224,7 @@ func (c *Controller) refresh(ctx context.Context) error {
 	}
 	c.view.Store(w)
 	c.applied, c.expected = map[string]string{}, map[string]string{}
-	initial := &statusView{enabled: p.config.Enabled, updated: c.now(), clients: map[uint]ClientStatus{}}
+	initial := &statusView{scope: w.scope, enabled: p.config.Enabled, updated: c.now(), clients: map[uint]ClientStatus{}}
 	for key, policy := range policies {
 		initial.clients[w.clients[key]] = ClientStatus{
 			ClientID: w.clients[key], Limit: policy.Limit, LimitSource: limitSources[key], RequestedRevision: w.revision,
@@ -380,7 +387,7 @@ func (c *Controller) evaluate(w *work) map[string][]wire.Rule {
 	c.engine.SetSource("local", report.Snapshot.Boot)
 	_ = c.engine.Accept(report.Snapshot, requested, c.now())
 	now := c.now()
-	view := &statusView{enabled: true, updated: now, clients: map[uint]ClientStatus{}}
+	view := &statusView{scope: w.scope, enabled: true, updated: now, clients: map[uint]ClientStatus{}}
 	rules := map[string][]wire.Rule{}
 	keys := slices.Collect(maps.Keys(w.policies))
 	slices.Sort(keys)
@@ -423,11 +430,11 @@ func (c *Controller) evaluate(w *work) map[string][]wire.Rule {
 	return rules
 }
 
-func (c *Controller) Status(ids []uint) (bool, []ClientStatus) {
+func (c *Controller) Status(ids []uint) ClientStatuses {
 	view := c.status.Load()
 	rows := make([]ClientStatus, 0, len(ids))
 	if view == nil {
-		return false, rows
+		return ClientStatuses{Clients: rows}
 	}
 	fresh := c.now().Sub(view.updated) < engine.DefaultProfile().Freshness
 	for _, id := range ids {
@@ -439,7 +446,7 @@ func (c *Controller) Status(ids []uint) (bool, []ClientStatus) {
 		}
 		rows = append(rows, row)
 	}
-	return view.enabled, rows
+	return ClientStatuses{Scope: view.scope, Enabled: view.enabled, Clients: rows}
 }
 
 func (c *Controller) SaveConfiguration(value Configuration) (Configuration, error) {

@@ -63,8 +63,9 @@ func TestControllerLocalOnlyCountsWithoutAnyNodes(t *testing.T) {
 	f := nativeFlow(t, runtime, "192.0.2.1")
 	f.Activity(1)
 	c.tick(context.Background())
-	enabled, rows := c.Status([]uint{1})
-	if !enabled || len(rows) != 1 || rows[0].Limit != 1 || !rows[0].Available || rows[0].ActiveCount == nil || *rows[0].ActiveCount != 1 {
+	status := c.Status([]uint{1})
+	rows := status.Clients
+	if !status.Enabled || len(rows) != 1 || rows[0].Limit != 1 || !rows[0].Available || rows[0].ActiveCount == nil || *rows[0].ActiveCount != 1 {
 		t.Fatalf("local-only control unavailable: %+v", rows)
 	}
 }
@@ -78,7 +79,8 @@ func TestControllerTransitionsAndReopensPreviouslyRejectedIP(t *testing.T) {
 	b := nativeFlow(t, runtime, "192.0.2.2")
 	b.Activity(1)
 	c.tick(context.Background())
-	_, rows := c.Status([]uint{1})
+	status := c.Status([]uint{1})
+	rows := status.Clients
 	if !rows[0].Checking || *rows[0].ActiveCount != 2 {
 		t.Fatal("temporary excess hidden from count")
 	}
@@ -116,7 +118,8 @@ func TestControllerDuplicateUsernameMarksBothClientsIncomplete(t *testing.T) {
 		t.Fatal(err)
 	}
 	c.tick(context.Background())
-	_, rows := c.Status([]uint{1, 2})
+	status := c.Status([]uint{1, 2})
+	rows := status.Clients
 	for _, row := range rows {
 		if row.Available || row.ActiveCount != nil {
 			t.Fatal("ambiguous authentication presented as full coverage")
@@ -127,7 +130,8 @@ func TestControllerDuplicateUsernameMarksBothClientsIncomplete(t *testing.T) {
 func TestControllerDisabledAndStaleCountersAreNotZero(t *testing.T) {
 	c, _, now := localController(t)
 	*now = now.Add(15 * time.Second)
-	_, rows := c.Status([]uint{1})
+	status := c.Status([]uint{1})
+	rows := status.Clients
 	if rows[0].Available || rows[0].ActiveCount != nil {
 		t.Fatal("old count presented as fresh")
 	}
@@ -137,8 +141,9 @@ func TestControllerDisabledAndStaleCountersAreNotZero(t *testing.T) {
 		t.Fatal(err)
 	}
 	c.tick(context.Background())
-	enabled, rows := c.Status([]uint{1})
-	if enabled || rows[0].ActiveCount != nil {
+	status = c.Status([]uint{1})
+	rows = status.Clients
+	if status.Enabled || rows[0].ActiveCount != nil {
 		t.Fatal("disabled module still advertised current observations")
 	}
 }
