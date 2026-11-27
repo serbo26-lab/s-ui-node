@@ -37,7 +37,6 @@ type Event struct {
 	ClientID  uint   `json:"client_id,omitempty" gorm:"index"`
 	CreatedAt int64  `json:"client_created_at,omitempty" gorm:"autoCreateTime:false"`
 	Code      string `json:"code" gorm:"not null"`
-	Address   string `json:"address,omitempty"`
 	Denied    uint32 `json:"denied"`
 }
 
