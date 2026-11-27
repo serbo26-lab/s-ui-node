@@ -1,6 +1,7 @@
 package core
 
 import (
+	"github.com/alireza0/s-ui/core/connectionpolicy"
 	suiAnytls "github.com/alireza0/s-ui/core/protocol/anytls"
 	suiHysteria "github.com/alireza0/s-ui/core/protocol/hysteria"
 	suiHysteria2 "github.com/alireza0/s-ui/core/protocol/hysteria2"
@@ -32,8 +33,6 @@ import (
 	"github.com/sagernet/sing-box/protocol/http"
 	"github.com/sagernet/sing-box/protocol/hysteria"
 	"github.com/sagernet/sing-box/protocol/hysteria2"
-	"github.com/sagernet/sing-box/protocol/mixed"
-	"github.com/sagernet/sing-box/protocol/naive"
 	_ "github.com/sagernet/sing-box/protocol/naive/quic"
 	"github.com/sagernet/sing-box/protocol/redirect"
 	"github.com/sagernet/sing-box/protocol/shadowsocks"
@@ -66,14 +65,12 @@ func InboundRegistry() *inbound.Registry {
 	direct.RegisterInbound(registry)
 
 	socks.RegisterInbound(registry)
-	http.RegisterInbound(registry)
-	mixed.RegisterInbound(registry)
+	connectionpolicy.RegisterHTTPInbounds(registry)
 
 	suiShadowsocks.RegisterInbound(registry)
 	suiSnell.RegisterInbound(registry)
 	suiVmess.RegisterInbound(registry)
 	suiTrojan.RegisterInbound(registry)
-	naive.RegisterInbound(registry)
 	shadowtls.RegisterInbound(registry)
 	suiVless.RegisterInbound(registry)
 	suiAnytls.RegisterInbound(registry)
