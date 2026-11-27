@@ -27,7 +27,7 @@ type entry struct {
 	activity atomic.Int64
 	attempt  atomic.Int64
 	refs     int
-	reserved atomic.Pointer[decisionTable]
+	reserved atomic.Uint64
 }
 
 type bindings struct {
@@ -54,6 +54,7 @@ type Runtime struct {
 	reservations map[entryKey]int64
 	sequence     uint64
 	revision     uint64
+	generation   uint64
 	scope        string
 	challenge    string
 	deadline     int64

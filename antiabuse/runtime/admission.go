@@ -26,8 +26,9 @@ type rule struct {
 }
 
 type decisionTable struct {
-	expires int64
-	rules   map[string]rule
+	expires    int64
+	generation uint64
+	rules      map[string]rule
 }
 
 type Decision struct {
@@ -61,6 +62,8 @@ func (r *Runtime) Apply(decision Decision) error {
 		table.rules[item.Client] = value
 	}
 	r.revision, r.challenge, r.scope = decision.Revision, "", decision.Scope
+	r.generation++
+	table.generation = r.generation
 	r.reservations = map[entryKey]int64{}
 	r.table.Store(table)
 	return nil
@@ -112,13 +115,13 @@ func (r *Runtime) permits(entry *entry, now int64) bool {
 			return false
 		}
 		// Reservations outlive their decision table: Freshness < Activity.
-		if entry.reserved.Load() == table {
+		if entry.reserved.Load() == table.generation {
 			return true
 		}
 		permitted, retry := r.reserve(table, value, key, now)
 		if !retry {
 			if permitted {
-				entry.reserved.Store(table)
+				entry.reserved.Store(table.generation)
 			}
 			return permitted
 		}
