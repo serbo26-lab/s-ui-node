@@ -125,6 +125,7 @@ func TestTCPHalfCloseKeepsTheOppositeDirectionGuarded(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	_ = server.SetDeadline(time.Now().Add(2 * time.Second))
 	conn, err := r.Connection(context.Background(), server, adapter.InboundContext{Inbound: "in", User: "user", Source: M.SocksaddrFrom(sourceA, 1)})
 	if err != nil {
 		_ = server.Close()
@@ -172,6 +173,55 @@ func TestGuardDoesNotAdvertiseUnsupportedHalfClose(t *testing.T) {
 	t.Cleanup(func() { _ = conn.Close() })
 	if _, ok := conn.(N.WriteCloser); ok {
 		t.Fatal("guard added a half-close capability missing from its transport")
+	}
+}
+
+type halfCloseRecorder struct {
+	net.Conn
+	closed bool
+	writes int
+}
+
+func (c *halfCloseRecorder) CloseWrite() error { c.closed = true; return nil }
+func (c *halfCloseRecorder) Write(data []byte) (int, error) {
+	c.writes += len(data)
+	return len(data), nil
+}
+
+type handshakeWriter struct {
+	net.Conn
+	ready bool
+}
+
+func (c *handshakeWriter) WriterReplaceable() bool { return c.ready }
+func (c *handshakeWriter) Upstream() any           { return c.Conn }
+
+func TestHandshakeHalfCloseAppearsWithoutExposingUnguardedWrites(t *testing.T) {
+	r, _ := newRuntime(t)
+	left, right := net.Pipe()
+	t.Cleanup(func() { _ = right.Close() })
+	raw := &halfCloseRecorder{Conn: left}
+	protocol := &handshakeWriter{Conn: raw}
+	conn, err := r.Connection(context.Background(), protocol, adapter.InboundContext{Inbound: "in", User: "user", Source: M.SocksaddrFrom(sourceA, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	if _, ok := N.UnwrapWriter(conn).(N.WriteCloser); ok {
+		t.Fatal("half-close was exposed before the protocol handshake")
+	}
+	protocol.ready = true
+	writer := N.UnwrapWriter(conn)
+	half, ok := writer.(N.WriteCloser)
+	if !ok {
+		t.Fatal("completed handshake did not expose native half-close")
+	}
+	if err := half.CloseWrite(); err != nil || !raw.closed {
+		t.Fatal("native half-close was not delegated", err)
+	}
+	decision(t, r, 1, nil, []netip.Prefix{prefix(sourceA)})
+	if n, err := writer.Write([]byte{42}); n != 0 || !errors.Is(err, ErrDenied) || raw.writes != 0 {
+		t.Fatal("unwrapped writer bypassed IP admission", n, err)
 	}
 }
 

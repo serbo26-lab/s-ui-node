@@ -32,8 +32,7 @@ func (r *Runtime) Connection(ctx context.Context, conn net.Conn, metadata adapte
 		return nil, err
 	}
 	wrapped := &stream{ExtendedConn: bufio.NewExtendedConn(conn), flow: flow}
-	writer, _ := N.UnwrapCountWriter(conn, nil)
-	if closer, ok := N.UnwrapWriter(writer).(N.WriteCloser); ok {
+	if closer := wrapped.nativeHalfWriter(); closer != nil {
 		return &halfCloseStream{stream: wrapped, closer: closer}, nil
 	}
 	return wrapped, nil
@@ -58,14 +57,6 @@ type stream struct {
 	closed    atomic.Bool
 	closeErr  error
 }
-
-// Preserve the native half-close capability without exposing unguarded I/O.
-type halfCloseStream struct {
-	*stream
-	closer N.WriteCloser
-}
-
-func (c *halfCloseStream) CloseWrite() error { return c.closer.CloseWrite() }
 
 func (c *stream) Close() error {
 	c.closeOnce.Do(func() {
