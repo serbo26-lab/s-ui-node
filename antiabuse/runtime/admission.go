@@ -216,6 +216,7 @@ func (f *Flow) resolve() *entry {
 	} else {
 		f.runtime.mu.Lock()
 		f.runtime.unsupported[*client]++
+		f.runtime.unobserved[*client] = f.runtime.stamp()
 		f.runtime.mu.Unlock()
 	}
 	f.current.Store(next)

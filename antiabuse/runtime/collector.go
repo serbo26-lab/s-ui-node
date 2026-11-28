@@ -48,7 +48,9 @@ type Runtime struct {
 
 	mu           sync.Mutex
 	entries      map[entryKey]*entry
+	entryCounts  map[string]int
 	unsupported  map[string]int
+	unobserved   map[string]int64
 	bound        map[Identity]map[string]int
 	incomplete   map[string]bool
 	reservations map[entryKey]int64
@@ -68,7 +70,7 @@ func New(profile engine.Profile, now func() time.Time) (*Runtime, error) {
 		now = time.Now
 	}
 	r := &Runtime{profile: profile, now: now, origin: now(), boot: rand.Text(),
-		entries: map[entryKey]*entry{}, unsupported: map[string]int{}, bound: map[Identity]map[string]int{}, reservations: map[entryKey]int64{}}
+		entries: map[entryKey]*entry{}, entryCounts: map[string]int{}, unsupported: map[string]int{}, unobserved: map[string]int64{}, bound: map[Identity]map[string]int{}, reservations: map[entryKey]int64{}}
 	r.users.Store(&bindings{users: map[Identity]string{}})
 	return r, nil
 }
@@ -160,6 +162,13 @@ func (r *Runtime) Report(source string) Report {
 			report.Snapshot.IncompleteClients = append(report.Snapshot.IncompleteClients, client)
 		}
 	}
+	for client, stamp := range r.unobserved {
+		if _, recent := r.age(now, stamp); recent {
+			report.Snapshot.IncompleteClients = append(report.Snapshot.IncompleteClients, client)
+		} else {
+			delete(r.unobserved, client)
+		}
+	}
 	for client := range r.incomplete {
 		report.Snapshot.IncompleteClients = append(report.Snapshot.IncompleteClients, client)
 	}
@@ -179,6 +188,10 @@ func (r *Runtime) observations(now int64) []engine.Observation {
 		if !hasActivity && !hasAttempt {
 			if value.refs == 0 {
 				delete(r.entries, key)
+				r.entryCounts[key.client]--
+				if r.entryCounts[key.client] == 0 {
+					delete(r.entryCounts, key.client)
+				}
 			}
 			continue
 		}
@@ -214,12 +227,15 @@ func (r *Runtime) acquire(key entryKey) *entry {
 		value.refs++
 		return value
 	}
-	if len(r.entries) >= r.profile.MaxEntries {
+	// One client cannot monopolize the source's observation budget.
+	if len(r.entries) >= r.profile.MaxEntries || r.entryCounts[key.client] >= max(1, r.profile.MaxEntries/4) {
 		r.unsupported[key.client]++
+		r.unobserved[key.client] = r.stamp()
 		return nil
 	}
 	value := &entry{key: key, refs: 1}
 	r.entries[key] = value
+	r.entryCounts[key.client]++
 	return value
 }
 

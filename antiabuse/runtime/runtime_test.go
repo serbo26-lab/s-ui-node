@@ -289,6 +289,54 @@ func TestInvalidSourceMarksOnlyAffectedClientIncomplete(t *testing.T) {
 	}
 }
 
+func TestOneClientCannotExhaustAnotherClientsObservationBudget(t *testing.T) {
+	c := &clock{}
+	profile := engine.DefaultProfile()
+	profile.MaxEntries = 4
+	r, err := New(profile, c.now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.SetUsers(map[Identity]string{{Inbound: "in", User: "a"}: "a", {Inbound: "in", User: "b"}: "b"})
+	r.SetEnabled(true)
+	open := func(user string, address netip.Addr) *Flow {
+		flow, err := r.Open(Identity{Inbound: "in", User: user}, func() netip.Addr { return address })
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(flow.Close)
+		flow.Activity(1)
+		return flow
+	}
+	open("a", sourceA)
+	overflow := open("a", sourceB)
+	overflow.Close()
+	other := open("b", netip.MustParseAddr("192.0.2.3"))
+	report := r.Report("local").Snapshot
+	if len(report.Entries) != 2 || len(report.IncompleteClients) != 1 || report.IncompleteClients[0] != "a" {
+		t.Fatal("one client's overflow affected unrelated coverage or disappeared after close", report)
+	}
+	c.advance(61 * time.Second)
+	other.Activity(1)
+	if report := r.Report("local").Snapshot; len(report.IncompleteClients) != 0 || len(report.Entries) != 1 || report.Entries[0].Client != "b" {
+		t.Fatal("expired overflow evidence did not recover", report)
+	}
+}
+
+func TestClosedUnverifiedSourceRetainsItsIncompleteWindow(t *testing.T) {
+	r, c := newRuntime(t)
+	flow := openFlow(t, r, netip.Addr{})
+	flow.Activity(1)
+	flow.Close()
+	if report := r.Report("local").Snapshot; len(report.IncompleteClients) != 1 || report.IncompleteClients[0] != "client" {
+		t.Fatal("closing a short unverified flow made the snapshot falsely complete", report)
+	}
+	c.advance(61 * time.Second)
+	if report := r.Report("local").Snapshot; len(report.IncompleteClients) != 0 {
+		t.Fatal("expired unverified-source evidence persisted", report)
+	}
+}
+
 func TestSharedIPConcurrentFlowsAndImmutableBindings(t *testing.T) {
 	r, _ := newRuntime(t)
 	users := map[Identity]string{{Inbound: "in", User: "user"}: "client"}

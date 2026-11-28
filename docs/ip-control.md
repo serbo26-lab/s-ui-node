@@ -33,6 +33,12 @@ client. Nodes do not make independent decisions while the panel is unavailable;
 previous decisions expire within 15 seconds. Enable, traffic quota and expiry
 continue to apply independently.
 
+Observation storage is bounded per source and per client. One client can use
+at most a quarter of a source's entry budget. Overflow or an unverified source
+makes that client's coverage incomplete for the activity window, including
+short connections that close before the next report. It does not discard
+unrelated clients' observations.
+
 The node's ordinary status advertises `ip_control_version`. An unsupported or
 unreachable node produces incomplete coverage for its assigned clients.
 
