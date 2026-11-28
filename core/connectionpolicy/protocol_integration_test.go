@@ -414,22 +414,25 @@ func nativeProxyOptions(t *testing.T, name string) (map[string]any, map[string]a
 		server["tls"], client["tls"] = testTLS(t)
 	}
 	if strings.HasPrefix(name, "vless-") {
-		mode := strings.TrimPrefix(name, "vless-")
-		if mode == "mux" {
-			server["multiplex"] = map[string]any{"enabled": true}
-			client["multiplex"] = map[string]any{"enabled": true, "protocol": "h2mux"}
-		} else {
-			transport := map[string]any{"type": mode}
-			if mode == "ws-early" {
-				transport["type"], transport["max_early_data"], transport["early_data_header_name"] = "ws", 1024, "Sec-WebSocket-Protocol"
-			}
-			if mode == "grpc" {
-				transport["service_name"] = "test"
-			}
-			server["transport"], client["transport"] = transport, transport
-		}
+		configureVLESSTransportTest(server, client, strings.TrimPrefix(name, "vless-"))
 	}
 	return server, client
+}
+
+func configureVLESSTransportTest(server, client map[string]any, mode string) {
+	if mode == "mux" {
+		server["multiplex"] = map[string]any{"enabled": true}
+		client["multiplex"] = map[string]any{"enabled": true, "protocol": "h2mux"}
+		return
+	}
+	transport := map[string]any{"type": mode}
+	switch mode {
+	case "ws-early":
+		transport["type"], transport["max_early_data"], transport["early_data_header_name"] = "ws", 1024, "Sec-WebSocket-Protocol"
+	case "grpc":
+		transport["service_name"] = "test"
+	}
+	server["transport"], client["transport"] = transport, transport
 }
 
 func TestNaiveSharedCarrierKeepsIndependentClients(t *testing.T) {
