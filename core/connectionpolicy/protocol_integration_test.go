@@ -32,6 +32,7 @@ import (
 	"github.com/sagernet/quic-go"
 	"github.com/sagernet/quic-go/http3"
 	M "github.com/sagernet/sing/common/metadata"
+	"golang.org/x/net/http2"
 )
 
 func TestNaiveHTTP3TracksLiveQUICRebinding(t *testing.T) {
@@ -195,7 +196,7 @@ func runCore(t *testing.T, instance *core.Core, inbounds, outbounds []any) {
 
 func TestNativeProxyProtocolsObserveAndRecheckUsefulStreams(t *testing.T) {
 	for _, name := range []string{"vless", "vmess", "trojan", "anytls", "hysteria", "hysteria2", "tuic",
-		"shadowsocks", "shadowsocks-2022", "snell", "vless-ws", "vless-httpupgrade", "vless-http", "vless-grpc", "vless-quic", "vless-mux"} {
+		"shadowsocks", "shadowsocks-2022", "snell", "vless-ws", "vless-ws-early", "vless-httpupgrade", "vless-http", "vless-grpc", "vless-quic", "vless-mux"} {
 		t.Run(name, func(t *testing.T) { testNativeProxy(t, name) })
 	}
 }
@@ -419,6 +420,9 @@ func nativeProxyOptions(t *testing.T, name string) (map[string]any, map[string]a
 			client["multiplex"] = map[string]any{"enabled": true, "protocol": "h2mux"}
 		} else {
 			transport := map[string]any{"type": mode}
+			if mode == "ws-early" {
+				transport["type"], transport["max_early_data"], transport["early_data_header_name"] = "ws", 1024, "Sec-WebSocket-Protocol"
+			}
 			if mode == "grpc" {
 				transport["service_name"] = "test"
 			}
@@ -426,6 +430,131 @@ func nativeProxyOptions(t *testing.T, name string) (map[string]any, map[string]a
 		}
 	}
 	return server, client
+}
+
+func TestNaiveSharedCarrierKeepsIndependentClients(t *testing.T) {
+	for _, mode := range []string{"http2", "http3"} {
+		t.Run(mode, func(t *testing.T) { testNaiveSharedCarrier(t, mode) })
+	}
+}
+
+func testNaiveSharedCarrier(t *testing.T, mode string) {
+	t.Helper()
+	var elapsed atomic.Int64
+	runtime, err := ipruntime.New(engine.DefaultProfile(), func() time.Time { return time.Unix(0, elapsed.Load()) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime.SetUsers(map[ipruntime.Identity]string{
+		{Inbound: "access", User: "a"}: "client-a", {Inbound: "access", User: "b"}: "client-b",
+	})
+	runtime.SetEnabled(true)
+	port := unusedPort(t)
+	options := map[string]any{"type": "naive", "tag": "access", "listen": "127.0.0.1", "listen_port": port,
+		"users": []any{map[string]any{"username": "a", "password": "test-only"}, map[string]any{"username": "b", "password": "test-only"}}}
+	var dials atomic.Int32
+	var transport http.RoundTripper
+	address := "http://127.0.0.1:" + strconv.Itoa(int(port))
+	if mode == "http2" {
+		h2 := &http2.Transport{AllowHTTP: true, DialTLSContext: func(ctx context.Context, _, address string, _ *tls.Config) (net.Conn, error) {
+			dials.Add(1)
+			return (&net.Dialer{Timeout: time.Second}).DialContext(ctx, "tcp", address)
+		}}
+		t.Cleanup(h2.CloseIdleConnections)
+		transport = h2
+	} else {
+		options["network"] = "udp"
+		serverTLS, _ := testTLS(t)
+		options["tls"] = serverTLS
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM([]byte(serverTLS["certificate"].(string))) {
+			t.Fatal("invalid test certificate")
+		}
+		h3 := &http3.Transport{TLSClientConfig: &tls.Config{RootCAs: pool, ServerName: "test.example", MinVersion: tls.VersionTLS13},
+			Dial: func(ctx context.Context, address string, config *tls.Config, quicConfig *quic.Config) (*quic.Conn, error) {
+				dials.Add(1)
+				return quic.DialAddrEarly(ctx, address, config, quicConfig)
+			}}
+		t.Cleanup(func() { _ = h3.Close() })
+		transport, address = h3, "https://127.0.0.1:"+strconv.Itoa(int(port))
+	}
+	server := core.NewCoreWithContext(connectionpolicy.WithGuard(context.Background(), runtime))
+	runCore(t, server, []any{options}, []any{map[string]any{"type": "direct", "tag": "direct"}})
+	echo, accepted := echoServer(t)
+	client := &http.Client{Transport: transport}
+	open := func(user string) (*io.PipeWriter, io.ReadCloser, context.CancelFunc) {
+		reader, writer := io.Pipe()
+		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		t.Cleanup(func() { cancel(); _ = reader.Close(); _ = writer.Close() })
+		request, err := http.NewRequestWithContext(ctx, http.MethodConnect, address, reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		request.Header.Set("-connect-authority", echo)
+		request.Header.Set("Padding", "test")
+		request.Header.Set("Proxy-Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(user+":test-only")))
+		response, err := client.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = response.Body.Close() })
+		if response.StatusCode != http.StatusOK {
+			t.Fatal("CONNECT failed", response.StatusCode)
+		}
+		return writer, response.Body, cancel
+	}
+	first, firstReply, cancelFirst := open("a")
+	second, secondReply, _ := open("b")
+	naiveExchange(t, first, firstReply)
+	naiveExchange(t, second, secondReply)
+	report := runtime.Report("local")
+	seen := map[string]bool{}
+	for _, item := range report.Snapshot.Entries {
+		if item.Address != netip.MustParseAddr("127.0.0.1") || item.ActivityAge == nil {
+			t.Fatal("unverified carrier source", item)
+		}
+		seen[item.Client] = true
+	}
+	if len(seen) != 2 || !seen["client-a"] || !seen["client-b"] || dials.Load() != 1 {
+		t.Fatal("carrier merged client identities or opened another connection", seen, dials.Load())
+	}
+	elapsed.Store(int64(61 * time.Second))
+	report = runtime.Report("local")
+	if err := runtime.Apply(ipruntime.Decision{Scope: "controller", Challenge: report.Challenge, Revision: 1,
+		Rules: []ipruntime.Rule{{Client: "client-a", Limit: 1, Complete: true, Denied: []netip.Prefix{netip.MustParsePrefix("127.0.0.1/32")}}}}); err != nil {
+		t.Fatal(err)
+	}
+	naiveRefusal(t, first, firstReply, cancelFirst)
+	naiveExchange(t, second, secondReply)
+	third, thirdReply, cancelThird := open("a")
+	naiveRefusal(t, third, thirdReply, cancelThird)
+	if accepted.Load() != 2 {
+		t.Fatal("denied logical stream reached the destination")
+	}
+	fourth, fourthReply, _ := open("b")
+	naiveExchange(t, fourth, fourthReply)
+	if dials.Load() != 1 {
+		t.Fatal("one client's refusal closed the shared carrier")
+	}
+}
+
+func naiveExchange(t *testing.T, writer io.Writer, reader io.Reader) {
+	t.Helper()
+	if _, err := writer.Write([]byte{0, 1, 0, 42}); err != nil {
+		t.Fatal(err)
+	}
+	assertPaddingEcho(t, reader)
+}
+
+func naiveRefusal(t *testing.T, writer io.Writer, reader io.Reader, cancel context.CancelFunc) {
+	t.Helper()
+	stop := time.AfterFunc(2*time.Second, cancel)
+	defer stop.Stop()
+	_, _ = writer.Write([]byte{0, 1, 0, 42})
+	var reply [1]byte
+	if _, err := io.ReadFull(reader, reply[:]); err == nil {
+		t.Fatal("denied client kept forwarding on the shared carrier")
+	}
 }
 
 func configureShadowsocksTest(server, client, user map[string]any, name string) {
