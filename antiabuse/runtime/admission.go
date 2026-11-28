@@ -114,18 +114,23 @@ func (r *Runtime) permits(entry *entry, now int64) bool {
 		if value.denied[key.address] {
 			return false
 		}
-		// Reservations outlive their decision table: Freshness < Activity.
-		if entry.reserved.Load() == table.generation {
-			return true
-		}
-		permitted, retry := r.reserve(table, value, key, now)
+		permitted, retry := r.reserveEntry(table, value, entry, now)
 		if !retry {
-			if permitted {
-				entry.reserved.Store(table.generation)
-			}
 			return permitted
 		}
 	}
+}
+
+func (r *Runtime) reserveEntry(table *decisionTable, value rule, entry *entry, now int64) (bool, bool) {
+	// Reservations outlive their decision table: Freshness < Activity.
+	if entry.reserved.Load() == table.generation {
+		return true, false
+	}
+	permitted, retry := r.reserve(table, value, entry.key, now)
+	if permitted && !retry {
+		entry.reserved.Store(table.generation)
+	}
+	return permitted, retry
 }
 
 func (r *Runtime) reserve(table *decisionTable, value rule, key entryKey, now int64) (bool, bool) {
