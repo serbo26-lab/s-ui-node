@@ -450,7 +450,7 @@ func testNaiveSharedCarrier(t *testing.T, mode string) {
 	})
 	runtime.SetEnabled(true)
 	port := unusedPort(t)
-	options := map[string]any{"type": "naive", "tag": "access", "listen": "127.0.0.1", "listen_port": port,
+	options := map[string]any{"type": "naive", "tag": "access", "listen": "127.0.0.1", "listen_port": port, "network": "tcp",
 		"users": []any{map[string]any{"username": "a", "password": "test-only"}, map[string]any{"username": "b", "password": "test-only"}}}
 	var dials atomic.Int32
 	var transport http.RoundTripper
