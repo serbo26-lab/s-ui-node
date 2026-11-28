@@ -28,6 +28,7 @@ func (a *APIHandler) initRouter(g *gin.RouterGroup) {
 		}
 	})
 	a.ApiService.registerNodeRoutes(g, GetLoginUser)
+	registerIPControlRoutes(g)
 	g.POST("/:postAction", a.postHandler)
 	g.GET("/:getAction", a.getHandler)
 }

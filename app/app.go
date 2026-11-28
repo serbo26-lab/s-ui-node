@@ -26,6 +26,7 @@ type APP struct {
 	logger        *logging.Logger
 	core          *core.Core
 	nodeCancel    context.CancelFunc
+	ipControl     *ipControlState
 }
 
 func NewApp() *APP {
@@ -45,7 +46,9 @@ func (a *APP) Init() error {
 	// Init Setting
 	a.SettingService.GetAllSetting()
 
-	a.core = core.NewCore()
+	if err := a.initIPControl(); err != nil {
+		return err
+	}
 
 	a.cronJob = cronjob.NewCronJob()
 	a.webServer = web.NewServer()
@@ -99,10 +102,11 @@ func (a *APP) Start() error {
 	}
 
 	a.nodeCancel = nodes.Start(context.Background(), nodes.TrafficConfig{Enabled: trafficAge > 0, BucketSeconds: statsBucketSeconds})
-	return nil
+	return a.startIPControl()
 }
 
 func (a *APP) Stop() {
+	a.stopIPControl()
 	if a.nodeCancel != nil {
 		a.nodeCancel()
 		a.nodeCancel = nil

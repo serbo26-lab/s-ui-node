@@ -145,10 +145,17 @@ func TestSessionCloserClosesOneClient(t *testing.T) {
 
 	// The client is bound to an unspecified address; the server sees loopback.
 	source := M.SocksaddrFrom(M.ParseAddr("127.0.0.1"), M.SocksaddrFromNet(client.LocalAddr()).Port).String()
+	current := sessions.CurrentSource(source)
+	if !current().IsLoopback() || sessions.CurrentSource("127.0.0.1:1")().IsValid() {
+		t.Fatal("QUIC source provider did not bind the exact live session")
+	}
 	if err := sessions.Closer(source).Close(); err != nil {
 		t.Fatalf("closer for the client's address: %v", err)
 	}
 	if err := closedWithin(client, time.Second); !isRemoteClose(err) {
 		t.Fatalf("client got %v, want a remote application close at once", err)
+	}
+	if current().IsValid() {
+		t.Fatal("closed QUIC session retained a live source")
 	}
 }

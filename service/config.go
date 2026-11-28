@@ -6,11 +6,14 @@ import (
 	"sync"
 	"time"
 
+	ipcontrol "github.com/alireza0/s-ui/antiabuse/panel"
+
 	"github.com/alireza0/s-ui/core"
 	"github.com/alireza0/s-ui/database"
 	"github.com/alireza0/s-ui/database/model"
 	"github.com/alireza0/s-ui/logger"
 	"github.com/alireza0/s-ui/util/common"
+	"gorm.io/gorm"
 )
 
 var (
@@ -371,48 +374,18 @@ func (s *ConfigService) CheckOutbound(tag string, link string) core.CheckOutboun
 	return corePtr.CheckOutbound(tag, link)
 }
 
-func (s *ConfigService) Save(obj string, act string, data json.RawMessage, initUsers string, loginUser string, hostname string) ([]string, error) {
-	var err error
-	var objs []string = []string{obj}
+func (s *ConfigService) Save(obj, act string, data json.RawMessage, initUsers, loginUser, hostname string) (objs []string, err error) {
+	objs = []string{obj}
 	// Set when the config object changed. The restart waits for the commit, or
 	// a later rollback leaves the core running a config that was never saved.
 	var restartWith json.RawMessage
 
 	db := database.GetDB()
 	tx := db.Begin()
-	defer func() {
-		// A panic leaves err nil, which would otherwise commit a half-applied
-		// transaction while gin tells the operator the save failed.
-		if r := recover(); r != nil {
-			tx.Rollback()
-			panic(r)
-		}
-		if err != nil {
-			tx.Rollback()
-			return
-		}
-		if cErr := tx.Commit().Error; cErr != nil {
-			logger.Error("failed to commit config save: ", cErr)
-			return
-		}
-		if restartWith != nil {
-			// Detached: a restart takes seconds and this is an HTTP handler.
-			// The recover is required -- a panic here is outside gin's reach.
-			go func() {
-				defer func() {
-					if r := recover(); r != nil {
-						logger.Error("panic while restarting core with new config: ", r)
-					}
-				}()
-				_ = s.restartCoreWithConfig(restartWith)
-			}()
-			return
-		}
-		// Try to start core if it is not running
-		if !corePtr.IsRunning() {
-			s.StartCore()
-		}
-	}()
+	if tx.Error != nil {
+		return nil, tx.Error
+	}
+	defer s.finishSave(tx, &objs, &err, &restartWith)
 
 	switch obj {
 	case "clients":
@@ -518,4 +491,41 @@ func (s *ConfigService) GetChanges(actor string, chngKey string, count string) [
 		logger.Warning(err)
 	}
 	return chngs
+}
+
+func (s *ConfigService) finishSave(tx *gorm.DB, objects *[]string, saveError *error, restartWith *json.RawMessage) {
+	// A panic leaves err nil, which would otherwise commit a half-applied
+	// transaction while gin tells the operator the save failed.
+	if r := recover(); r != nil {
+		tx.Rollback()
+		panic(r)
+	}
+	if *saveError != nil {
+		tx.Rollback()
+		return
+	}
+	if cErr := tx.Commit().Error; cErr != nil {
+		*saveError = cErr
+		*objects = nil
+		logger.Error("failed to commit config save: ", cErr)
+		return
+	}
+	ipcontrol.Notify()
+	if *restartWith != nil {
+		// Detached: a restart takes seconds and this is an HTTP handler.
+		// The recover is required -- a panic here is outside gin's reach.
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					logger.Error("panic while restarting core with new config: ", r)
+				}
+			}()
+			_ = s.restartCoreWithConfig(*restartWith)
+		}()
+		return
+	}
+	// Try to start core if it is not running
+	if !corePtr.IsRunning() {
+		s.StartCore()
+	}
 }

@@ -26,6 +26,7 @@ import (
 	"crypto/tls"
 	"io"
 	"net"
+	"net/netip"
 	"sync"
 
 	"github.com/alireza0/s-ui/core/usersession"
@@ -201,6 +202,33 @@ type Sessions struct {
 
 func NewSessions() *Sessions {
 	return &Sessions{conns: make(map[*quic.Conn]struct{})}
+}
+
+// CurrentSource captures one transport session, not a reusable source string.
+// Its address follows validated QUIC migration for already routed streams.
+func (s *Sessions) CurrentSource(source string) func() netip.Addr {
+	if s == nil {
+		return func() netip.Addr { return netip.Addr{} }
+	}
+	s.mu.Lock()
+	var matched *quic.Conn
+	ambiguous := false
+	for conn := range s.conns {
+		if M.SocksaddrFromNet(conn.RemoteAddr()).Unwrap().String() == source {
+			if matched != nil {
+				ambiguous = true
+				break
+			}
+			matched = conn
+		}
+	}
+	s.mu.Unlock()
+	return func() netip.Addr {
+		if ambiguous || matched == nil || matched.Context().Err() != nil {
+			return netip.Addr{}
+		}
+		return M.SocksaddrFromNet(matched.RemoteAddr()).Addr
+	}
 }
 
 func (s *Sessions) add(conn *quic.Conn) {

@@ -1,6 +1,10 @@
 package model
 
-import "encoding/json"
+import (
+	"encoding/json"
+
+	ipmodel "github.com/alireza0/s-ui/antiabuse/model"
+)
 
 type Setting struct {
 	Id    uint   `json:"id" form:"id" gorm:"primaryKey;autoIncrement"`
@@ -23,8 +27,9 @@ type User struct {
 }
 
 type Client struct {
-	Id     uint `json:"id" form:"id" gorm:"primaryKey;autoIncrement"`
-	Enable bool `json:"enable" form:"enable"`
+	IPControl *ipmodel.ClientPolicy `json:"ip_control,omitempty" gorm:"-"`
+	Id        uint                  `json:"id" form:"id" gorm:"primaryKey;autoIncrement"`
+	Enable    bool                  `json:"enable" form:"enable"`
 	// Name is the join key on every hot path: the stats job and every
 	// subscription fetch resolve a client by it. Uniqueness stays in
 	// ClientService.validateClientName -- a unique index would need existing

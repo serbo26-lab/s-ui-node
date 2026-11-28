@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 
+	ipmodel "github.com/alireza0/s-ui/antiabuse/model"
+
 	"github.com/alireza0/s-ui/database/model"
 
 	"gorm.io/driver/sqlite"
@@ -20,6 +22,10 @@ func seedEveryTable(t *testing.T) {
 	t.Helper()
 
 	rows := []any{
+		&ipmodel.Settings{ID: 1, Revision: 1, ActivitySeconds: 60, TransitionSeconds: 120},
+		&ipmodel.GroupRule{Group: "group", Limit: 4},
+		&ipmodel.ClientRule{ClientID: 1, CreatedAt: 0, Limit: 5},
+		&ipmodel.Event{At: 1, Code: "configuration_changed"},
 		// The settings table used to be filled in by the per-migration flags
 		// the old InitDB wrote; migrations record the version instead, and
 		// that is what a live database carries here.

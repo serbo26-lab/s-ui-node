@@ -5,6 +5,7 @@ import (
 	"net"
 	"time"
 
+	"github.com/alireza0/s-ui/core/connectionpolicy"
 	"github.com/alireza0/s-ui/core/quicgrace"
 	"github.com/alireza0/s-ui/core/usersession"
 
@@ -114,6 +115,7 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 }
 
 func (h *Inbound) NewConnectionEx(ctx context.Context, conn net.Conn, source M.Socksaddr, destination M.Socksaddr, onClose N.CloseHandlerFunc) {
+	ctx = connectionpolicy.WithSource(ctx, h.quic.CurrentSource(source.String()))
 	if !h.sessions.Allowed(source.String()) {
 		usersession.Reject(conn, onClose)
 		return
@@ -141,6 +143,7 @@ func (h *Inbound) NewConnectionEx(ctx context.Context, conn net.Conn, source M.S
 }
 
 func (h *Inbound) NewPacketConnectionEx(ctx context.Context, conn N.PacketConn, source M.Socksaddr, destination M.Socksaddr, onClose N.CloseHandlerFunc) {
+	ctx = connectionpolicy.WithSource(ctx, h.quic.CurrentSource(source.String()))
 	if !h.sessions.Allowed(source.String()) {
 		usersession.Reject(conn, onClose)
 		return

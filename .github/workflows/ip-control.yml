@@ -1,0 +1,48 @@
+name: IP control checks
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - antiabuse/engine/**
+      - antiabuse/runtime/**
+      - core/connectionpolicy/**
+      - core/quicgrace/**
+      - .github/workflows/ip-control.yml
+
+permissions:
+  contents: read
+
+jobs:
+  native-checks:
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Compile native checks
+        run: |
+          mkdir -p checks
+          . ./build-tags.sh
+          tags=$(tags_for test)
+          flags=$(ldflags_for test)
+          go test -c -tags "$tags" -ldflags "$flags" -o checks/connectionpolicy.test ./core/connectionpolicy
+          go test -c -tags "$tags" -ldflags "$flags" -o checks/runtime.test ./antiabuse/runtime
+          go test -c -tags "$tags" -ldflags "$flags" -o checks/engine.test ./antiabuse/engine
+          printf '%s\n' "$GITHUB_SHA" > checks/commit.txt
+          sha256sum checks/*.test > checks/SHA256SUMS
+      - name: Check node build profile
+        run: |
+          . ./build-tags.sh
+          go test -tags "$(tags_for agent)" ./core/connectionpolicy
+      - name: Check 32-bit policy arithmetic
+        env:
+          GOARCH: "386"
+          CGO_ENABLED: "0"
+        run: go test ./antiabuse/engine
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ip-control-checks
+          path: checks/
+          retention-days: 7

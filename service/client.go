@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	ipcontrol "github.com/alireza0/s-ui/antiabuse/panel"
 	"github.com/alireza0/s-ui/database"
 	"github.com/alireza0/s-ui/database/model"
 	"github.com/alireza0/s-ui/logger"
@@ -35,6 +36,9 @@ func (s *ClientService) getById(id string) (*[]model.Client, error) {
 	if err := nodes.HydrateClientAssignments(db, client); err != nil {
 		return nil, err
 	}
+	if err := ipcontrol.HydrateClientPolicies(db, client); err != nil {
+		return nil, err
+	}
 
 	return &client, nil
 }
@@ -49,6 +53,9 @@ func (s *ClientService) GetAll() (*[]model.Client, error) {
 		return nil, err
 	}
 	if err := nodes.HydrateClientAssignments(db, clients); err != nil {
+		return nil, err
+	}
+	if err := ipcontrol.HydrateClientPolicies(db, clients); err != nil {
 		return nil, err
 	}
 	return &clients, nil
@@ -122,6 +129,9 @@ func (s *ClientService) Save(tx *gorm.DB, act string, data json.RawMessage, host
 		if err = nodes.SaveClientAssignments(tx, &client); err != nil {
 			return nil, err
 		}
+		if err = ipcontrol.SaveClientPolicy(tx, client.Id, client.CreatedAt, client.IPControl); err != nil {
+			return nil, err
+		}
 	case "addbulk":
 		var clients []*model.Client
 		err = json.Unmarshal(data, &clients)
@@ -163,6 +173,9 @@ func (s *ClientService) Save(tx *gorm.DB, act string, data json.RawMessage, host
 		}
 		for _, client := range clients {
 			if err = nodes.SaveClientAssignments(tx, client); err != nil {
+				return nil, err
+			}
+			if err = ipcontrol.SaveClientPolicy(tx, client.Id, client.CreatedAt, client.IPControl); err != nil {
 				return nil, err
 			}
 		}
@@ -215,6 +228,9 @@ func (s *ClientService) Save(tx *gorm.DB, act string, data json.RawMessage, host
 			if err = nodes.SaveClientAssignments(tx, client); err != nil {
 				return nil, err
 			}
+			if err = ipcontrol.SaveClientPolicy(tx, client.Id, client.CreatedAt, client.IPControl); err != nil {
+				return nil, err
+			}
 		}
 	case "delbulk":
 		var ids []uint
@@ -238,6 +254,9 @@ func (s *ClientService) Save(tx *gorm.DB, act string, data json.RawMessage, host
 		if err = nodes.DeleteClientAssignments(tx, ids); err != nil {
 			return nil, err
 		}
+		if err = ipcontrol.DeleteClientPolicies(tx, ids); err != nil {
+			return nil, err
+		}
 		err = tx.Where("id in ?", ids).Delete(model.Client{}).Error
 		if err != nil {
 			return nil, err
@@ -259,6 +278,9 @@ func (s *ClientService) Save(tx *gorm.DB, act string, data json.RawMessage, host
 			return nil, err
 		}
 		if err = nodes.DeleteClientAssignments(tx, []uint{id}); err != nil {
+			return nil, err
+		}
+		if err = ipcontrol.DeleteClientPolicies(tx, []uint{id}); err != nil {
 			return nil, err
 		}
 		err = tx.Where("id = ?", id).Delete(model.Client{}).Error

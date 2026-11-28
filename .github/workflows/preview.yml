@@ -1,0 +1,258 @@
+name: Preview
+
+on:
+  workflow_dispatch:
+  pull_request:
+    types: [labeled]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: preview-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: "26"
+  CRONET_GO_REPO: https://github.com/sagernet/cronet-go.git
+
+jobs:
+  build-frontend:
+    if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'preview'
+    outputs:
+      frontend_sha: ${{ steps.sources.outputs.frontend_sha }}
+    runs-on: ubuntu-26.04
+    steps:
+      - name: Checkout repository (frontend only)
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Verify source pair
+        id: sources
+        run: |
+          set -eu
+          actual=$(git -C frontend rev-parse HEAD)
+          expected=$(git ls-tree HEAD frontend | awk '{print $3}')
+          test "$actual" = "$expected"
+          echo "frontend_sha=$actual" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      # node_modules itself, so a lockfile that did not change skips npm ci.
+      # setup-node's cache above only keeps the tarballs npm ci unpacks.
+      - name: Restore node_modules
+        id: node-modules
+        uses: actions/cache/restore@v6
+        with:
+          path: frontend/node_modules
+          key: node-modules-${{ runner.os }}-node${{ env.NODE_VERSION }}-${{ hashFiles('frontend/package-lock.json') }}
+
+      - name: Install frontend dependencies
+        if: steps.node-modules.outputs.cache-hit != 'true'
+        run: npm ci --ignore-scripts
+        working-directory: frontend
+
+      - name: Save node_modules
+        if: github.ref == 'refs/heads/main' && steps.node-modules.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: frontend/node_modules
+          key: ${{ steps.node-modules.outputs.cache-primary-key }}
+
+      - name: Build frontend
+        run: npm run build
+        working-directory: frontend
+
+      - name: Upload frontend dist
+        uses: actions/upload-artifact@v7
+        with:
+          name: frontend-dist
+          path: frontend/dist/
+
+  build-linux:
+    name: build-${{ matrix.platform }}
+    needs: build-frontend
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { platform: amd64, arch: amd64, bootlin: x86-64 }
+    runs-on: ubuntu-26.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Download frontend dist
+        uses: actions/download-artifact@v8
+        with:
+          name: frontend-dist
+          path: web/html
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          cache: false
+          go-version-file: go.mod
+
+      - name: Locate Go caches
+        id: go-env
+        run: |
+          echo "modcache=$(go env GOMODCACHE)" >> "$GITHUB_OUTPUT"
+          echo "gocache=$(go env GOCACHE)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore Go module cache
+        id: go-mod-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ steps.go-env.outputs.modcache }}
+          key: go-mod-${{ runner.os }}-${{ hashFiles('go.sum') }}
+
+      # Per platform: every target compiles its own objects. Keyed on what
+      # decides the dependency objects, which are most of the build; a stale
+      # copy of s-ui's own packages costs only their recompile.
+      - name: Restore Go build cache
+        id: go-build-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ steps.go-env.outputs.gocache }}
+          key: go-build-${{ runner.os }}-${{ matrix.platform }}-${{ hashFiles('go.sum', 'build-tags.sh') }}
+          restore-keys: go-build-${{ runner.os }}-${{ matrix.platform }}-
+
+      - name: Resolve cronet-go commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          VERSION=$(go list -m -f '{{.Version}}' github.com/sagernet/cronet-go)
+          SHORT=${VERSION##*-}
+          # The module proxy records the full commit of a pseudo-version and
+          # has no rate limit; the unauthenticated GitHub API answered 403
+          # once the shared runner IPs used up their quota.
+          FULL=$(curl --proto '=https' --proto-redir '=https' -fsSL "https://proxy.golang.org/github.com/sagernet/cronet-go/@v/${VERSION}.info" | jq -r '.Origin.Hash // empty' || true)
+          if [ -z "$FULL" ]; then
+            FULL=$(curl --proto '=https' --proto-redir '=https' -fsSL -H "Authorization: Bearer ${GH_TOKEN}" \
+              "https://api.github.com/repos/SagerNet/cronet-go/commits/${SHORT}" | jq -r '.sha')
+          fi
+          [ -n "$FULL" ] && [ "$FULL" != "null" ] || { echo "could not resolve cronet-go commit ${SHORT}" >&2; exit 1; }
+          case "$FULL" in "$SHORT"*) ;; *) echo "cronet-go commit $FULL does not match ${SHORT}" >&2; exit 1 ;; esac
+          echo "cronet-go: $FULL"
+          echo "CRONET_COMMIT=$FULL" >> "$GITHUB_ENV"
+
+      # Naive platforms: use cronet toolchain only (no Bootlin).
+      - name: Clone cronet-go (cronet toolchain for naive)
+        run: |
+          set -e
+          git init ~/cronet-go
+          git -C ~/cronet-go remote add origin ${{ env.CRONET_GO_REPO }}
+          git -C ~/cronet-go fetch --depth=1 origin "${{ env.CRONET_COMMIT }}"
+          git -C ~/cronet-go checkout FETCH_HEAD
+          git -C ~/cronet-go submodule update --init --recursive --depth=1
+
+      - name: Regenerate Debian keyring (cronet sysroot)
+        run: |
+          set -e
+          rm -f ~/cronet-go/naiveproxy/src/build/linux/sysroot_scripts/keyring.gpg
+          cd ~/cronet-go
+          GPG_TTY=/dev/null ./naiveproxy/src/build/linux/sysroot_scripts/generate_keyring.sh
+
+      - name: Cache Chromium toolchain
+        id: cache-chromium-toolchain
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/cronet-go/naiveproxy/src/third_party/llvm-build/
+            ~/cronet-go/naiveproxy/src/gn/out/
+            ~/cronet-go/naiveproxy/src/chrome/build/pgo_profiles/
+            ~/cronet-go/naiveproxy/src/out/sysroot-build/
+          key: chromium-toolchain-${{ matrix.platform }}-musl-${{ env.CRONET_COMMIT }}
+
+      - name: Build cronet lib and set toolchain env (CC, CXX, CGO_LDFLAGS, PATH)
+        run: |
+          set -e
+          cd ~/cronet-go
+          go run ./cmd/build-naive --target=linux/${{ matrix.arch }} --libc=musl download-toolchain
+          go run ./cmd/build-naive --target=linux/${{ matrix.arch }} --libc=musl env | while IFS= read -r line; do
+            line="${line#export }"
+            [[ -z "$line" ]] && continue
+            echo "$line" >> $GITHUB_ENV
+          done
+
+      - name: Set Go build env (all platforms)
+        run: |
+          echo "CGO_ENABLED=1" >> $GITHUB_ENV
+          echo "GOOS=linux" >> $GITHUB_ENV
+          echo "GOARCH=${{ matrix.arch }}" >> $GITHUB_ENV
+
+      - name: Download Go modules (with retry)
+        run: |
+          set -e
+          export GODEBUG=http2client=0
+          for i in 1 2 3 4 5; do
+            if go mod download -x; then
+              echo "go mod download succeeded"
+              exit 0
+            fi
+            echo "go mod download failed (attempt $i), retrying in $((i * 10))s..."
+            sleep $((i * 10))
+          done
+          echo "go mod download failed after 5 attempts" >&2
+          exit 1
+
+      - name: Save Go module cache
+        if: matrix.platform == 'amd64' && steps.go-mod-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ steps.go-env.outputs.modcache }}
+          key: ${{ steps.go-mod-cache.outputs.cache-primary-key }}
+
+      - name: Build s-ui
+        run: |
+          set -e
+          . ./build-tags.sh
+          PROFILE=release
+          TAGS=$(tags_for "$PROFILE")
+          LDFLAGS=$(ldflags_for "$PROFILE")
+          go build -ldflags="$LDFLAGS -linkmode external -extldflags '-static'" -tags "$TAGS" -o sui main.go
+          file sui
+          ldd sui 2>/dev/null || echo "Static binary confirmed"
+
+          mkdir s-ui
+          cp sui s-ui/
+          cp s-ui.service s-ui/
+          cp s-ui.sh s-ui/
+          sh ./build-node-agents.sh s-ui/agents
+
+      # Only main saves: a tag's cache is scoped to that tag and no later run
+      # could read it.
+      - name: Save Go build cache
+        if: github.ref == 'refs/heads/main' && steps.go-build-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ steps.go-env.outputs.gocache }}
+          key: ${{ steps.go-build-cache.outputs.cache-primary-key }}
+
+      - name: Package
+        env:
+          FRONTEND_SHA: ${{ needs.build-frontend.outputs.frontend_sha }}
+        run: |
+          set -eu
+          printf 'backend=%s\nfrontend=%s\n' "$(git rev-parse HEAD)" "$FRONTEND_SHA" > s-ui/SOURCE.txt
+          (cd s-ui && sha256sum sui agents/s-ui-node-linux-*) > s-ui/SHA256SUMS
+          tar -zcf s-ui-linux-${{ matrix.platform }}.tar.gz s-ui
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: s-ui-linux-${{ matrix.platform }}
+          path: ./s-ui-linux-${{ matrix.platform }}.tar.gz
+          retention-days: 30

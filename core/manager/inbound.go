@@ -6,6 +6,8 @@ import (
 	"slices"
 	"sync"
 
+	"github.com/alireza0/s-ui/core/connectionpolicy"
+
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/log"
 	E "github.com/sagernet/sing/common/exceptions"
@@ -81,6 +83,7 @@ func (m *InboundManager) Remove(tag string) error {
 }
 
 func (m *InboundManager) Create(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, inboundType string, options any) error {
+	router = connectionpolicy.WrapRouter(ctx, router)
 	inbound, err := m.registry.Create(ctx, router, logger, tag, inboundType, options)
 	if err != nil {
 		return err
