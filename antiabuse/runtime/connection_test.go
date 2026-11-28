@@ -109,6 +109,72 @@ func TestStreamCloseSettlesCachedReadBeforeClosingProtocolState(t *testing.T) {
 	}
 }
 
+func TestTCPHalfCloseKeepsTheOppositeDirectionGuarded(t *testing.T) {
+	r, _ := newRuntime(t)
+	listener, err := net.ListenTCP("tcp", &net.TCPAddr{IP: net.ParseIP("127.0.0.1")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	client, err := net.DialTCP("tcp", nil, listener.Addr().(*net.TCPAddr))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = client.Close() })
+	server, err := listener.AcceptTCP()
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, err := r.Connection(context.Background(), server, adapter.InboundContext{Inbound: "in", User: "user", Source: M.SocksaddrFrom(sourceA, 1)})
+	if err != nil {
+		_ = server.Close()
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	half, ok := conn.(N.WriteCloser)
+	if !ok {
+		t.Fatal("native TCP half-close was hidden")
+	}
+	_ = client.SetDeadline(time.Now().Add(2 * time.Second))
+	if _, err := conn.Write([]byte("reply")); err != nil {
+		t.Fatal(err)
+	}
+	if err := half.CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	if data, err := io.ReadAll(client); err != nil || string(data) != "reply" {
+		t.Fatal("write EOF was not delivered", err)
+	}
+	if _, err := client.Write([]byte("request")); err != nil {
+		t.Fatal(err)
+	}
+	var data [7]byte
+	if _, err := io.ReadFull(conn, data[:]); err != nil || string(data[:]) != "request" {
+		t.Fatal("write half-close terminated the read direction", err)
+	}
+	decision(t, r, 1, nil, []netip.Prefix{prefix(sourceA)})
+	if _, err := client.Write([]byte{42}); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := conn.Read(data[:]); n != 0 || !errors.Is(err, ErrDenied) {
+		t.Fatal("half-closed stream bypassed a newer IP decision", n, err)
+	}
+}
+
+func TestGuardDoesNotAdvertiseUnsupportedHalfClose(t *testing.T) {
+	r, _ := newRuntime(t)
+	left, right := net.Pipe()
+	t.Cleanup(func() { _ = right.Close() })
+	conn, err := r.Connection(context.Background(), left, adapter.InboundContext{Inbound: "in", User: "user", Source: M.SocksaddrFrom(sourceA, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	if _, ok := conn.(N.WriteCloser); ok {
+		t.Fatal("guard added a half-close capability missing from its transport")
+	}
+}
+
 func TestCounterUnwrapCannotBypassExistingStreamGuard(t *testing.T) {
 	r, c := newRuntime(t)
 	left, right := net.Pipe()
